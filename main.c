@@ -26,9 +26,14 @@ typedef struct {
 
 typedef struct {
   usize num;
-  usize pos;
+  usize consumed;
   bool ok;
 } ParseUsize;
+
+typedef struct {
+  usize len;
+  u8 *data;
+} Slice_u8;
 
 typedef enum {
   BencodeKindInteger,
@@ -36,11 +41,6 @@ typedef enum {
   BencodeKindList,
   BencodeKindDict,
 } BencodeKind;
-
-typedef struct {
-  usize len;
-  u8 *data;
-} BencodeString;
 
 typedef struct BencodeValue BencodeValue;
 
@@ -54,7 +54,7 @@ struct BencodeValue {
   BencodeKind kind;
   union {
     isize num;
-    BencodeString s;
+    Slice_u8 s;
     BencodeList list;
   } v;
 };
@@ -71,9 +71,7 @@ typedef struct {
 } BencodeParseResult;
 
 typedef struct {
-  u8 *data;
-  usize len;
-  usize pos;
+  Slice_u8 data;
 } BencodeParser;
 
 typedef struct {
@@ -81,10 +79,10 @@ typedef struct {
   bool ok;
 } At_U8;
 
-bool char_is_digit_ascii(u8 c) { return '0' <= c && c <= '9'; }
+static bool char_is_digit_ascii(u8 c) { return '0' <= c && c <= '9'; }
 
-void *arena_alloc(Arena *arena, usize align, usize elem_size,
-                  usize elem_count) {
+static void *arena_alloc(Arena *arena, usize align, usize elem_size,
+                         usize elem_count) {
   assert(arena != NULL);
   assert(arena->start != NULL);
   assert(arena->end != NULL);
@@ -113,7 +111,7 @@ void *arena_alloc(Arena *arena, usize align, usize elem_size,
   return res;
 }
 
-Arena arena_from_mem(u8 *mem, usize bytes_count) {
+static Arena arena_from_mem(u8 *mem, usize bytes_count) {
   assert(mem);
   assert(bytes_count);
 
@@ -122,49 +120,56 @@ Arena arena_from_mem(u8 *mem, usize bytes_count) {
   return (Arena){.start = mem, .end = (u8 *)end};
 }
 
-u8 *unix_virtual_mem_alloc(usize bytes_count) {
+static u8 *unix_virtual_mem_alloc(usize bytes_count) {
   assert(bytes_count > 0);
   void *alloc = mmap(NULL, bytes_count, PROT_READ | PROT_WRITE,
                      MAP_ANON | MAP_PRIVATE, -1, 0);
   return alloc;
 }
 
-At_U8 slice_u8_at(u8 *data, usize len, usize idx) {
+static At_U8 slice_u8_first(Slice_u8 slice) {
   At_U8 res = {0};
 
-  if (!data) {
+  if (!slice.data) {
     return res;
   }
 
-  if (idx >= len) {
+  if (slice.len == 0) {
     return res;
   }
 
-  res.value = data[idx];
+  res.value = slice.data[0];
   res.ok = true;
   return res;
 }
 
-usize slice_remaining(usize len, usize idx) {
-  if (len == 0) {
-    return 0;
+static bool slice_u8_skip(Slice_u8 *slice, usize count) {
+  assert(slice);
+  if (!slice->data) {
+    return true;
   }
 
-  if (idx >= len) {
-    return 0;
+  if (slice->len < count) {
+    return false;
   }
 
-  return len - idx;
+  slice->len -= count;
+  slice->data += count;
+  return true;
 }
 
-u8 *slice_u8_offset(u8 *data, usize len, usize idx) {
-  assert(data);
-  assert(idx < len);
-
-  return data + idx;
+static Slice_u8 slice_u8_take(Slice_u8 input, usize count) {
+  Slice_u8 res = {.data = input.data,
+                  .len = count > input.len ? input.len : count};
+  return res;
 }
 
-bool bencode_list_push(BencodeList *list, BencodeValue item, Arena *arena) {
+static Slice_u8 slice_u8_make(u8 *data, usize len) {
+  return (Slice_u8){.data = data, .len = len};
+}
+
+static bool bencode_list_push(BencodeList *list, BencodeValue item,
+                              Arena *arena) {
   assert(list);
   assert(list->len <= list->cap);
   assert(arena);
@@ -188,18 +193,11 @@ bool bencode_list_push(BencodeList *list, BencodeValue item, Arena *arena) {
   return true;
 }
 
-At_U8 bencode_parser_at(BencodeParser parser) {
-  return slice_u8_at(parser.data, parser.len, parser.pos);
-}
-
-void bencode_parser_advance(BencodeParser *parser, usize count) {
-  assert(!__builtin_add_overflow(parser->pos, count, &parser->pos));
-}
-
-bool bencode_parse_consume(BencodeParser *parser, u8 expected) {
+static bool bencode_parse_consume(BencodeParser *parser, u8 expected) {
   assert(parser);
+  assert(parser->data.data);
 
-  At_U8 actual = bencode_parser_at(*parser);
+  At_U8 actual = slice_u8_first(parser->data);
 
   if (!actual.ok) {
     return false;
@@ -208,17 +206,21 @@ bool bencode_parse_consume(BencodeParser *parser, u8 expected) {
     return false;
   }
 
-  bencode_parser_advance(parser, 1);
+  assert(slice_u8_skip(&parser->data, 1));
   return true;
 }
 
-ParseUsize ascii_num_parse(u8 *data, usize len) {
-  const usize MAX_LEN = 30;
+static ParseUsize ascii_num_parse(Slice_u8 data) {
   ParseUsize res = {0};
+  if (!data.data) {
+    return res;
+  }
+
+  const usize MAX_LEN = 30;
   bool has_leading_zero = false;
 
-  for (; res.pos < MAX_LEN; res.pos++) {
-    const At_U8 current = slice_u8_at(data, len, res.pos);
+  for (; res.consumed < MAX_LEN; res.consumed++) {
+    const At_U8 current = slice_u8_first(data);
 
     // Unterminated.
     if (!current.ok) {
@@ -233,10 +235,10 @@ ParseUsize ascii_num_parse(u8 *data, usize len) {
       return res;
     }
 
-    has_leading_zero = current.value == '0' && res.pos == 0;
+    has_leading_zero = current.value == '0' && res.consumed == 0;
 
     // Leading zeroes forbidden except `i0e`.
-    if (res.pos > 0 && has_leading_zero) {
+    if (res.consumed > 0 && has_leading_zero) {
       return res;
     }
 
@@ -255,10 +257,9 @@ ParseUsize ascii_num_parse(u8 *data, usize len) {
 
 // `i123e`
 // `i-123e`
-BencodeParseResult bencode_parse_num(BencodeParser *parser) {
+static BencodeParseResult bencode_parse_num(BencodeParser *parser) {
   assert(parser);
-  assert(parser->data);
-  assert(parser->pos < parser->len);
+  assert(parser->data.data);
 
   BencodeParseResult res = {0};
   if (!bencode_parse_consume(parser, 'i')) {
@@ -268,15 +269,13 @@ BencodeParseResult bencode_parse_num(BencodeParser *parser) {
 
   bool negative_sign = bencode_parse_consume(parser, '-');
 
-  ParseUsize parsed_usize =
-      ascii_num_parse(slice_u8_offset(parser->data, parser->len, parser->pos),
-                      parser->len - parser->pos);
+  ParseUsize parsed_usize = ascii_num_parse(parser->data);
 
   if (!parsed_usize.ok) {
     return res;
   }
 
-  bencode_parser_advance(parser, parsed_usize.pos);
+  assert(slice_u8_skip(&parser->data, parsed_usize.consumed));
   res.bencode.v.num = parsed_usize.num;
   if (negative_sign) {
     if (parsed_usize.num > SSIZE_MAX) {
@@ -297,14 +296,13 @@ BencodeParseResult bencode_parse_num(BencodeParser *parser) {
 }
 
 // `4:spam`
-BencodeParseResult bencode_parse_string(BencodeParser *parser) {
+static BencodeParseResult bencode_parse_string(BencodeParser *parser) {
   assert(parser);
-  assert(parser->data);
-  assert(parser->pos < parser->len);
+  assert(parser->data.data);
 
   BencodeParseResult res = {0};
 
-  const At_U8 first = bencode_parser_at(*parser);
+  const At_U8 first = slice_u8_first(parser->data);
   if (!first.ok) {
     return res;
   }
@@ -315,36 +313,31 @@ BencodeParseResult bencode_parse_string(BencodeParser *parser) {
 
   res.bencode.kind = BencodeKindString;
 
-  ParseUsize parsed_usize = ascii_num_parse(parser->data, parser->len);
+  ParseUsize parsed_usize = ascii_num_parse(parser->data);
   if (!parsed_usize.ok) {
     return res;
   }
-  bencode_parser_advance(parser, parsed_usize.pos);
+  assert(slice_u8_skip(&parser->data, parsed_usize.consumed));
 
   if (!bencode_parse_consume(parser, ':')) {
     return res;
   };
 
-  res.bencode.v.s.data =
-      slice_u8_offset(parser->data, parser->len, parser->pos);
-
-  const usize remaining_bytes = slice_remaining(parser->len, parser->pos);
-  if (parsed_usize.num > remaining_bytes) {
+  if (parsed_usize.num > parser->data.len) {
     return res;
   }
 
-  res.bencode.v.s.len = parsed_usize.num;
+  res.bencode.v.s = slice_u8_take(parser->data, parsed_usize.num);
   res.ok = true;
   return res;
 }
 
-BencodeParseResult bencode_parse(BencodeParser *parser, Arena *arena);
+static BencodeParseResult bencode_parse(BencodeParser *parser, Arena *arena);
 
 // FIXME: rec.
-BencodeParseResult bencode_parse_list(BencodeParser *parser, Arena *arena) {
+static BencodeParseResult bencode_parse_list(BencodeParser *parser,
+                                             Arena *arena) {
   assert(parser);
-  assert(parser->data);
-  assert(parser->pos < parser->len);
 
   BencodeParseResult res = {0};
 
@@ -354,7 +347,7 @@ BencodeParseResult bencode_parse_list(BencodeParser *parser, Arena *arena) {
 
   res.bencode.kind = BencodeKindList;
 
-  const usize remaining_bytes = slice_remaining(parser->len, parser->pos);
+  const usize remaining_bytes = parser->data.len;
   for (usize _i = 0; _i < remaining_bytes; _i++) {
     BencodeParseResult item = bencode_parse(parser, arena);
     if (!item.ok) {
@@ -374,15 +367,15 @@ BencodeParseResult bencode_parse_list(BencodeParser *parser, Arena *arena) {
   return res;
 }
 
-BencodeParseResult bencode_parse(BencodeParser *parser, Arena *arena) {
+static BencodeParseResult bencode_parse(BencodeParser *parser, Arena *arena) {
   assert(parser);
-  assert(parser->data);
   assert(arena);
 
   BencodeParseResult res = {0};
 
-  for (usize _i = 0; _i < parser->len; _i++) {
-    const At_U8 current = bencode_parser_at(*parser);
+  const usize MAX = parser->data.len;
+  for (usize _i = 0; _i < MAX; _i++) {
+    const At_U8 current = slice_u8_first(parser->data);
     if (!current.ok) {
       return res;
     }
@@ -419,8 +412,7 @@ int main() {
     const char *const bencode_input = "i-123e";
 
     BencodeParser parser = {
-        .data = (u8 *)bencode_input,
-        .len = strlen(bencode_input),
+        .data = slice_u8_make((u8 *)bencode_input, strlen(bencode_input)),
     };
     BencodeParseResult parse_res = bencode_parse_num(&parser);
     __builtin_dump_struct(&parse_res, &printf);
@@ -432,9 +424,7 @@ int main() {
     const char *const bencode_input = "4:spam";
 
     BencodeParser parser = {
-        .data = (u8 *)bencode_input,
-        .len = strlen(bencode_input),
-        .pos = 0,
+        .data = slice_u8_make((u8 *)bencode_input, strlen(bencode_input)),
     };
     BencodeParseResult parse_res = bencode_parse_string(&parser);
     __builtin_dump_struct(&parse_res, &printf);
@@ -457,8 +447,7 @@ int main() {
     const char *const bencode_input = "l4:spami456ee";
 
     BencodeParser parser = {
-        .data = (u8 *)bencode_input,
-        .len = strlen(bencode_input),
+        .data = slice_u8_make((u8 *)bencode_input, strlen(bencode_input)),
     };
     BencodeParseResult parse_res = bencode_parse(&parser, &arena);
     __builtin_dump_struct(&parse_res, &printf);
