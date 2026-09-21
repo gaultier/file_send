@@ -249,6 +249,8 @@ static ParseUsize ascii_num_parse(Slice_u8 data) {
     if (__builtin_add_overflow(res.num, digit, &res.num)) {
       return res;
     }
+
+    assert(slice_u8_skip(&data, 1));
   }
 
   // Actually unreachable.
@@ -328,6 +330,7 @@ static BencodeParseResult bencode_parse_string(BencodeParser *parser) {
   }
 
   res.bencode.v.s = slice_u8_take(parser->data, parsed_usize.num);
+  assert(slice_u8_skip(&parser->data, parsed_usize.num));
   res.ok = true;
   return res;
 }
@@ -349,6 +352,11 @@ static BencodeParseResult bencode_parse_list(BencodeParser *parser,
 
   const usize remaining_bytes = parser->data.len;
   for (usize _i = 0; _i < remaining_bytes; _i++) {
+    if (bencode_parse_consume(parser, 'e')) {
+      res.ok = true;
+      return res;
+    }
+
     BencodeParseResult item = bencode_parse(parser, arena);
     if (!item.ok) {
       return res;
@@ -359,11 +367,6 @@ static BencodeParseResult bencode_parse_list(BencodeParser *parser,
     }
   }
 
-  if (!bencode_parse_consume(parser, 'e')) {
-    return res;
-  }
-
-  res.ok = true;
   return res;
 }
 
@@ -397,7 +400,7 @@ static BencodeParseResult bencode_parse(BencodeParser *parser, Arena *arena) {
     case '7':
     case '8':
     case '9':
-      return bencode_parse_num(parser);
+      return bencode_parse_string(parser);
     default:
       return res;
     }
@@ -450,7 +453,6 @@ int main() {
         .data = slice_u8_make((u8 *)bencode_input, strlen(bencode_input)),
     };
     BencodeParseResult parse_res = bencode_parse(&parser, &arena);
-    __builtin_dump_struct(&parse_res, &printf);
     assert(parse_res.ok);
     assert(parse_res.bencode.kind == BencodeKindList);
     assert(parse_res.bencode.v.list.len == 2);
