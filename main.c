@@ -86,33 +86,33 @@ static void *arena_alloc(Arena *arena, usize align, usize elem_size,
   assert(arena != NULL);
   assert(arena->start != NULL);
   assert(arena->end != NULL);
+  assert(arena->start <= arena->end);
   assert((align == 1) || (align == 2) || (align == 4) || (align == 8));
   assert(elem_size > 0);
   assert(elem_count > 0);
 
-  const usize start_before = (usize)arena->start;
   usize start = (usize)arena->start;
 
-  const usize pad = start % align;
+  // Round `start` up to the next multiple of `align`.
+  const usize pad = (align - (start % align)) % align;
   assert(!__builtin_add_overflow(start, pad, &start));
 
-  u8 *const res = (u8 *)arena->start;
+  usize alloc_size = 0;
+  assert(!__builtin_mul_overflow(elem_size, elem_count, &alloc_size));
 
-  {
-    usize alloc_size = 0;
-    assert(!__builtin_mul_overflow(elem_size, elem_count, &alloc_size));
-    assert(!__builtin_add_overflow(start, alloc_size, &start));
-  }
+  usize end = 0;
+  assert(!__builtin_add_overflow(start, alloc_size, &end));
 
-  arena->start = (u8 *)start;
-  assert(start_before < (usize)arena->start);
-
-  // OOM?
-  if (arena->start >= arena->end) {
+  // OOM? The arena is left untouched in that case.
+  if (end > (usize)arena->end) {
     return NULL;
   }
 
-  return res;
+  arena->start = (u8 *)end;
+  assert(arena->start <= arena->end);
+  assert((start % align) == 0);
+
+  return (u8 *)start;
 }
 
 static Arena arena_from_mem(u8 *mem, usize bytes_count) {
@@ -441,7 +441,7 @@ int main() {
     assert(__builtin_memcmp(parse_res.bencode.v.s.data, "spam", 4) == 0);
   }
   {
-    const usize arena_memory_bytes_count = 1 * KiB;
+    const usize arena_memory_bytes_count = 8 * sizeof(BencodeValue);
     u8 *arena_memory = unix_virtual_mem_alloc(arena_memory_bytes_count);
     if (arena_memory == NULL) {
       fprintf(stderr, "failed to allocate virtual memory: %zu bytes\n",
