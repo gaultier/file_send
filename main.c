@@ -106,7 +106,11 @@ static void *arena_alloc(Arena *arena, usize align, usize elem_size,
 
   arena->start = (u8 *)start;
   assert(start_before < (usize)arena->start);
-  assert(arena->start <= arena->end); // OOM?
+
+  // OOM?
+  if (arena->start >= arena->end) {
+    return NULL;
+  }
 
   return res;
 }
