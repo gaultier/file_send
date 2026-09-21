@@ -234,7 +234,8 @@ BencodeParseResult bencode_parse_num(BencodeParser *parser) {
   bool negative_sign = bencode_parse_consume(parser, '-');
 
   ParseUsize parsed_usize =
-      ascii_num_parse(parser->data + parser->pos, parser->len - parser->pos);
+      ascii_num_parse(slice_u8_offset(parser->data, parser->len, parser->pos),
+                      parser->len - parser->pos);
 
   if (!parsed_usize.ok) {
     return res;
