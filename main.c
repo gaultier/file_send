@@ -64,6 +64,8 @@ typedef struct {
   bool ok;
 } At_U8;
 
+bool char_is_digit_ascii(u8 c) { return '0' <= c && c <= '9'; }
+
 u8 *arena_alloc(Arena *arena, usize align, usize elem_size, usize elem_count) {
   assert(arena != NULL);
   assert(arena->start != NULL);
@@ -133,11 +135,95 @@ void bencode_parser_advance(BencodeParser *parser, usize count) {
   assert(!__builtin_add_overflow(parser->pos, count, &parser->pos));
 }
 
+// `i123e`
+// `i-123e`
 BencodeParseResult bencode_parse_num(BencodeParser *parser) {
   assert(parser);
   const At_U8 first = bencode_parser_at(*parser);
   assert(first.ok);
   assert(first.value == 'i');
+
+  bencode_parser_advance(parser, 1);
+
+  const At_U8 maybe_sign = bencode_parser_at(*parser);
+  // Unterminated.
+  if (!maybe_sign.ok) {
+    return (BencodeParseResult){.kind = BencodeParseKindUnterminated,
+                                .pos = parser->pos};
+  }
+
+  isize sign = 1;
+  if (maybe_sign.value == '-') {
+    sign = -1;
+    bencode_parser_advance(parser, 1);
+  }
+
+  const usize MAX_LEN = 25;
+
+  isize num = 0;
+
+  bool has_leading_zero = false;
+
+  for (usize i = 0; i < MAX_LEN; i++) {
+    const At_U8 current = bencode_parser_at(*parser);
+
+    // Unterminated.
+    if (!current.ok) {
+      return (BencodeParseResult){.kind = BencodeParseKindUnterminated,
+                                  .pos = parser->pos};
+    }
+
+    assert(current.ok);
+
+    switch (current.value) {
+    case 'e':
+      bencode_parser_advance(parser, 1);
+      return (BencodeParseResult){
+          .kind = BencodeParseKindOk,
+          .pos = parser->pos,
+          .bencode.kind = BencodeKindInteger,
+          .bencode.v.num = sign * num,
+      };
+
+    case '0':
+    case '1':
+    case '2':
+    case '3':
+    case '4':
+    case '5':
+    case '6':
+    case '7':
+    case '8':
+    case '9': {
+      has_leading_zero = current.value == '0' && i == 0;
+
+      // Leading zeroes forbidden except `i0e`.
+      if (i > 0 && has_leading_zero) {
+        return (BencodeParseResult){.kind = BencodeParseKindUnexpectedCharacter,
+                                    .pos = parser->pos};
+      }
+
+      const usize digit = current.value - '0';
+      assert(!__builtin_mul_overflow(num, 10, &num));
+      assert(!__builtin_add_overflow(num, digit, &num));
+      bencode_parser_advance(parser, 1);
+    } break;
+
+    default:
+      return (BencodeParseResult){.kind = BencodeParseKindUnexpectedCharacter,
+                                  .pos = parser->pos};
+    }
+  }
+
+  return (BencodeParseResult){.kind = BencodeParseKindUnterminated,
+                              .pos = parser->pos};
+}
+
+BencodeParseResult bencode_parse_string(BencodeParser *parser) {
+  assert(parser);
+  const At_U8 first = bencode_parser_at(*parser);
+  assert(first.ok);
+  assert(char_is_digit_ascii(first.value));
 
   bencode_parser_advance(parser, 1);
 
