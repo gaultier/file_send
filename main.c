@@ -161,6 +161,22 @@ void bencode_parser_advance(BencodeParser *parser, usize count) {
   assert(!__builtin_add_overflow(parser->pos, count, &parser->pos));
 }
 
+bool bencode_parse_consume(BencodeParser *parser, u8 expected) {
+  assert(parser);
+
+  At_U8 actual = bencode_parser_at(*parser);
+
+  if (!actual.ok) {
+    return false;
+  }
+  if (actual.value != expected) {
+    return false;
+  }
+
+  bencode_parser_advance(parser, 1);
+  return true;
+}
+
 ParseUsize ascii_num_parse(u8 *data, usize len) {
   const usize MAX_LEN = 30;
   ParseUsize res = {0};
@@ -209,24 +225,13 @@ BencodeParseResult bencode_parse_num(BencodeParser *parser) {
   assert(parser->data);
   assert(parser->pos < parser->len);
 
-  const At_U8 first = bencode_parser_at(*parser);
-  assert(first.ok);
-  assert(first.value == 'i');
-
-  bencode_parser_advance(parser, 1);
-  BencodeParseResult res = {.bencode.kind = BencodeKindInteger};
-
-  const At_U8 maybe_sign = bencode_parser_at(*parser);
-  // Unterminated.
-  if (!maybe_sign.ok) {
+  BencodeParseResult res = {0};
+  if (!bencode_parse_consume(parser, 'i')) {
     return res;
-  }
+  };
+  res.bencode.kind = BencodeKindInteger;
 
-  bool negative_sign = false;
-  if (maybe_sign.value == '-') {
-    negative_sign = true;
-    bencode_parser_advance(parser, 1);
-  }
+  bool negative_sign = bencode_parse_consume(parser, '-');
 
   ParseUsize parsed_usize =
       ascii_num_parse(parser->data + parser->pos, parser->len - parser->pos);
@@ -247,15 +252,9 @@ BencodeParseResult bencode_parse_num(BencodeParser *parser) {
     res.bencode.v.num = parsed_usize.num;
   }
 
-  const At_U8 maybe_terminator = bencode_parser_at(*parser);
-  // Unterminated.
-  if (!maybe_terminator.ok) {
+  if (!bencode_parse_consume(parser, 'e')) {
     return res;
-  }
-
-  if (maybe_terminator.value != 'e') {
-    return res;
-  }
+  };
 
   res.ok = true;
   return res;
@@ -279,15 +278,10 @@ BencodeParseResult bencode_parse_string(BencodeParser *parser) {
   }
   bencode_parser_advance(parser, parsed_usize.pos);
 
-  const At_U8 separator = bencode_parser_at(*parser);
-  if (!separator.ok) {
+  if (!bencode_parse_consume(parser, ':')) {
     return res;
-  }
-  if (separator.value != ':') {
-    return res;
-  }
+  };
 
-  bencode_parser_advance(parser, 1);
   res.bencode.v.s.data =
       slice_u8_offset(parser->data, parser->len, parser->pos);
 
