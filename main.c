@@ -267,11 +267,18 @@ BencodeParseResult bencode_parse_string(BencodeParser *parser) {
   assert(parser->data);
   assert(parser->pos < parser->len);
 
-  const At_U8 first = bencode_parser_at(*parser);
-  assert(first.ok);
-  assert(char_is_digit_ascii(first.value));
+  BencodeParseResult res = {0};
 
-  BencodeParseResult res = {.bencode.kind = BencodeKindString};
+  const At_U8 first = bencode_parser_at(*parser);
+  if (!first.ok) {
+    return res;
+  }
+
+  if (!char_is_digit_ascii(first.value)) {
+    return res;
+  }
+
+  res.bencode.kind = BencodeKindString;
 
   ParseUsize parsed_usize = ascii_num_parse(parser->data, parser->len);
   if (!parsed_usize.ok) {
@@ -293,6 +300,78 @@ BencodeParseResult bencode_parse_string(BencodeParser *parser) {
 
   res.bencode.v.s.len = parsed_usize.num;
   res.ok = true;
+  return res;
+}
+
+BencodeParseResult bencode_parse(BencodeParser *parser, Arena *arena);
+
+BencodeParseResult bencode_parse_list(BencodeParser *parser, Arena *arena) {
+  assert(parser);
+  assert(parser->data);
+  assert(parser->pos < parser->len);
+
+  BencodeParseResult res = {0};
+
+  if (!bencode_parse_consume(parser, 'l')) {
+    return res;
+  }
+
+  res.bencode.kind = BencodeKindList;
+
+  const usize remaining_bytes = slice_remaining(parser->len, parser->pos);
+  for (usize _i = 0; _i < remaining_bytes; _i++) {
+    BencodeParseResult item = bencode_parse(parser, arena);
+    if (!item.ok) {
+      return res;
+    }
+
+    // TODO: Add item to array.
+  }
+
+  if (!bencode_parse_consume(parser, 'e')) {
+    return res;
+  }
+
+  res.ok = true;
+  return res;
+}
+
+BencodeParseResult bencode_parse(BencodeParser *parser, Arena *arena) {
+  assert(parser);
+  assert(parser->data);
+  assert(arena);
+
+  BencodeParseResult res = {0};
+
+  for (usize _i = 0; _i < parser->len; _i++) {
+    const At_U8 current = bencode_parser_at(*parser);
+    if (!current.ok) {
+      return res;
+    }
+
+    switch (current.value) {
+    case 'i':
+      return bencode_parse_num(parser);
+    case 'l':
+      return bencode_parse_list(parser, arena);
+    case 'd':
+      assert(0 && "todo");
+    case '0':
+    case '1':
+    case '2':
+    case '3':
+    case '4':
+    case '5':
+    case '6':
+    case '7':
+    case '8':
+    case '9':
+      return bencode_parse_num(parser);
+    default:
+      return res;
+    }
+  }
+
   return res;
 }
 
