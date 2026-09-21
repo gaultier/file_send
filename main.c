@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include <sys/mman.h>
 
 typedef uint8_t u8;
@@ -41,13 +42,22 @@ typedef struct {
   u8 *data;
 } BencodeString;
 
+typedef struct BencodeValue BencodeValue;
+
 typedef struct {
+  usize len;
+  usize cap;
+  BencodeValue *data;
+} BencodeList;
+
+struct BencodeValue {
   BencodeKind kind;
   union {
     isize num;
     BencodeString s;
+    BencodeList list;
   } v;
-} Bencode;
+};
 
 typedef enum {
   BencodeParseKindOk,
@@ -56,7 +66,7 @@ typedef enum {
 } BencodeParseResultKind;
 
 typedef struct {
-  Bencode bencode;
+  BencodeValue bencode;
   bool ok;
 } BencodeParseResult;
 
@@ -73,7 +83,8 @@ typedef struct {
 
 bool char_is_digit_ascii(u8 c) { return '0' <= c && c <= '9'; }
 
-u8 *arena_alloc(Arena *arena, usize align, usize elem_size, usize elem_count) {
+void *arena_alloc(Arena *arena, usize align, usize elem_size,
+                  usize elem_count) {
   assert(arena != NULL);
   assert(arena->start != NULL);
   assert(arena->end != NULL);
@@ -151,6 +162,30 @@ u8 *slice_u8_offset(u8 *data, usize len, usize idx) {
   assert(idx < len);
 
   return data + idx;
+}
+
+bool bencode_list_push(BencodeList *list, BencodeValue item, Arena *arena) {
+  assert(list);
+  assert(list->len <= list->cap);
+  assert(arena);
+
+  // Initial alloc.
+  if (list->cap == 0) {
+    list->cap = 8;
+    list->data = arena_alloc(arena, __alignof__(BencodeValue),
+                             sizeof(BencodeValue), list->cap);
+    if (!list->data) {
+      return false;
+    }
+  }
+
+  if (list->len == list->cap) {
+    assert(0 && "realloc");
+  }
+
+  list->data[list->len++] = item;
+
+  return true;
 }
 
 At_U8 bencode_parser_at(BencodeParser parser) {
@@ -305,6 +340,7 @@ BencodeParseResult bencode_parse_string(BencodeParser *parser) {
 
 BencodeParseResult bencode_parse(BencodeParser *parser, Arena *arena);
 
+// FIXME: rec.
 BencodeParseResult bencode_parse_list(BencodeParser *parser, Arena *arena) {
   assert(parser);
   assert(parser->data);
@@ -325,7 +361,9 @@ BencodeParseResult bencode_parse_list(BencodeParser *parser, Arena *arena) {
       return res;
     }
 
-    // TODO: Add item to array.
+    if (!bencode_list_push(&res.bencode.v.list, item.bencode, arena)) {
+      return res;
+    }
   }
 
   if (!bencode_parse_consume(parser, 'e')) {
@@ -376,26 +414,13 @@ BencodeParseResult bencode_parse(BencodeParser *parser, Arena *arena) {
 }
 
 int main() {
-#if 0
-  const usize arena_memory_bytes_count = 10 * MiB;
-  u8 *arena_memory = unix_virtual_mem_alloc(arena_memory_bytes_count);
-  if (arena_memory == NULL) {
-    fprintf(stderr, "failed to allocate virtual memory: %zu bytes\n",
-            arena_memory_bytes_count);
-    return 1;
-  }
-
-  Arena arena = arena_from_mem(arena_memory, arena_memory_bytes_count);
-
-#endif
 
   {
     const char *const bencode_input = "i-123e";
 
     BencodeParser parser = {
         .data = (u8 *)bencode_input,
-        .len = 6,
-        .pos = 0,
+        .len = strlen(bencode_input),
     };
     BencodeParseResult parse_res = bencode_parse_num(&parser);
     __builtin_dump_struct(&parse_res, &printf);
@@ -408,7 +433,7 @@ int main() {
 
     BencodeParser parser = {
         .data = (u8 *)bencode_input,
-        .len = 6,
+        .len = strlen(bencode_input),
         .pos = 0,
     };
     BencodeParseResult parse_res = bencode_parse_string(&parser);
@@ -417,6 +442,29 @@ int main() {
     assert(parse_res.bencode.kind == BencodeKindString);
     assert(parse_res.bencode.v.s.len == 4);
     assert(__builtin_memcmp(parse_res.bencode.v.s.data, "spam", 4) == 0);
+  }
+  {
+    const usize arena_memory_bytes_count = 1 * KiB;
+    u8 *arena_memory = unix_virtual_mem_alloc(arena_memory_bytes_count);
+    if (arena_memory == NULL) {
+      fprintf(stderr, "failed to allocate virtual memory: %zu bytes\n",
+              arena_memory_bytes_count);
+      return 1;
+    }
+
+    Arena arena = arena_from_mem(arena_memory, arena_memory_bytes_count);
+
+    const char *const bencode_input = "l4:spami456ee";
+
+    BencodeParser parser = {
+        .data = (u8 *)bencode_input,
+        .len = strlen(bencode_input),
+    };
+    BencodeParseResult parse_res = bencode_parse(&parser, &arena);
+    __builtin_dump_struct(&parse_res, &printf);
+    assert(parse_res.ok);
+    assert(parse_res.bencode.kind == BencodeKindList);
+    assert(parse_res.bencode.v.list.len == 2);
   }
 
   return 0;
