@@ -439,8 +439,32 @@ bencode_parse_string(BencodeParser *parser, BencodeValue *res) {
   return true;
 }
 
-static i32 bytes_cmp(u8 *a, usize a_len, u8 *b, usize b_len) {
-  assert(0 && "todo");
+// Compare two byte strings lexicographically: the first differing byte decides,
+// and when one is a prefix of the other, the shorter one sorts first.
+// Returns <0, 0, or >0, like `memcmp`.
+//
+// Bytes are compared as unsigned values, so `0x80` sorts after `0x7f`. This is
+// a total order over arbitrary bytes, embedded zeroes included, and it is the
+// ordering bencode requires of dict keys.
+__attribute((warn_unused_result)) static i32 bytes_cmp(u8 *a, usize a_len,
+                                                       u8 *b, usize b_len) {
+  assert(a || 0 == a_len);
+  assert(b || 0 == b_len);
+
+  // Not `memcmp`: it is undefined to hand it a NULL pointer even for a length
+  // of zero, and an empty byte string is legal here.
+  const usize len = a_len < b_len ? a_len : b_len;
+  for (usize i = 0; i < len; i++) {
+    if (a[i] != b[i]) {
+      return a[i] < b[i] ? -1 : 1;
+    }
+  }
+
+  // Equal up to the shorter length: the prefix sorts first.
+  if (a_len == b_len) {
+    return 0;
+  }
+  return a_len < b_len ? -1 : 1;
 }
 
 static bool bencode_validate_dict(BencodeList list) {
@@ -1037,6 +1061,13 @@ static bool test_bencode_is_string(BencodeValue value, const char *expected) {
          (0 == len || 0 == memcmp(value.v.s.data, expected, len));
 }
 
+static BencodeValue test_bencode_make_string(const char *data, usize len) {
+  assert(data || 0 == len);
+
+  return (BencodeValue){.kind = BencodeKindString,
+                        .v.s = slice_u8_make((u8 *)data, len)};
+}
+
 static void test_bencode_parse(void) {
   const struct {
     const char *input;
@@ -1074,10 +1105,15 @@ static void test_bencode_parse(void) {
       // malformed.
       {"d3:keye", false, 0, 0, 0},
       {"di1ee", false, 0, 0, 0},
-      // NOTE: bencode requires dict keys to be strings (and to be sorted);
-      // neither is enforced yet, so this currently parses. Update this case
-      // when it stops doing so.
-      {"di1ei2ee", true, BencodeKindDict, 2, 0},
+      // Dict keys must be strings, sorted by raw byte value, with no
+      // duplicates. `bencode_validate_dict` is applied as each dict closes.
+      {"di1ei2ee", false, 0, 0, 0},
+      {"d1:a1:x1:b1:ye", true, BencodeKindDict, 4, 0},
+      {"d1:b1:x1:a1:ye", false, 0, 0, 0},
+      {"d1:a1:x1:a1:ye", false, 0, 0, 0},
+      // Including for a dict nested inside another one.
+      {"d1:ad1:b1:c1:a1:dee", false, 0, 0, 0},
+      {"d1:ad1:a1:c1:b1:dee", true, BencodeKindDict, 2, 0},
       // Unterminated containers, at every depth.
       {"l", false, 0, 0, 0},
       {"d", false, 0, 0, 0},
@@ -1310,6 +1346,222 @@ static void test_bencode_parse(void) {
   }
 }
 
+static void test_bytes_cmp(void) {
+  // A corpus in the order `bytes_cmp` must put it in. The embedded zeroes and
+  // the bytes above 0x7f are there on purpose: neither `strcmp` nor a signed
+  // char comparison orders these correctly.
+  const struct {
+    const char *data;
+    usize len;
+  } sorted[] = {
+      {"", 0},
+      {"\x00", 1},
+      {"\x00\x00", 2},
+      {"\x00" "a", 2},
+      {"a", 1},
+      {"a\x00", 2},
+      {"ab", 2},
+      {"abc", 3},
+      {"b", 1},
+      {"\x7f", 1},
+      {"\x80", 1},
+      {"\xfe", 1},
+      {"\xff", 1},
+      {"\xff\x00", 2},
+      {"\xff\xff", 2},
+  };
+  const usize count = sizeof(sorted) / sizeof(sorted[0]);
+
+  for (usize i = 0; i < count; i++) {
+    for (usize j = 0; j < count; j++) {
+      u8 *const a = (u8 *)sorted[i].data;
+      u8 *const b = (u8 *)sorted[j].data;
+
+      const i32 res = bytes_cmp(a, sorted[i].len, b, sorted[j].len);
+      if (i < j) {
+        assert(res < 0);
+      } else if (i > j) {
+        assert(res > 0);
+      } else {
+        assert(0 == res);
+      }
+
+      // Antisymmetric: swapping the arguments flips the sign.
+      const i32 swapped = bytes_cmp(b, sorted[j].len, a, sorted[i].len);
+      assert((res < 0) == (swapped > 0));
+      assert((res > 0) == (swapped < 0));
+      assert((0 == res) == (0 == swapped));
+    }
+  }
+
+  // A NULL pointer is legal as long as the length is zero, and every empty
+  // byte string is equal to every other one.
+  {
+    assert(0 == bytes_cmp(NULL, 0, NULL, 0));
+    assert(0 == bytes_cmp(NULL, 0, (u8 *)"", 0));
+    assert(bytes_cmp(NULL, 0, (u8 *)"a", 1) < 0);
+    assert(bytes_cmp((u8 *)"a", 1, NULL, 0) > 0);
+  }
+
+  // Longer than a word, differing only in the last byte.
+  {
+    u8 x[64];
+    u8 y[64];
+    memset(x, 'z', sizeof(x));
+    memset(y, 'z', sizeof(y));
+    y[sizeof(y) - 1] = 'z' + 1;
+
+    assert(bytes_cmp(x, sizeof(x), y, sizeof(y)) < 0);
+    assert(bytes_cmp(y, sizeof(y), x, sizeof(x)) > 0);
+
+    // Against itself, and against a prefix of itself.
+    assert(0 == bytes_cmp(x, sizeof(x), x, sizeof(x)));
+    assert(bytes_cmp(x, sizeof(x) - 1, x, sizeof(x)) < 0);
+    assert(bytes_cmp(x, sizeof(x), x, sizeof(x) - 1) > 0);
+  }
+}
+
+static void test_bencode_validate_dict(void) {
+  const BencodeValue num = {.kind = BencodeKindInteger, .v.num = 42};
+
+  // Empty: trivially valid, and a NULL `data` is allowed when `len` is zero.
+  {
+    const BencodeList list = {0};
+    assert(bencode_validate_dict(list));
+  }
+  // Keys strictly increasing.
+  {
+    BencodeValue children[] = {
+        test_bencode_make_string("a", 1), num,
+        test_bencode_make_string("b", 1), num,
+        test_bencode_make_string("c", 1), num,
+    };
+    const BencodeList list = {.len = 6, .data = children};
+    assert(bencode_validate_dict(list));
+  }
+  // Out of order, anywhere in the dict.
+  {
+    BencodeValue children[] = {
+        test_bencode_make_string("b", 1), num,
+        test_bencode_make_string("a", 1), num,
+    };
+    const BencodeList list = {.len = 4, .data = children};
+    assert(!bencode_validate_dict(list));
+  }
+  {
+    BencodeValue children[] = {
+        test_bencode_make_string("a", 1), num,
+        test_bencode_make_string("c", 1), num,
+        test_bencode_make_string("b", 1), num,
+    };
+    const BencodeList list = {.len = 6, .data = children};
+    assert(!bencode_validate_dict(list));
+  }
+  // Duplicate keys: sorted is not enough, the order has to be strict.
+  {
+    BencodeValue children[] = {
+        test_bencode_make_string("a", 1), num,
+        test_bencode_make_string("a", 1), num,
+    };
+    const BencodeList list = {.len = 4, .data = children};
+    assert(!bencode_validate_dict(list));
+  }
+  // Keys must be strings.
+  {
+    BencodeValue children[] = {num, num};
+    const BencodeList list = {.len = 2, .data = children};
+    assert(!bencode_validate_dict(list));
+  }
+  // ... including a non-string key that is not the first one.
+  {
+    BencodeValue children[] = {test_bencode_make_string("a", 1), num, num, num};
+    const BencodeList list = {.len = 4, .data = children};
+    assert(!bencode_validate_dict(list));
+  }
+  // Values are not constrained, only keys are.
+  {
+    const BencodeValue nested_list = {.kind = BencodeKindList};
+    const BencodeValue nested_dict = {.kind = BencodeKindDict};
+    BencodeValue children[] = {
+        test_bencode_make_string("a", 1), nested_list,
+        test_bencode_make_string("b", 1), nested_dict,
+    };
+    const BencodeList list = {.len = 4, .data = children};
+    assert(bencode_validate_dict(list));
+  }
+  // An odd number of children is not key/value pairs.
+  {
+    BencodeValue children[] = {test_bencode_make_string("a", 1), num,
+                               test_bencode_make_string("b", 1)};
+    const BencodeList list = {.len = 3, .data = children};
+    assert(!bencode_validate_dict(list));
+  }
+  {
+    BencodeValue children[] = {test_bencode_make_string("a", 1)};
+    const BencodeList list = {.len = 1, .data = children};
+    assert(!bencode_validate_dict(list));
+  }
+  // The empty key is legal and sorts before every other key.
+  {
+    BencodeValue children[] = {
+        test_bencode_make_string("", 0), num,
+        test_bencode_make_string("a", 1), num,
+    };
+    const BencodeList list = {.len = 4, .data = children};
+    assert(bencode_validate_dict(list));
+  }
+  // A key that is a prefix of the next one is in order; the reverse is not.
+  {
+    BencodeValue children[] = {
+        test_bencode_make_string("a", 1), num,
+        test_bencode_make_string("ab", 2), num,
+    };
+    const BencodeList list = {.len = 4, .data = children};
+    assert(bencode_validate_dict(list));
+  }
+  {
+    BencodeValue children[] = {
+        test_bencode_make_string("ab", 2), num,
+        test_bencode_make_string("a", 1), num,
+    };
+    const BencodeList list = {.len = 4, .data = children};
+    assert(!bencode_validate_dict(list));
+  }
+  // Ordering is by raw byte value, so `0x80` sorts *after* `0x7f`. A signed
+  // comparison would get this pair backwards.
+  {
+    BencodeValue children[] = {
+        test_bencode_make_string("\x7f", 1), num,
+        test_bencode_make_string("\x80", 1), num,
+    };
+    const BencodeList list = {.len = 4, .data = children};
+    assert(bencode_validate_dict(list));
+  }
+  {
+    BencodeValue children[] = {
+        test_bencode_make_string("\x80", 1), num,
+        test_bencode_make_string("\x7f", 1), num,
+    };
+    const BencodeList list = {.len = 4, .data = children};
+    assert(!bencode_validate_dict(list));
+  }
+  // Keys are compared over their whole length, zero bytes included.
+  {
+    BencodeValue children[] = {
+        test_bencode_make_string("a\x00"
+                                 "a",
+                                 3),
+        num,
+        test_bencode_make_string("a\x00"
+                                 "b",
+                                 3),
+        num,
+    };
+    const BencodeList list = {.len = 4, .data = children};
+    assert(bencode_validate_dict(list));
+  }
+}
+
 static void test(const char *filter) {
   const struct {
     const char *name;
@@ -1325,6 +1577,8 @@ static void test(const char *filter) {
       {"bencode_parse_num", test_bencode_parse_num},
       {"bencode_parse_string", test_bencode_parse_string},
       {"bencode_parse", test_bencode_parse},
+      {"bytes_cmp", test_bytes_cmp},
+      {"bencode_validate_dict", test_bencode_validate_dict},
   };
 
   usize run = 0;
