@@ -1684,29 +1684,37 @@ static void test(const char *filter) {
 }
 
 int main(i32 argc, char *argv[]) {
-  assert(argc == 2);
+  assert(argc >= 2);
   assert(argv);
 
-  test(argc > 1 ? argv[1] : NULL);
+  char *const cmd = argv[1];
+  if (0 == strcmp(cmd, "test")) {
+    test(argc > 2 ? argv[2] : NULL);
+  } else if (0 == strcmp(cmd, "print-bencode")) {
+    assert(3 == argc);
 
-  const i32 fd = open(argv[1], O_RDONLY);
-  assert(-1 != fd);
+    const i32 fd = open(argv[2], O_RDONLY);
+    assert(-1 != fd);
 
-  struct stat st = {0};
-  assert(-1 != fstat(fd, &st));
-  assert(st.st_size > 0);
+    struct stat st = {0};
+    assert(-1 != fstat(fd, &st));
+    assert(st.st_size > 0);
 
-  void *const bencode_data =
-      mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-  assert((void *)-1 != bencode_data);
+    void *const bencode_data =
+        mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    assert((void *)-1 != bencode_data);
 
-  Slice_u8 input = slice_u8_make((u8 *)bencode_data, (usize)st.st_size);
-  Arena arena = arena_valloc(32 * MiB);
-  Arena scratch = arena_valloc(32 * MiB);
+    Slice_u8 input = slice_u8_make((u8 *)bencode_data, (usize)st.st_size);
+    Arena arena = arena_valloc(32 * MiB);
+    Arena scratch = arena_valloc(32 * MiB);
 
-  BencodeValue bencode = {0};
-  assert(bencode_parse(&input, &arena, scratch, &bencode));
+    BencodeValue bencode = {0};
+    assert(bencode_parse(&input, &arena, scratch, &bencode));
 
-  bencode_print(bencode, 0);
-  printf("\n");
+    bencode_print(bencode, 0);
+    printf("\n");
+  } else {
+    fprintf(stderr, "unknown command\n");
+    exit(1);
+  }
 }
