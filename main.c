@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <inttypes.h>
+#include <signal.h>
 #include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -8,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 typedef uint8_t u8;
@@ -173,16 +175,18 @@ static bool unix_vprotect_none(void *ptr, usize size) {
   return true;
 }
 
+// `multiple` must be a power of two, which every page size is.
 static usize usize_round_up_multiple_of(usize n, usize multiple) {
   assert(multiple != 0);
-
-  const usize factor = n / multiple;
+  assert(0 == (multiple & (multiple - 1)) && "not a power of two");
 
   usize res = 0;
-  assert(!__builtin_add_overflow(factor, 1, &res));
-  assert(!__builtin_mul_overflow(res, multiple, &res));
+  assert(!__builtin_add_overflow(n, multiple - 1, &res));
+  res &= ~(multiple - 1);
 
-  assert(0 == res % multiple);
+  assert(0 == (res & (multiple - 1)));
+  assert(res >= n);
+  assert(res - n < multiple);
   return res;
 }
 
@@ -190,12 +194,10 @@ static Arena arena_valloc(usize bytes_count) {
   const usize page_size = unix_get_page_size();
   assert(page_size > 0);
 
-  const usize page_count_for_bytes =
-      usize_round_up_multiple_of(bytes_count, page_size) / page_size;
+  const usize usable_bytes = usize_round_up_multiple_of(bytes_count, page_size);
   usize os_alloc_size = 0;
   // Guard page.
-  assert(!__builtin_add_overflow(page_count_for_bytes, 1, &os_alloc_size));
-  assert(!__builtin_mul_overflow(os_alloc_size, page_size, &os_alloc_size));
+  assert(!__builtin_add_overflow(usable_bytes, page_size, &os_alloc_size));
 
   u8 *const arena_memory = unix_virtual_mem_alloc(os_alloc_size);
   Arena res = {0};
@@ -204,11 +206,20 @@ static Arena arena_valloc(usize bytes_count) {
     return res;
   }
 
-  // Guard page.
-  assert(unix_vprotect_none(arena_memory + page_count_for_bytes * page_size,
-                            page_size));
+  assert(unix_vprotect_none(arena_memory + usable_bytes, page_size));
 
-  return arena_from_mem(arena_memory, bytes_count);
+  // Right-align the arena against the guard page so that *any* write past
+  // `arena.end` faults immediately, then round the start down to the
+  // strictest alignment `arena_alloc` hands out. Rounding down can only make
+  // the arena slightly larger than requested, never smaller.
+  const usize max_align = 8;
+  usize start = (usize)arena_memory + usable_bytes - bytes_count;
+  start -= start % max_align;
+  assert(start >= (usize)arena_memory);
+  assert(0 == start % max_align);
+
+  return arena_from_mem((u8 *)start,
+                        (usize)arena_memory + usable_bytes - start);
 }
 
 static At_U8 slice_u8_first(Slice_u8 slice) {
@@ -582,7 +593,7 @@ static Arena test_arena(usize bytes_count) {
   Arena arena = arena_valloc(bytes_count);
   assert(arena.start);
   assert(arena.end);
-  assert((usize)arena.end - (usize)arena.start == bytes_count);
+  assert((usize)arena.end - (usize)arena.start >= bytes_count);
 
   memset(arena.start, 0xAA, bytes_count);
   return arena;
@@ -685,6 +696,40 @@ static void test_arena_valloc(void) {
   const Arena arena = arena_valloc((usize)1 << 62);
   assert(NULL == arena.start);
   assert(NULL == arena.end);
+}
+
+// A guard page is only useful if it sits immediately after `arena.end`. The
+// write that proves it has to kill the process, so do it in a child.
+static void test_arena_guard_page(void) {
+  Arena arena = test_arena(1 * KiB);
+
+  // The last byte inside the arena is writable.
+  arena.end[-1] = 0x42;
+
+  const pid_t pid = fork();
+  assert(-1 != pid);
+
+  if (0 == pid) {
+    // The fault report is expected, keep it out of the test output.
+    assert(freopen("/dev/null", "w", stderr));
+
+    arena.end[0] = 0x42;
+
+    // Unreachable: the write above must not succeed.
+    _exit(0);
+  }
+
+  i32 status = 0;
+  assert(pid == waitpid(pid, &status, 0));
+
+  // What matters is that the write did not quietly succeed. A sanitized build
+  // intercepts the fault and turns it into an abort (or a non-zero exit), so
+  // the exact signal is not something to pin down here.
+  assert(!(WIFEXITED(status) && 0 == WEXITSTATUS(status)));
+  if (WIFSIGNALED(status)) {
+    const i32 sig = WTERMSIG(status);
+    assert(SIGBUS == sig || SIGSEGV == sig || SIGABRT == sig);
+  }
 }
 
 static void test_slice_u8(void) {
@@ -1172,6 +1217,7 @@ static void test(const char *filter) {
       {"isize_from_usize", test_isize_from_usize},
       {"arena_alloc", test_arena_alloc},
       {"arena_valloc", test_arena_valloc},
+      {"arena_guard_page", test_arena_guard_page},
       {"slice_u8", test_slice_u8},
       {"bencode_list_push", test_bencode_list_push},
       {"ascii_num_parse", test_ascii_num_parse},
