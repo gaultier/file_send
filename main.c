@@ -768,7 +768,7 @@ typedef struct {
   // Bytes of a not-yet-complete block held back from a previous `Update`.
   u32 partial_len;
   u8 partial[SHA256_CBLOCK];
-} SHA256_CTX;
+} Sha256Ctx;
 
 // First 32 bits of the fractional parts of the cube roots of the first 64
 // primes (FIPS 180-4, 4.2.2).
@@ -864,16 +864,16 @@ static void sha256_compress(u32 h[8], const u8 block[SHA256_CBLOCK]) {
 
 // First 32 bits of the fractional parts of the square roots of the first 8
 // primes (FIPS 180-4, 5.3.3).
-static void SHA256_Init(SHA256_CTX *ctx) {
+static void sha256_init(Sha256Ctx *ctx) {
   assert(ctx);
 
-  *ctx = (SHA256_CTX){
+  *ctx = (Sha256Ctx){
       .h = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f,
             0x9b05688c, 0x1f83d9ab, 0x5be0cd19},
   };
 }
 
-static void SHA256_Update(SHA256_CTX *ctx, Slice_u8 data) {
+static void sha256_update(Sha256Ctx *ctx, Slice_u8 data) {
   assert(ctx);
   assert(data.data || 0 == data.len);
   assert(ctx->partial_len < SHA256_CBLOCK);
@@ -916,7 +916,7 @@ static void SHA256_Update(SHA256_CTX *ctx, Slice_u8 data) {
 
 // `*ctx` is left zeroed, so it cannot be used again without another
 // `SHA256_Init`, and the chaining state of the message does not linger.
-static void SHA256_Final(SHA256_CTX *ctx, u8 res[SHA256_DIGEST_LENGTH]) {
+static void sha256_final(Sha256Ctx *ctx, u8 res[SHA256_DIGEST_LENGTH]) {
   assert(ctx);
   assert(res);
 
@@ -928,20 +928,36 @@ static void SHA256_Final(SHA256_CTX *ctx, u8 res[SHA256_DIGEST_LENGTH]) {
       len_mod < 56 ? 56 - len_mod : 56 + SHA256_CBLOCK - len_mod;
 
   u8 padding[SHA256_CBLOCK] = {0x80};
-  SHA256_Update(ctx, slice_u8_make(padding, padding_len));
+  sha256_update(ctx, slice_u8_make(padding, padding_len));
 
   u8 len_bytes[8] = {0};
   for (usize i = 0; i < 8; i++) {
     len_bytes[i] = (u8)(len_bits >> (56 - 8 * i));
   }
-  SHA256_Update(ctx, slice_u8_make(len_bytes, sizeof(len_bytes)));
+  sha256_update(ctx, slice_u8_make(len_bytes, sizeof(len_bytes)));
   assert(0 == ctx->partial_len);
 
   for (usize i = 0; i < 8; i++) {
     u32_to_bytes_be(ctx->h[i], res + i * 4);
   }
 
-  *ctx = (SHA256_CTX){0};
+  *ctx = (Sha256Ctx){0};
+}
+
+static const usize TORRENT_BLOCK_SIZE = 16 * KiB;
+static const usize TORRENT_PIECES_PER_BLOCK = 16;
+
+static void torrent_compute_merkle_tree(Slice_u8 data) {
+  for (usize i = 0; i < data.len / TORRENT_BLOCK_SIZE; i++) {
+    const Slice_u8 block_data = {.data = &data.data[i * TORRENT_BLOCK_SIZE],
+                                 .len = TORRENT_BLOCK_SIZE};
+
+    Sha256Ctx sha = {0};
+    sha256_init(&sha);
+    sha256_update(&sha, block_data);
+    sha256_final(&sha, NULL);
+  }
+  // TODO: last block.
 }
 
 // ---------------------------------------------------------------------------
@@ -1858,10 +1874,10 @@ static void test_bencode_validate_dict(void) {
 
 // Hash `data` in one `Update` call, the simplest possible use of the API.
 static void test_sha256_once(Slice_u8 data, u8 res[SHA256_DIGEST_LENGTH]) {
-  SHA256_CTX ctx = {0};
-  SHA256_Init(&ctx);
-  SHA256_Update(&ctx, data);
-  SHA256_Final(&ctx, res);
+  Sha256Ctx ctx = {0};
+  sha256_init(&ctx);
+  sha256_update(&ctx, data);
+  sha256_final(&ctx, res);
 }
 
 // Expected digests are given as hex, the way every SHA-256 test vector in the
@@ -1910,17 +1926,17 @@ static void test_sha256_vectors(void) {
 // The million 'a' vector, fed in odd-sized chunks so that the partial block
 // handling is exercised on a message far longer than one block.
 static void test_sha256_million_a(void) {
-  SHA256_CTX ctx = {0};
-  SHA256_Init(&ctx);
+  Sha256Ctx ctx = {0};
+  sha256_init(&ctx);
 
   u8 chunk[1000] = {0};
   memset(chunk, 'a', sizeof(chunk));
   for (usize i = 0; i < 1000; i++) {
-    SHA256_Update(&ctx, slice_u8_make(chunk, sizeof(chunk)));
+    sha256_update(&ctx, slice_u8_make(chunk, sizeof(chunk)));
   }
 
   u8 actual[SHA256_DIGEST_LENGTH] = {0};
-  SHA256_Final(&ctx, actual);
+  sha256_final(&ctx, actual);
 
   const u8 expected[SHA256_DIGEST_LENGTH] = {
       0xcd, 0xc7, 0x6e, 0x5c, 0x99, 0x14, 0xfb, 0x92, 0x81, 0xa1, 0xc7,
@@ -1942,29 +1958,28 @@ static void test_sha256_incremental(void) {
   test_sha256_once(slice_u8_make(input, sizeof(input)), expected);
 
   {
-    SHA256_CTX ctx = {0};
-    SHA256_Init(&ctx);
+    Sha256Ctx ctx = {0};
+    sha256_init(&ctx);
     for (usize i = 0; i < sizeof(input); i++) {
-      SHA256_Update(&ctx, slice_u8_make(input + i, 1));
+      sha256_update(&ctx, slice_u8_make(input + i, 1));
     }
 
     u8 actual[SHA256_DIGEST_LENGTH] = {0};
-    SHA256_Final(&ctx, actual);
+    sha256_final(&ctx, actual);
     assert(0 == memcmp(actual, expected, sizeof(actual)));
   }
 
   for (usize split = 0; split <= sizeof(input); split++) {
-    SHA256_CTX ctx = {0};
-    SHA256_Init(&ctx);
-    SHA256_Update(&ctx, slice_u8_make(input, split));
+    Sha256Ctx ctx = {0};
+    sha256_init(&ctx);
+    sha256_update(&ctx, slice_u8_make(input, split));
     // An empty `Update` in the middle must be a no-op, including when the
     // slice has no data pointer at all.
-    SHA256_Update(&ctx, (Slice_u8){0});
-    SHA256_Update(&ctx,
-                  slice_u8_make(input + split, sizeof(input) - split));
+    sha256_update(&ctx, (Slice_u8){0});
+    sha256_update(&ctx, slice_u8_make(input + split, sizeof(input) - split));
 
     u8 actual[SHA256_DIGEST_LENGTH] = {0};
-    SHA256_Final(&ctx, actual);
+    sha256_final(&ctx, actual);
     assert(0 == memcmp(actual, expected, sizeof(actual)));
   }
 }
@@ -1979,17 +1994,17 @@ static void test_sha256_lengths(void) {
     input[i] = (u8)(i * 31 + 7);
   }
 
-  SHA256_CTX outer = {0};
-  SHA256_Init(&outer);
+  Sha256Ctx outer = {0};
+  sha256_init(&outer);
 
   for (usize len = 0; len < sizeof(input); len++) {
     u8 digest[SHA256_DIGEST_LENGTH] = {0};
     test_sha256_once(slice_u8_make(input, len), digest);
-    SHA256_Update(&outer, slice_u8_make(digest, sizeof(digest)));
+    sha256_update(&outer, slice_u8_make(digest, sizeof(digest)));
   }
 
   u8 actual[SHA256_DIGEST_LENGTH] = {0};
-  SHA256_Final(&outer, actual);
+  sha256_final(&outer, actual);
 
   const u8 expected[SHA256_DIGEST_LENGTH] = {
       0x70, 0x2f, 0xea, 0x77, 0xff, 0x7e, 0x99, 0xf9, 0xf5, 0x44, 0x35,
@@ -2005,18 +2020,18 @@ static void test_sha256_reuse(void) {
   u8 expected[SHA256_DIGEST_LENGTH] = {0};
   test_sha256_once(test_slice("abc"), expected);
 
-  SHA256_CTX ctx = {0};
-  SHA256_Init(&ctx);
-  SHA256_Update(&ctx, test_slice("some other message entirely"));
+  Sha256Ctx ctx = {0};
+  sha256_init(&ctx);
+  sha256_update(&ctx, test_slice("some other message entirely"));
 
   u8 discarded[SHA256_DIGEST_LENGTH] = {0};
-  SHA256_Final(&ctx, discarded);
+  sha256_final(&ctx, discarded);
 
-  SHA256_Init(&ctx);
-  SHA256_Update(&ctx, test_slice("abc"));
+  sha256_init(&ctx);
+  sha256_update(&ctx, test_slice("abc"));
 
   u8 actual[SHA256_DIGEST_LENGTH] = {0};
-  SHA256_Final(&ctx, actual);
+  sha256_final(&ctx, actual);
   assert(0 == memcmp(actual, expected, sizeof(actual)));
 }
 
