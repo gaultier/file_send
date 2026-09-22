@@ -5,10 +5,12 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 
 typedef uint8_t u8;
+typedef int i32;
 typedef size_t usize;
 typedef ssize_t isize;
 
@@ -129,6 +131,19 @@ static u8 *unix_virtual_mem_alloc(usize bytes_count) {
   void *alloc = mmap(NULL, bytes_count, PROT_READ | PROT_WRITE,
                      MAP_ANON | MAP_PRIVATE, -1, 0);
   return alloc;
+}
+
+static Arena arena_valloc(usize bytes_count) {
+  u8 *const arena_memory = unix_virtual_mem_alloc(bytes_count);
+  Arena res = {0};
+
+  if (arena_memory == NULL) {
+    fprintf(stderr, "failed to allocate virtual memory: %zu bytes\n",
+            bytes_count);
+    return res;
+  }
+
+  return arena_from_mem(arena_memory, bytes_count);
 }
 
 static At_U8 slice_u8_first(Slice_u8 slice) {
@@ -443,8 +458,9 @@ static BencodeParseResult bencode_parse(BencodeParser *parser, Arena *arena,
   return res;
 }
 
-int main() {
-
+void test() {
+  {
+  }
   {
     const char *const bencode_input = "i-123e";
 
@@ -471,25 +487,8 @@ int main() {
     assert(__builtin_memcmp(parse_res.bencode.v.s.data, "spam", 4) == 0);
   }
   {
-    const usize arena_memory_bytes_count = 8 * sizeof(BencodeValue);
-    u8 *arena_memory = unix_virtual_mem_alloc(arena_memory_bytes_count);
-    if (arena_memory == NULL) {
-      fprintf(stderr, "failed to allocate virtual memory: %zu bytes\n",
-              arena_memory_bytes_count);
-      return 1;
-    }
-
-    Arena arena = arena_from_mem(arena_memory, arena_memory_bytes_count);
-
-    const usize scratch_memory_bytes_count = 8 * sizeof(BencodeValue);
-    u8 *scratch_memory = unix_virtual_mem_alloc(scratch_memory_bytes_count);
-    if (scratch_memory == NULL) {
-      fprintf(stderr, "failed to allocate virtual memory: %zu bytes\n",
-              scratch_memory_bytes_count);
-      return 1;
-    }
-
-    Arena scratch = arena_from_mem(scratch_memory, scratch_memory_bytes_count);
+    Arena arena = arena_valloc(1 * KiB);
+    Arena scratch = arena_valloc(1 * KiB);
 
     const char *const bencode_input = "l4:spami456ee";
 
@@ -501,6 +500,6 @@ int main() {
     assert(parse_res.bencode.kind == BencodeKindList);
     assert(parse_res.bencode.v.list.len == 2);
   }
-
-  return 0;
 }
+
+int main() { test(); }
