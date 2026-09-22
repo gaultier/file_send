@@ -130,6 +130,11 @@ static u8 *unix_virtual_mem_alloc(usize bytes_count) {
   assert(bytes_count > 0);
   void *alloc = mmap(NULL, bytes_count, PROT_READ | PROT_WRITE,
                      MAP_ANON | MAP_PRIVATE, -1, 0);
+
+  if ((void *)-1 == alloc) {
+    return NULL;
+  }
+
   return alloc;
 }
 
@@ -165,7 +170,7 @@ static At_U8 slice_u8_first(Slice_u8 slice) {
 static bool slice_u8_skip(Slice_u8 *slice, usize count) {
   assert(slice);
   if (!slice->data) {
-    return true;
+    return false;
   }
 
   if (slice->len < count) {
@@ -206,6 +211,7 @@ static bool bencode_list_push(BencodeList *list, BencodeValue item,
     list->data = arena_alloc(arena, __alignof__(BencodeValue),
                              sizeof(BencodeValue), list->cap);
     if (!list->data) {
+      list->cap = 0;
       return false;
     }
   }
@@ -217,10 +223,11 @@ static bool bencode_list_push(BencodeList *list, BencodeValue item,
     assert(cap_before < list->cap);
 
     const bool in_place_extend_possible =
-        (usize)arena->start == ((usize)list->data + list->len * sizeof(item));
+        (usize)arena->start ==
+        ((usize)list->data + (list->cap - list->len) * sizeof(item));
     if (in_place_extend_possible) {
-      usize bytes_after = list->cap;
-      assert(!__builtin_mul_overflow(list->cap, sizeof(item), &bytes_after));
+      usize bytes_after = list->cap - list->len;
+      assert(!__builtin_mul_overflow(0, sizeof(item), &bytes_after));
 
       assert(!__builtin_add_overflow((usize)arena->start, bytes_after,
                                      (usize *)&arena->start));
@@ -333,13 +340,18 @@ static BencodeParseResult bencode_parse_num(BencodeParser *parser) {
     return res;
   }
 
+  // No digit consumed e.g. `ie`: invalid.
+  if (parsed_usize.consumed == 0) {
+    return res;
+  }
+
   assert(slice_u8_skip(&parser->data, parsed_usize.consumed));
+  if (parsed_usize.num > SSIZE_MAX) {
+    return res;
+  }
+
   res.bencode.v.num = parsed_usize.num;
   if (negative_sign) {
-    if (parsed_usize.num > SSIZE_MAX) {
-      return res;
-    }
-
     res.bencode.v.num = -1 * (isize)(parsed_usize.num);
   } else {
     res.bencode.v.num = parsed_usize.num;
