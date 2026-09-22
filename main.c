@@ -14,6 +14,8 @@
 #include <unistd.h>
 
 typedef uint8_t u8;
+typedef uint32_t u32;
+typedef uint64_t u64;
 typedef int32_t i32;
 typedef int64_t i64;
 typedef size_t usize;
@@ -736,6 +738,210 @@ void bencode_print(BencodeValue v, usize indent) {
   default:
     assert(0 && "unreachable");
   }
+}
+
+// ---------------------------------------------------------------------------
+// SHA-256
+// ---------------------------------------------------------------------------
+
+// SHA-256 as specified in FIPS 180-4, in plain C: no hardware intrinsics, so
+// the same code runs on every target and stays diffable against the spec.
+//
+// The usual three step API: one context, any number of `Update` calls, one
+// `Final`. None of the three can fail, so none of them returns anything:
+//
+//   SHA256_CTX ctx = {0};
+//   SHA256_Init(&ctx);
+//   SHA256_Update(&ctx, data);
+//   u8 digest[SHA256_DIGEST_LENGTH] = {0};
+//   SHA256_Final(&ctx, digest);
+
+#define SHA256_DIGEST_LENGTH 32
+#define SHA256_CBLOCK 64
+
+typedef struct {
+  // Chaining state: the eight working variables between blocks.
+  u32 h[8];
+  // Total number of message bytes fed in so far. Only the low 61 bits can
+  // matter: the padding stores the length in bits, in 64 bits.
+  u64 len;
+  // Bytes of a not-yet-complete block held back from a previous `Update`.
+  u32 partial_len;
+  u8 partial[SHA256_CBLOCK];
+} SHA256_CTX;
+
+// First 32 bits of the fractional parts of the cube roots of the first 64
+// primes (FIPS 180-4, 4.2.2).
+static const u32 sha256_k[64] = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+    0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+    0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+    0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+    0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+    0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+};
+
+// `count` must be in 1..31: a rotation by 0 would shift a `u32` by 32, which
+// is undefined behaviour.
+__attribute((warn_unused_result)) static u32 u32_rotate_right(u32 x,
+                                                              u32 count) {
+  assert(count >= 1);
+  assert(count <= 31);
+
+  return (x >> count) | (x << (32 - count));
+}
+
+__attribute((warn_unused_result)) static u32 u32_from_bytes_be(const u8 *data) {
+  assert(data);
+
+  return ((u32)data[0] << 24) | ((u32)data[1] << 16) | ((u32)data[2] << 8) |
+         (u32)data[3];
+}
+
+static void u32_to_bytes_be(u32 value, u8 *res) {
+  assert(res);
+
+  res[0] = (u8)(value >> 24);
+  res[1] = (u8)(value >> 16);
+  res[2] = (u8)(value >> 8);
+  res[3] = (u8)value;
+}
+
+// Mix one full 64 byte block into the chaining state (FIPS 180-4, 6.2.2).
+static void sha256_compress(u32 h[8], const u8 block[SHA256_CBLOCK]) {
+  assert(h);
+  assert(block);
+
+  u32 w[64] = {0};
+  for (usize i = 0; i < 16; i++) {
+    w[i] = u32_from_bytes_be(block + i * 4);
+  }
+  for (usize i = 16; i < 64; i++) {
+    const u32 s0 = u32_rotate_right(w[i - 15], 7) ^
+                   u32_rotate_right(w[i - 15], 18) ^ (w[i - 15] >> 3);
+    const u32 s1 = u32_rotate_right(w[i - 2], 17) ^
+                   u32_rotate_right(w[i - 2], 19) ^ (w[i - 2] >> 10);
+    w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+  }
+
+  u32 a = h[0], b = h[1], c = h[2], d = h[3];
+  u32 e = h[4], f = h[5], g = h[6], hh = h[7];
+
+  for (usize i = 0; i < 64; i++) {
+    const u32 s1 = u32_rotate_right(e, 6) ^ u32_rotate_right(e, 11) ^
+                   u32_rotate_right(e, 25);
+    const u32 ch = (e & f) ^ (~e & g);
+    const u32 t1 = hh + s1 + ch + sha256_k[i] + w[i];
+    const u32 s0 = u32_rotate_right(a, 2) ^ u32_rotate_right(a, 13) ^
+                   u32_rotate_right(a, 22);
+    const u32 maj = (a & b) ^ (a & c) ^ (b & c);
+    const u32 t2 = s0 + maj;
+
+    hh = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+  }
+
+  h[0] += a;
+  h[1] += b;
+  h[2] += c;
+  h[3] += d;
+  h[4] += e;
+  h[5] += f;
+  h[6] += g;
+  h[7] += hh;
+}
+
+// First 32 bits of the fractional parts of the square roots of the first 8
+// primes (FIPS 180-4, 5.3.3).
+static void SHA256_Init(SHA256_CTX *ctx) {
+  assert(ctx);
+
+  *ctx = (SHA256_CTX){
+      .h = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f,
+            0x9b05688c, 0x1f83d9ab, 0x5be0cd19},
+  };
+}
+
+static void SHA256_Update(SHA256_CTX *ctx, Slice_u8 data) {
+  assert(ctx);
+  assert(data.data || 0 == data.len);
+  assert(ctx->partial_len < SHA256_CBLOCK);
+
+  const u8 *remaining = data.data;
+  usize len = data.len;
+  ctx->len += len;
+
+  // Top up a partial block from a previous call first. It is only compressed
+  // once it is full: a short `Update` must leave it partial, not hash it.
+  if (ctx->partial_len > 0) {
+    const usize wanted = SHA256_CBLOCK - ctx->partial_len;
+    const usize taken = len < wanted ? len : wanted;
+
+    memcpy(ctx->partial + ctx->partial_len, remaining, taken);
+    ctx->partial_len += (u32)taken;
+    remaining += taken;
+    len -= taken;
+
+    if (ctx->partial_len < SHA256_CBLOCK) {
+      assert(0 == len);
+      return;
+    }
+
+    sha256_compress(ctx->h, ctx->partial);
+    ctx->partial_len = 0;
+  }
+
+  while (len >= SHA256_CBLOCK) {
+    sha256_compress(ctx->h, remaining);
+    remaining += SHA256_CBLOCK;
+    len -= SHA256_CBLOCK;
+  }
+
+  if (len > 0) {
+    memcpy(ctx->partial, remaining, len);
+  }
+  ctx->partial_len = (u32)len;
+}
+
+// `*ctx` is left zeroed, so it cannot be used again without another
+// `SHA256_Init`, and the chaining state of the message does not linger.
+static void SHA256_Final(SHA256_CTX *ctx, u8 res[SHA256_DIGEST_LENGTH]) {
+  assert(ctx);
+  assert(res);
+
+  // The length goes in the last 8 bytes of the last block, so pad with a
+  // single one bit then zeroes up to the next offset 56 (mod 64).
+  const u64 len_bits = ctx->len * 8;
+  const usize len_mod = (usize)(ctx->len % SHA256_CBLOCK);
+  const usize padding_len =
+      len_mod < 56 ? 56 - len_mod : 56 + SHA256_CBLOCK - len_mod;
+
+  u8 padding[SHA256_CBLOCK] = {0x80};
+  SHA256_Update(ctx, slice_u8_make(padding, padding_len));
+
+  u8 len_bytes[8] = {0};
+  for (usize i = 0; i < 8; i++) {
+    len_bytes[i] = (u8)(len_bits >> (56 - 8 * i));
+  }
+  SHA256_Update(ctx, slice_u8_make(len_bytes, sizeof(len_bytes)));
+  assert(0 == ctx->partial_len);
+
+  for (usize i = 0; i < 8; i++) {
+    u32_to_bytes_be(ctx->h[i], res + i * 4);
+  }
+
+  *ctx = (SHA256_CTX){0};
 }
 
 // ---------------------------------------------------------------------------
@@ -1650,6 +1856,170 @@ static void test_bencode_validate_dict(void) {
   }
 }
 
+// Hash `data` in one `Update` call, the simplest possible use of the API.
+static void test_sha256_once(Slice_u8 data, u8 res[SHA256_DIGEST_LENGTH]) {
+  SHA256_CTX ctx = {0};
+  SHA256_Init(&ctx);
+  SHA256_Update(&ctx, data);
+  SHA256_Final(&ctx, res);
+}
+
+// Expected digests are given as hex, the way every SHA-256 test vector in the
+// wild is published, so that a vector can be pasted in unmodified.
+static void test_sha256_expect_hex(Slice_u8 data, const char *expected_hex) {
+  assert(expected_hex);
+  assert(2 * SHA256_DIGEST_LENGTH == strlen(expected_hex));
+
+  u8 expected[SHA256_DIGEST_LENGTH] = {0};
+  for (usize i = 0; i < SHA256_DIGEST_LENGTH; i++) {
+    u32 byte = 0;
+    assert(1 == sscanf(expected_hex + 2 * i, "%2x", &byte));
+    expected[i] = (u8)byte;
+  }
+
+  u8 actual[SHA256_DIGEST_LENGTH] = {0};
+  test_sha256_once(data, actual);
+
+  assert(0 == memcmp(actual, expected, sizeof(actual)));
+}
+
+static void test_sha256_vectors(void) {
+  // FIPS 180-2 / NIST CAVP vectors.
+  test_sha256_expect_hex(
+      test_slice(""),
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+  test_sha256_expect_hex(
+      test_slice("abc"),
+      "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+  // 56 bytes: the shortest message whose padding needs a second block.
+  test_sha256_expect_hex(
+      test_slice("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+      "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+  test_sha256_expect_hex(
+      test_slice("abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijk"
+                 "lmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu"),
+      "cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1");
+
+  // A NUL byte is data like any other: the API takes a length, never a C
+  // string.
+  test_sha256_expect_hex(
+      slice_u8_make((u8 *)"\x00", 1),
+      "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d");
+}
+
+// The million 'a' vector, fed in odd-sized chunks so that the partial block
+// handling is exercised on a message far longer than one block.
+static void test_sha256_million_a(void) {
+  SHA256_CTX ctx = {0};
+  SHA256_Init(&ctx);
+
+  u8 chunk[1000] = {0};
+  memset(chunk, 'a', sizeof(chunk));
+  for (usize i = 0; i < 1000; i++) {
+    SHA256_Update(&ctx, slice_u8_make(chunk, sizeof(chunk)));
+  }
+
+  u8 actual[SHA256_DIGEST_LENGTH] = {0};
+  SHA256_Final(&ctx, actual);
+
+  const u8 expected[SHA256_DIGEST_LENGTH] = {
+      0xcd, 0xc7, 0x6e, 0x5c, 0x99, 0x14, 0xfb, 0x92, 0x81, 0xa1, 0xc7,
+      0xe2, 0x84, 0xd7, 0x3e, 0x67, 0xf1, 0x80, 0x9a, 0x48, 0xa4, 0x97,
+      0x20, 0x0e, 0x04, 0x6d, 0x39, 0xcc, 0xc7, 0x11, 0x2c, 0xd0,
+  };
+  assert(0 == memcmp(actual, expected, sizeof(actual)));
+}
+
+// Any split of the same message must give the same digest: one `Update`, one
+// `Update` per byte, and a split at every offset around the block boundary.
+static void test_sha256_incremental(void) {
+  u8 input[200] = {0};
+  for (usize i = 0; i < sizeof(input); i++) {
+    input[i] = (u8)(i * 31 + 7);
+  }
+
+  u8 expected[SHA256_DIGEST_LENGTH] = {0};
+  test_sha256_once(slice_u8_make(input, sizeof(input)), expected);
+
+  {
+    SHA256_CTX ctx = {0};
+    SHA256_Init(&ctx);
+    for (usize i = 0; i < sizeof(input); i++) {
+      SHA256_Update(&ctx, slice_u8_make(input + i, 1));
+    }
+
+    u8 actual[SHA256_DIGEST_LENGTH] = {0};
+    SHA256_Final(&ctx, actual);
+    assert(0 == memcmp(actual, expected, sizeof(actual)));
+  }
+
+  for (usize split = 0; split <= sizeof(input); split++) {
+    SHA256_CTX ctx = {0};
+    SHA256_Init(&ctx);
+    SHA256_Update(&ctx, slice_u8_make(input, split));
+    // An empty `Update` in the middle must be a no-op, including when the
+    // slice has no data pointer at all.
+    SHA256_Update(&ctx, (Slice_u8){0});
+    SHA256_Update(&ctx,
+                  slice_u8_make(input + split, sizeof(input) - split));
+
+    u8 actual[SHA256_DIGEST_LENGTH] = {0};
+    SHA256_Final(&ctx, actual);
+    assert(0 == memcmp(actual, expected, sizeof(actual)));
+  }
+}
+
+// Every message length from 0 to 1024 bytes, which covers every padding case
+// and every partial block length. One digest stands for all of them: they are
+// themselves hashed, in order, and the result compared to a constant obtained
+// from a reference implementation.
+static void test_sha256_lengths(void) {
+  u8 input[1025] = {0};
+  for (usize i = 0; i < sizeof(input); i++) {
+    input[i] = (u8)(i * 31 + 7);
+  }
+
+  SHA256_CTX outer = {0};
+  SHA256_Init(&outer);
+
+  for (usize len = 0; len < sizeof(input); len++) {
+    u8 digest[SHA256_DIGEST_LENGTH] = {0};
+    test_sha256_once(slice_u8_make(input, len), digest);
+    SHA256_Update(&outer, slice_u8_make(digest, sizeof(digest)));
+  }
+
+  u8 actual[SHA256_DIGEST_LENGTH] = {0};
+  SHA256_Final(&outer, actual);
+
+  const u8 expected[SHA256_DIGEST_LENGTH] = {
+      0x70, 0x2f, 0xea, 0x77, 0xff, 0x7e, 0x99, 0xf9, 0xf5, 0x44, 0x35,
+      0x64, 0x87, 0x2a, 0x6d, 0xe2, 0x52, 0x04, 0xa0, 0x69, 0xe1, 0x42,
+      0x4f, 0xea, 0xc3, 0xff, 0x3e, 0x25, 0x19, 0x52, 0x2f, 0x15,
+  };
+  assert(0 == memcmp(actual, expected, sizeof(actual)));
+}
+
+// `Init` must fully reset a context, so that reusing one is the same as
+// starting from a fresh `{0}` one.
+static void test_sha256_reuse(void) {
+  u8 expected[SHA256_DIGEST_LENGTH] = {0};
+  test_sha256_once(test_slice("abc"), expected);
+
+  SHA256_CTX ctx = {0};
+  SHA256_Init(&ctx);
+  SHA256_Update(&ctx, test_slice("some other message entirely"));
+
+  u8 discarded[SHA256_DIGEST_LENGTH] = {0};
+  SHA256_Final(&ctx, discarded);
+
+  SHA256_Init(&ctx);
+  SHA256_Update(&ctx, test_slice("abc"));
+
+  u8 actual[SHA256_DIGEST_LENGTH] = {0};
+  SHA256_Final(&ctx, actual);
+  assert(0 == memcmp(actual, expected, sizeof(actual)));
+}
+
 static void test(const char *filter) {
   const struct {
     const char *name;
@@ -1667,6 +2037,11 @@ static void test(const char *filter) {
       {"bencode_parse", test_bencode_parse},
       {"bytes_cmp", test_bytes_cmp},
       {"bencode_validate_dict", test_bencode_validate_dict},
+      {"sha256_vectors", test_sha256_vectors},
+      {"sha256_million_a", test_sha256_million_a},
+      {"sha256_incremental", test_sha256_incremental},
+      {"sha256_lengths", test_sha256_lengths},
+      {"sha256_reuse", test_sha256_reuse},
   };
 
   usize run = 0;
