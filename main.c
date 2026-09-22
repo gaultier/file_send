@@ -83,6 +83,20 @@ typedef struct {
 
 static bool char_is_digit_ascii(u8 c) { return '0' <= c && c <= '9'; }
 
+// Convert `magnitude`, optionally negated, to an isize.
+// Returns false if the value does not fit.
+static bool isize_from_usize(usize magnitude, bool negative, isize *res) {
+  assert(res);
+
+  // The overflow builtins compute in infinite precision and report whether the
+  // result fits the *destination* type, so both of these are checked
+  // conversions: `0 - magnitude` is a checked negation, `magnitude + 0` a
+  // checked cast. This handles the asymmetric boundary (`|ISIZE_MIN|` is a
+  // valid magnitude but not a valid positive value) with no special case.
+  return negative ? !__builtin_sub_overflow(0, magnitude, res)
+                  : !__builtin_add_overflow(magnitude, 0, res);
+}
+
 static void *arena_alloc(Arena *arena, usize align, usize elem_size,
                          usize elem_count) {
   assert(arena != NULL);
@@ -182,10 +196,13 @@ static bool slice_u8_skip(Slice_u8 *slice, usize count) {
   return true;
 }
 
+// The caller must have already established that `count` bytes are available:
+// silently returning a short slice would turn a malformed length into a
+// successful parse of truncated data.
 static Slice_u8 slice_u8_take(Slice_u8 input, usize count) {
-  Slice_u8 res = {.data = input.data,
-                  .len = count > input.len ? input.len : count};
-  return res;
+  assert(count <= input.len);
+
+  return (Slice_u8){.data = input.data, .len = count};
 }
 
 static Slice_u8 slice_u8_make(u8 *data, usize len) {
@@ -226,11 +243,13 @@ static bool bencode_list_push(BencodeList *list, BencodeValue item,
         (usize)arena->start ==
         ((usize)list->data + (list->cap - list->len) * sizeof(item));
     if (in_place_extend_possible) {
-      usize bytes_after = list->cap - list->len;
-      assert(!__builtin_mul_overflow(0, sizeof(item), &bytes_after));
+      usize bytes_after = 0;
+      assert(!__builtin_mul_overflow(list->cap - list->len, sizeof(item),
+                                     &bytes_after));
 
-      assert(!__builtin_add_overflow((usize)arena->start, bytes_after,
-                                     (usize *)&arena->start));
+      usize start = (usize)arena->start;
+      assert(!__builtin_add_overflow(start, bytes_after, &start));
+      arena->start = (u8 *)start;
 
       // OOM.
       if (arena->start > arena->end) {
@@ -252,6 +271,7 @@ static bool bencode_list_push(BencodeList *list, BencodeValue item,
 
 oom:
   list->cap = cap_before;
+  list->data = data_before;
   arena->start = start_before;
   return false;
 }
@@ -348,16 +368,17 @@ static BencodeParseResult bencode_parse_num(BencodeParser *parser) {
   }
 
   assert(slice_u8_skip(&parser->data, parsed_usize.consumed));
-  if (parsed_usize.num > SSIZE_MAX) {
+
+  // `i-0e` is invalid bencode.
+  if (negative_sign && parsed_usize.num == 0) {
     return res;
   }
 
-  res.bencode.v.num = parsed_usize.num;
-  if (negative_sign) {
-    res.bencode.v.num = -1 * (isize)(parsed_usize.num);
-  } else {
-    res.bencode.v.num = parsed_usize.num;
+  isize num = 0;
+  if (!isize_from_usize(parsed_usize.num, negative_sign, &num)) {
+    return res;
   }
+  res.bencode.v.num = num;
 
   if (!bencode_parse_consume(parser, 'e')) {
     return res;
