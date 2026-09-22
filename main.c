@@ -298,7 +298,9 @@ static ParseUsize ascii_num_parse(Slice_u8 data) {
       return res;
     }
 
-    has_leading_zero = current.value == '0' && res.consumed == 0;
+    if (current.value == '0' && res.consumed == 0) {
+      has_leading_zero = true;
+    }
 
     // Leading zeroes forbidden except `i0e`.
     if (res.consumed > 0 && has_leading_zero) {
