@@ -339,7 +339,8 @@ static BencodeParseResult bencode_parse_string(BencodeParser *parser) {
   return res;
 }
 
-static BencodeParseResult bencode_parse(BencodeParser *parser, Arena *arena);
+static BencodeParseResult bencode_parse(BencodeParser *parser, Arena *arena,
+                                        Arena scratch);
 
 // FIXME: rec.
 static BencodeParseResult bencode_parse_list(BencodeParser *parser,
@@ -374,37 +375,42 @@ static BencodeParseResult bencode_parse_list(BencodeParser *parser,
   return res;
 }
 
-static BencodeParseResult bencode_parse(BencodeParser *parser, Arena *arena) {
+static BencodeParseResult bencode_parse(BencodeParser *parser, Arena *arena,
+                                        Arena scratch) {
   assert(parser);
   assert(arena);
 
   BencodeParseResult res = {0};
 
-  const At_U8 current = slice_u8_first(parser->data);
-  if (!current.ok) {
-    return res;
-  }
+  const usize MAX_LEN = parser->data.len;
 
-  switch (current.value) {
-  case 'i':
-    return bencode_parse_num(parser);
-  case 'l':
-    return bencode_parse_list(parser, arena);
-  case 'd':
-    assert(0 && "todo");
-  case '0':
-  case '1':
-  case '2':
-  case '3':
-  case '4':
-  case '5':
-  case '6':
-  case '7':
-  case '8':
-  case '9':
-    return bencode_parse_string(parser);
-  default:
-    return res;
+  for (usize _i = 0; _i < MAX_LEN; _i++) {
+    const At_U8 current = slice_u8_first(parser->data);
+    if (!current.ok) {
+      return res;
+    }
+
+    switch (current.value) {
+    case 'i':
+      return bencode_parse_num(parser);
+    case 'l':
+      return bencode_parse_list(parser, arena);
+    case 'd':
+      assert(0 && "todo");
+    case '0':
+    case '1':
+    case '2':
+    case '3':
+    case '4':
+    case '5':
+    case '6':
+    case '7':
+    case '8':
+    case '9':
+      return bencode_parse_string(parser);
+    default:
+      return res;
+    }
   }
 
   return res;
@@ -448,12 +454,22 @@ int main() {
 
     Arena arena = arena_from_mem(arena_memory, arena_memory_bytes_count);
 
+    const usize scratch_memory_bytes_count = 8 * sizeof(BencodeValue);
+    u8 *scratch_memory = unix_virtual_mem_alloc(scratch_memory_bytes_count);
+    if (scratch_memory == NULL) {
+      fprintf(stderr, "failed to allocate virtual memory: %zu bytes\n",
+              scratch_memory_bytes_count);
+      return 1;
+    }
+
+    Arena scratch = arena_from_mem(scratch_memory, scratch_memory_bytes_count);
+
     const char *const bencode_input = "l4:spami456ee";
 
     BencodeParser parser = {
         .data = slice_u8_make((u8 *)bencode_input, strlen(bencode_input)),
     };
-    BencodeParseResult parse_res = bencode_parse(&parser, &arena);
+    BencodeParseResult parse_res = bencode_parse(&parser, &arena, scratch);
     assert(parse_res.ok);
     assert(parse_res.bencode.kind == BencodeKindList);
     assert(parse_res.bencode.v.list.len == 2);
