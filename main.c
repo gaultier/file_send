@@ -446,8 +446,9 @@ static BencodeParseResult bencode_parse(BencodeParser *parser, Arena *arena,
     return res;
   }
 
-  // At most, there are as many bencode values as input bytes.
-  const usize values_cap = parser->data.len;
+  // At most, there are as many bencode values as `input bytes/2+1` since each
+  // value takes at least 2 bytes.
+  const usize values_cap = parser->data.len / 2 + 1;
   BencodeValue *values = arena_alloc(&scratch, __alignof__(BencodeValue),
                                      sizeof(BencodeValue), values_cap);
   // OOM?
