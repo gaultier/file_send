@@ -8,9 +8,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <unistd.h>
 
 typedef uint8_t u8;
-typedef int i32;
+typedef int32_t i32;
+typedef int64_t i64;
 typedef size_t usize;
 typedef ssize_t isize;
 
@@ -155,15 +157,54 @@ static u8 *unix_virtual_mem_alloc(usize bytes_count) {
   return alloc;
 }
 
+static usize unix_get_page_size(void) {
+  i64 res = sysconf(_SC_PAGE_SIZE);
+  if (res == -1) {
+    return 0;
+  }
+
+  return (usize)res;
+}
+
+static bool unix_vprotect_none(void *ptr, usize size) {
+  if (-1 == mprotect(ptr, size, PROT_NONE)) {
+    return false;
+  }
+  return true;
+}
+
+static usize usize_round_up_multiple_of(usize n, usize multiple) {
+  assert(multiple != 0);
+
+  const usize factor = n / multiple;
+
+  usize res = 0;
+  assert(!__builtin_add_overflow(factor, 1, &res));
+  assert(!__builtin_mul_overflow(res, multiple, &res));
+
+  assert(0 == res % multiple);
+  return res;
+}
+
 static Arena arena_valloc(usize bytes_count) {
-  u8 *const arena_memory = unix_virtual_mem_alloc(bytes_count);
+  const usize page_size = unix_get_page_size();
+  assert(page_size > 0);
+
+  const usize page_count_for_bytes =
+      usize_round_up_multiple_of(bytes_count, page_size) * page_size;
+  const usize os_alloc_size =
+      (page_count_for_bytes + 1 /* guard page */) * page_size;
+
+  u8 *const arena_memory = unix_virtual_mem_alloc(os_alloc_size);
   Arena res = {0};
 
   if (arena_memory == NULL) {
-    fprintf(stderr, "failed to allocate virtual memory: %zu bytes\n",
-            bytes_count);
     return res;
   }
+
+  // Guard page.
+  assert(unix_vprotect_none(arena_memory + page_count_for_bytes * page_size,
+                            page_size));
 
   return arena_from_mem(arena_memory, bytes_count);
 }
