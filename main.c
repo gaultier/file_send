@@ -17,8 +17,7 @@ typedef int64_t i64;
 typedef size_t usize;
 typedef ssize_t isize;
 
-const usize KiB = 1024;
-const usize MiB = 1024 * KiB;
+static const usize KiB = 1024;
 
 typedef struct {
   // Start of the arena allocation.
@@ -855,8 +854,7 @@ static void test_ascii_num_parse(void) {
   };
 
   for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-    Slice_u8 data =
-        slice_u8_make((u8 *)cases[i].input, strlen(cases[i].input));
+    Slice_u8 data = slice_u8_make((u8 *)cases[i].input, strlen(cases[i].input));
     const Slice_u8 before = data;
 
     usize num = 0xAA;
