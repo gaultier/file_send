@@ -950,8 +950,19 @@ static void sha256_final(Sha256Ctx *ctx, u8 res[SHA256_DIGEST_LENGTH]) {
   *ctx = (Sha256Ctx){0};
 }
 
+static void sha256_print_hex(u8 digest[SHA256_DIGEST_LENGTH]) {
+  const u8 lut[] = "0123456789abcdef";
+
+  for (usize i = 0; i < SHA256_DIGEST_LENGTH; i++) {
+    const u8 byte = digest[i];
+    const u8 c1 = lut[byte & 16];
+    const u8 c2 = lut[byte >> 4];
+    printf("%c%c", c2, c1);
+  }
+}
+
 static const usize TORRENT_BLOCK_SIZE = 16 * KiB;
-static const usize TORRENT_PIECES_PER_BLOCK = 16;
+// static const usize TORRENT_PIECES_PER_BLOCK = 16;
 
 __attribute((warn_unused_result)) static bool
 torrent_compute_merkle_tree(Slice_u8 data, MerkleNode *root, Arena *arena) {
@@ -976,6 +987,9 @@ torrent_compute_merkle_tree(Slice_u8 data, MerkleNode *root, Arena *arena) {
     sha256_init(&sha);
     sha256_update(&sha, block_data);
     sha256_final(&sha, node->sha256);
+
+    sha256_print_hex(node->sha256);
+    puts("\n");
   }
 
   // Last block.
@@ -994,10 +1008,15 @@ torrent_compute_merkle_tree(Slice_u8 data, MerkleNode *root, Arena *arena) {
     sha256_init(&sha);
     sha256_update(&sha, block_data);
     sha256_final(&sha, node->sha256);
+    sha256_print_hex(node->sha256);
+    puts("\n");
   }
 
-  const usize leaves_count =
-      (((MerkleNode *)arena->start - first_leaf)) / sizeof(MerkleNode *);
+  // const usize leaves_count =
+  //     (((MerkleNode *)arena->start - first_leaf)) / sizeof(MerkleNode *);
+
+  // TODO: build the binary tree.
+  *root = *first_leaf;
 
   return true;
 }
@@ -2145,6 +2164,26 @@ int main(i32 argc, char *argv[]) {
 
     bencode_print(bencode, 0);
     printf("\n");
+  } else if (0 == strcmp(cmd, "gen-merkle-tree")) {
+    assert(3 == argc);
+
+    const i32 fd = open(argv[2], O_RDONLY);
+    assert(-1 != fd);
+
+    struct stat st = {0};
+    assert(-1 != fstat(fd, &st));
+    assert(st.st_size > 0);
+
+    void *const input_data =
+        mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    assert((void *)-1 != input_data);
+
+    Slice_u8 input = slice_u8_make((u8 *)input_data, (usize)st.st_size);
+    Arena arena = arena_valloc(32 * MiB);
+
+    MerkleNode root = {0};
+    assert(torrent_compute_merkle_tree(input, &root, &arena));
+
   } else {
     fprintf(stderr, "unknown command\n");
     exit(1);
