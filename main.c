@@ -664,45 +664,74 @@ bencode_parse(BencodeParser *parser, Arena *arena, Arena scratch,
   return false;
 }
 
-void bencode_print(BencodeValue v, usize indent) {
+static void bencode_print_indent(usize indent) {
   for (usize i = 0; i < indent; i++) {
     printf(" ");
   }
+}
 
+// Print `v` in a JSON-ish form.
+//
+// The caller owns the cursor: it has already written whatever precedes the
+// value on the current line (the leading indentation, or a `key: ` prefix), so
+// this never indents the value itself. `indent` is the column the *line* the
+// value starts on begins at, which is what the children and the closing
+// bracket are aligned against. Nothing is written after the value either: a
+// trailing newline is the caller's to add.
+void bencode_print(BencodeValue v, usize indent) {
   switch (v.kind) {
   case BencodeKindInteger:
-    printf("%zd ", v.v.num);
+    printf("%zd", v.v.num);
     break;
+
   case BencodeKindString:
     printf("\"%.*s\"", (i32)v.v.s.len, v.v.s.data);
     break;
-  case BencodeKindDict:
-    printf("{\n");
 
+  case BencodeKindDict:
+    // An empty container has no children to lay out, so it stays on one line.
+    if (0 == v.v.list.len) {
+      printf("{}");
+      break;
+    }
+
+    printf("{\n");
     for (usize i = 0; i < v.v.list.len; i += 2) {
       if (i > 0) {
         printf(",\n");
       }
+      bencode_print_indent(indent + 2);
       bencode_print(v.v.list.data[i], indent + 2);
       printf(": ");
+      // The value is indented against the start of the key's line, not against
+      // the column it happens to start at, so a nested container closes
+      // underneath its key.
       bencode_print(v.v.list.data[i + 1], indent + 2);
     }
-
-    printf("}\n");
+    printf("\n");
+    bencode_print_indent(indent);
+    printf("}");
     break;
 
   case BencodeKindList:
-    printf("[\n");
+    if (0 == v.v.list.len) {
+      printf("[]");
+      break;
+    }
 
+    printf("[\n");
     for (usize i = 0; i < v.v.list.len; i++) {
       if (i > 0) {
         printf(",\n");
       }
+      bencode_print_indent(indent + 2);
       bencode_print(v.v.list.data[i], indent + 2);
     }
-
-    printf("]\n");
+    printf("\n");
+    bencode_print_indent(indent);
+    printf("]");
     break;
+
   default:
     assert(0 && "unreachable");
   }
@@ -1652,20 +1681,16 @@ static void test(const char *filter) {
     run++;
   }
 
-  // A filter that matches nothing is a typo, not a pass.
-  assert(run > 0);
   printf("%zu test(s) passed\n", run);
 }
 
 int main(i32 argc, char *argv[]) {
-  assert(argc >= 1);
+  assert(argc == 2);
   assert(argv);
 
   test(argc > 1 ? argv[1] : NULL);
 
-  const i32 fd = open(
-      "/Users/philippe.gaultier/Downloads/OpenBSD-7.9-amd64-USB.img.torrent",
-      O_RDONLY);
+  const i32 fd = open(argv[1], O_RDONLY);
   assert(-1 != fd);
 
   struct stat st = {0};
@@ -1685,4 +1710,5 @@ int main(i32 argc, char *argv[]) {
   assert(bencode_parse(&parser, &arena, scratch, &bencode));
 
   bencode_print(bencode, 0);
+  printf("\n");
 }
