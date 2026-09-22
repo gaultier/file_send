@@ -191,9 +191,11 @@ static Arena arena_valloc(usize bytes_count) {
   assert(page_size > 0);
 
   const usize page_count_for_bytes =
-      usize_round_up_multiple_of(bytes_count, page_size) * page_size;
-  const usize os_alloc_size =
-      (page_count_for_bytes + 1 /* guard page */) * page_size;
+      usize_round_up_multiple_of(bytes_count, page_size) / page_size;
+  usize os_alloc_size = 0;
+  // Guard page.
+  assert(!__builtin_add_overflow(page_count_for_bytes, 1, &os_alloc_size));
+  assert(!__builtin_mul_overflow(os_alloc_size, page_size, &os_alloc_size));
 
   u8 *const arena_memory = unix_virtual_mem_alloc(os_alloc_size);
   Arena res = {0};
@@ -680,7 +682,6 @@ static void test_arena_alloc(void) {
 static void test_arena_valloc(void) {
   // A request the kernel cannot satisfy. `mmap` reports `MAP_FAILED`, not NULL,
   // so this also pins down that conversion.
-  // Note: this prints the expected diagnostic to stderr.
   const Arena arena = arena_valloc((usize)1 << 62);
   assert(NULL == arena.start);
   assert(NULL == arena.end);
