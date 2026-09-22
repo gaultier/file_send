@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <limits.h>
 #include <stdbool.h>
@@ -8,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -18,6 +20,7 @@ typedef size_t usize;
 typedef ssize_t isize;
 
 static const usize KiB = 1024;
+static const usize MiB = 1024 * KiB;
 
 typedef struct {
   // Start of the arena allocation.
@@ -659,6 +662,50 @@ bencode_parse(BencodeParser *parser, Arena *arena, Arena scratch,
   }
 
   return false;
+}
+
+void bencode_print(BencodeValue v, usize indent) {
+  for (usize i = 0; i < indent; i++) {
+    printf(" ");
+  }
+
+  switch (v.kind) {
+  case BencodeKindInteger:
+    printf("%zd ", v.v.num);
+    break;
+  case BencodeKindString:
+    printf("\"%.*s\"", (i32)v.v.s.len, v.v.s.data);
+    break;
+  case BencodeKindDict:
+    printf("{\n");
+
+    for (usize i = 0; i < v.v.list.len; i += 2) {
+      if (i > 0) {
+        printf(",\n");
+      }
+      bencode_print(v.v.list.data[i], indent + 2);
+      printf(": ");
+      bencode_print(v.v.list.data[i + 1], indent + 2);
+    }
+
+    printf("}\n");
+    break;
+
+  case BencodeKindList:
+    printf("[\n");
+
+    for (usize i = 0; i < v.v.list.len; i++) {
+      if (i > 0) {
+        printf(",\n");
+      }
+      bencode_print(v.v.list.data[i], indent + 2);
+    }
+
+    printf("]\n");
+    break;
+  default:
+    assert(0 && "unreachable");
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1615,4 +1662,27 @@ int main(i32 argc, char *argv[]) {
   assert(argv);
 
   test(argc > 1 ? argv[1] : NULL);
+
+  const i32 fd = open(
+      "/Users/philippe.gaultier/Downloads/OpenBSD-7.9-amd64-USB.img.torrent",
+      O_RDONLY);
+  assert(-1 != fd);
+
+  struct stat st = {0};
+  assert(-1 != fstat(fd, &st));
+  assert(st.st_size > 0);
+
+  void *const bencode_data =
+      mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+  assert((void *)-1 != bencode_data);
+
+  BencodeParser parser = {.data.data = (u8 *)bencode_data,
+                          .data.len = st.st_size};
+  Arena arena = arena_valloc(32 * MiB);
+  Arena scratch = arena_valloc(32 * MiB);
+
+  BencodeValue bencode = {0};
+  assert(bencode_parse(&parser, &arena, scratch, &bencode));
+
+  bencode_print(bencode, 0);
 }
