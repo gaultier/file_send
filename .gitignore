@@ -1,2 +1,4 @@
 a.out
 *.dSYM
+a.out.san
+a.out.san.dSYM/

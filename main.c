@@ -137,7 +137,10 @@ static Arena arena_from_mem(u8 *mem, usize bytes_count) {
 
   usize end = 0;
   assert(!__builtin_add_overflow((usize)mem, bytes_count, &end));
-  return (Arena){.start = mem, .end = (u8 *)end};
+
+  const Arena res = {.start = mem, .end = (u8 *)end};
+  assert(res.start <= res.end);
+  return res;
 }
 
 static u8 *unix_virtual_mem_alloc(usize bytes_count) {
@@ -206,6 +209,8 @@ static Slice_u8 slice_u8_take(Slice_u8 input, usize count) {
 }
 
 static Slice_u8 slice_u8_make(u8 *data, usize len) {
+  assert(data || 0 == len);
+
   return (Slice_u8){.data = data, .len = len};
 }
 
@@ -267,12 +272,17 @@ static bool bencode_list_push(BencodeList *list, BencodeValue item,
 
   list->data[list->len++] = item;
 
+  assert(list->len <= list->cap);
+  assert(list->data);
   return true;
 
 oom:
   list->cap = cap_before;
   list->data = data_before;
   arena->start = start_before;
+
+  assert(list->len <= list->cap);
+  assert(arena->start <= arena->end);
   return false;
 }
 
@@ -315,6 +325,7 @@ static ParseUsize ascii_num_parse(Slice_u8 data) {
     // End.
     if (!char_is_digit_ascii(current.value)) {
       res.ok = true;
+      assert(res.consumed < MAX_LEN);
       return res;
     }
 
@@ -338,7 +349,9 @@ static ParseUsize ascii_num_parse(Slice_u8 data) {
     assert(slice_u8_skip(&data, 1));
   }
 
-  // Actually unreachable.
+  // Unreachable: a usize overflows after at most 20 digits, so the overflow
+  // checks above always return before `MAX_LEN` iterations.
+  assert(0 && "unreachable");
   return res;
 }
 
@@ -385,6 +398,7 @@ static BencodeParseResult bencode_parse_num(BencodeParser *parser) {
   };
 
   res.ok = true;
+  assert(res.bencode.kind == BencodeKindInteger);
   return res;
 }
 
@@ -422,7 +436,11 @@ static BencodeParseResult bencode_parse_string(BencodeParser *parser) {
 
   res.bencode.v.s = slice_u8_take(parser->data, parsed_usize.num);
   assert(slice_u8_skip(&parser->data, parsed_usize.num));
+
   res.ok = true;
+  assert(res.bencode.kind == BencodeKindString);
+  assert(res.bencode.v.s.len == parsed_usize.num);
+  assert(res.bencode.v.s.data || 0 == res.bencode.v.s.len);
   return res;
 }
 
@@ -433,6 +451,8 @@ static BencodeParseResult bencode_parse(BencodeParser *parser, Arena *arena,
 static BencodeParseResult bencode_parse_list(BencodeParser *parser,
                                              Arena *arena, Arena scratch) {
   assert(parser);
+  assert(arena);
+  assert(arena->start <= arena->end);
 
   BencodeParseResult res = {0};
 
@@ -446,6 +466,9 @@ static BencodeParseResult bencode_parse_list(BencodeParser *parser,
   for (usize _i = 0; _i < remaining_bytes; _i++) {
     if (bencode_parse_consume(parser, 'e')) {
       res.ok = true;
+      assert(res.bencode.kind == BencodeKindList);
+      assert(res.bencode.v.list.len <= res.bencode.v.list.cap);
+      assert(res.bencode.v.list.len == _i);
       return res;
     }
 
@@ -466,6 +489,8 @@ static BencodeParseResult bencode_parse(BencodeParser *parser, Arena *arena,
                                         Arena scratch) {
   assert(parser);
   assert(arena);
+  assert(arena->start <= arena->end);
+  assert(parser->data.data || 0 == parser->data.len);
 
   BencodeParseResult res = {0};
 
@@ -503,77 +528,636 @@ static BencodeParseResult bencode_parse(BencodeParser *parser, Arena *arena,
   return res;
 }
 
-void test() {
-  // Dynamic array push.
-  {
-    Arena arena = arena_valloc(1 * KiB);
-    BencodeList list = {0};
-    for (usize i = 0; i < 4; i++) {
-      BencodeValue num = {.kind = BencodeKindInteger, .v.num = i};
-      assert(bencode_list_push(&list, num, &arena));
-    }
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
-    assert(list.len == 4);
-    assert(list.cap == 8);
-    assert((usize)arena.start ==
-           (usize)list.data + sizeof(BencodeValue) * list.cap);
+// Arena memory comes straight from `mmap` and is therefore zeroed, which makes
+// a read of never-written memory look like a perfectly valid zeroed struct.
+// Poison it so such a read shows up as an obviously bogus value instead.
+static Arena test_arena(usize bytes_count) {
+  Arena arena = arena_valloc(bytes_count);
+  assert(arena.start);
+  assert(arena.end);
+  assert((usize)arena.end - (usize)arena.start == bytes_count);
+
+  memset(arena.start, 0xAA, bytes_count);
+  return arena;
+}
+
+static BencodeParser test_parser(const char *input) {
+  assert(input);
+
+  return (BencodeParser){
+      .data = slice_u8_make((u8 *)input, strlen(input)),
+  };
+}
+
+static void test_char_is_digit_ascii(void) {
+  assert(char_is_digit_ascii('0'));
+  assert(char_is_digit_ascii('5'));
+  assert(char_is_digit_ascii('9'));
+
+  assert(!char_is_digit_ascii('0' - 1));
+  assert(!char_is_digit_ascii('9' + 1));
+  assert(!char_is_digit_ascii(0));
+  assert(!char_is_digit_ascii(255));
+}
+
+static void test_isize_from_usize(void) {
+  isize res = 0;
+
+  // Positive.
+  assert(isize_from_usize(0, false, &res) && 0 == res);
+  assert(isize_from_usize(123, false, &res) && 123 == res);
+  assert(isize_from_usize((usize)SSIZE_MAX, false, &res) && SSIZE_MAX == res);
+  assert(!isize_from_usize((usize)SSIZE_MAX + 1, false, &res));
+  assert(!isize_from_usize(SIZE_MAX, false, &res));
+
+  // Negative. `|ISIZE_MIN|` is one greater than `ISIZE_MAX`.
+  assert(isize_from_usize(0, true, &res) && 0 == res);
+  assert(isize_from_usize(123, true, &res) && -123 == res);
+  assert(isize_from_usize((usize)SSIZE_MAX, true, &res) && -SSIZE_MAX == res);
+  assert(isize_from_usize((usize)SSIZE_MAX + 1, true, &res) &&
+         (-SSIZE_MAX - 1) == res);
+  assert(!isize_from_usize((usize)SSIZE_MAX + 2, true, &res));
+  assert(!isize_from_usize(SIZE_MAX, true, &res));
+}
+
+static void test_arena_alloc(void) {
+  // Alignment: a 1 byte allocation leaves the head misaligned, the next
+  // 8-aligned allocation has to round up over 7 bytes of padding.
+  {
+    Arena arena = test_arena(1 * KiB);
+
+    u8 *const a = arena_alloc(&arena, 1, sizeof(u8), 1);
+    assert(a);
+    assert(0 != ((usize)arena.start % 8));
+
+    void *const b = arena_alloc(&arena, 8, 8, 1);
+    assert(b);
+    assert(0 == ((usize)b % 8));
+    assert((usize)b == (usize)a + 8);
   }
-  // Dynamic array OOM.
+  // An allocation that exactly fills the arena is legal; the next one is not.
   {
-    Arena arena = arena_valloc(8 * sizeof(BencodeValue));
-    BencodeList list = {0};
-    for (usize i = 0; i < 8; i++) {
-      BencodeValue num = {.kind = BencodeKindInteger, .v.num = i};
-      assert(bencode_list_push(&list, num, &arena));
-    }
+    Arena arena = test_arena(64);
 
-    BencodeValue num = {.kind = BencodeKindInteger, .v.num = 9};
-    assert(!bencode_list_push(&list, num, &arena));
+    void *const p = arena_alloc(&arena, 8, 8, 8);
+    assert(p);
+    assert(arena.start == arena.end);
 
-    assert(list.len == 8);
-    assert(list.cap == 8);
-    assert((usize)arena.start ==
-           (usize)list.data + sizeof(BencodeValue) * list.cap);
+    assert(NULL == arena_alloc(&arena, 1, sizeof(u8), 1));
   }
+  // OOM leaves the arena untouched.
   {
-    const char *const bencode_input = "i-123e";
+    Arena arena = test_arena(64);
+    u8 *const start_before = arena.start;
 
-    BencodeParser parser = {
-        .data = slice_u8_make((u8 *)bencode_input, strlen(bencode_input)),
-    };
-    BencodeParseResult parse_res = bencode_parse_num(&parser);
-    __builtin_dump_struct(&parse_res, &printf);
-    assert(parse_res.ok);
-    assert(parse_res.bencode.kind == BencodeKindInteger);
-    assert(parse_res.bencode.v.num == -123);
+    assert(NULL == arena_alloc(&arena, 1, sizeof(u8), 65));
+    assert(arena.start == start_before);
+
+    // Still usable afterwards.
+    assert(arena_alloc(&arena, 1, sizeof(u8), 64));
+    assert(arena.start == arena.end);
   }
+  // Multiple allocations are contiguous when alignment allows it.
   {
-    const char *const bencode_input = "4:spam";
+    Arena arena = test_arena(1 * KiB);
 
-    BencodeParser parser = {
-        .data = slice_u8_make((u8 *)bencode_input, strlen(bencode_input)),
-    };
-    BencodeParseResult parse_res = bencode_parse_string(&parser);
-    __builtin_dump_struct(&parse_res, &printf);
-    assert(parse_res.ok);
-    assert(parse_res.bencode.kind == BencodeKindString);
-    assert(parse_res.bencode.v.s.len == 4);
-    assert(__builtin_memcmp(parse_res.bencode.v.s.data, "spam", 4) == 0);
-  }
-  {
-    Arena arena = arena_valloc(1 * KiB);
-    Arena scratch = arena_valloc(1 * KiB);
-
-    const char *const bencode_input = "l4:spami456ee";
-
-    BencodeParser parser = {
-        .data = slice_u8_make((u8 *)bencode_input, strlen(bencode_input)),
-    };
-    BencodeParseResult parse_res = bencode_parse(&parser, &arena, scratch);
-    assert(parse_res.ok);
-    assert(parse_res.bencode.kind == BencodeKindList);
-    assert(parse_res.bencode.v.list.len == 2);
+    BencodeValue *const a =
+        arena_alloc(&arena, __alignof__(BencodeValue), sizeof(BencodeValue), 2);
+    BencodeValue *const b =
+        arena_alloc(&arena, __alignof__(BencodeValue), sizeof(BencodeValue), 3);
+    assert(a);
+    assert(b);
+    assert(b == a + 2);
+    assert((usize)arena.start == (usize)a + 5 * sizeof(BencodeValue));
   }
 }
 
-int main() { test(); }
+static void test_arena_valloc(void) {
+  // A request the kernel cannot satisfy. `mmap` reports `MAP_FAILED`, not NULL,
+  // so this also pins down that conversion.
+  // Note: this prints the expected diagnostic to stderr.
+  const Arena arena = arena_valloc((usize)1 << 62);
+  assert(NULL == arena.start);
+  assert(NULL == arena.end);
+}
+
+static void test_slice_u8(void) {
+  u8 data[] = {'a', 'b', 'c'};
+
+  // slice_u8_first.
+  {
+    assert(!slice_u8_first(slice_u8_make(NULL, 0)).ok);
+    assert(!slice_u8_first(slice_u8_make(data, 0)).ok);
+
+    const At_U8 first = slice_u8_first(slice_u8_make(data, sizeof(data)));
+    assert(first.ok);
+    assert('a' == first.value);
+  }
+  // slice_u8_skip.
+  {
+    Slice_u8 empty = slice_u8_make(NULL, 0);
+    assert(!slice_u8_skip(&empty, 1));
+
+    Slice_u8 slice = slice_u8_make(data, sizeof(data));
+
+    // Past the end: refused, and the slice is unchanged.
+    assert(!slice_u8_skip(&slice, sizeof(data) + 1));
+    assert(sizeof(data) == slice.len);
+    assert(data == slice.data);
+
+    assert(slice_u8_skip(&slice, 0));
+    assert(sizeof(data) == slice.len);
+
+    assert(slice_u8_skip(&slice, 2));
+    assert(1 == slice.len);
+    assert('c' == slice_u8_first(slice).value);
+
+    // Skipping exactly to the end is legal.
+    assert(slice_u8_skip(&slice, 1));
+    assert(0 == slice.len);
+    assert(!slice_u8_first(slice).ok);
+  }
+  // slice_u8_take.
+  {
+    const Slice_u8 slice = slice_u8_make(data, sizeof(data));
+
+    assert(0 == slice_u8_take(slice, 0).len);
+    assert(sizeof(data) == slice_u8_take(slice, sizeof(data)).len);
+
+    const Slice_u8 taken = slice_u8_take(slice, 2);
+    assert(2 == taken.len);
+    assert(data == taken.data);
+  }
+}
+
+static void test_bencode_list_push(void) {
+  const BencodeValue sentinel = {.kind = BencodeKindInteger, .v.num = 42};
+
+  // Growth from empty: one allocation of `min_cap`, no relocation.
+  {
+    Arena arena = test_arena(1 * KiB);
+    BencodeList list = {0};
+
+    for (usize i = 0; i < 4; i++) {
+      const BencodeValue item = {.kind = BencodeKindInteger, .v.num = (isize)i};
+      assert(bencode_list_push(&list, item, &arena));
+    }
+
+    assert(4 == list.len);
+    assert(8 == list.cap);
+    assert((usize)arena.start ==
+           (usize)list.data + sizeof(BencodeValue) * list.cap);
+
+    for (usize i = 0; i < list.len; i++) {
+      assert(BencodeKindInteger == list.data[i].kind);
+      assert((isize)i == list.data[i].v.num);
+    }
+  }
+  // Extending in place: nothing was allocated after the array, so growing it
+  // only moves the arena head and the array does not relocate.
+  {
+    Arena arena = test_arena(1 * KiB);
+    BencodeList list = {0};
+
+    for (usize i = 0; i < 8; i++) {
+      const BencodeValue item = {.kind = BencodeKindInteger, .v.num = (isize)i};
+      assert(bencode_list_push(&list, item, &arena));
+    }
+    const BencodeValue *const data_before = list.data;
+
+    assert(bencode_list_push(&list, sentinel, &arena));
+
+    assert(data_before == list.data);
+    assert(9 == list.len);
+    assert(16 == list.cap);
+    assert((usize)arena.start ==
+           (usize)list.data + sizeof(BencodeValue) * list.cap);
+
+    for (usize i = 0; i < 8; i++) {
+      assert((isize)i == list.data[i].v.num);
+    }
+    assert(42 == list.data[8].v.num);
+  }
+  // Relocating: an unrelated allocation sits right behind the array, so it has
+  // to be copied. Regression test for the direction of that copy.
+  {
+    Arena arena = test_arena(1 * KiB);
+    BencodeList list = {0};
+
+    for (usize i = 0; i < 8; i++) {
+      const BencodeValue item = {.kind = BencodeKindInteger, .v.num = (isize)i};
+      assert(bencode_list_push(&list, item, &arena));
+    }
+    const BencodeValue *const data_before = list.data;
+
+    // Wedge an allocation in behind the array.
+    assert(arena_alloc(&arena, 1, sizeof(u8), 1));
+
+    assert(bencode_list_push(&list, sentinel, &arena));
+
+    assert(data_before != list.data);
+    assert(9 == list.len);
+    assert(16 == list.cap);
+
+    for (usize i = 0; i < 8; i++) {
+      assert(BencodeKindInteger == list.data[i].kind);
+      assert((isize)i == list.data[i].v.num);
+    }
+    assert(42 == list.data[8].v.num);
+  }
+  // OOM on the initial allocation: the list is left empty, not half-sized.
+  {
+    Arena arena = test_arena(1);
+    BencodeList list = {0};
+
+    assert(!bencode_list_push(&list, sentinel, &arena));
+    assert(0 == list.len);
+    assert(0 == list.cap);
+    assert(NULL == list.data);
+  }
+  // OOM while extending in place: list and arena are both left untouched.
+  {
+    Arena arena = test_arena(8 * sizeof(BencodeValue));
+    BencodeList list = {0};
+
+    for (usize i = 0; i < 8; i++) {
+      const BencodeValue item = {.kind = BencodeKindInteger, .v.num = (isize)i};
+      assert(bencode_list_push(&list, item, &arena));
+    }
+    const BencodeValue *const data_before = list.data;
+    u8 *const start_before = arena.start;
+
+    assert(!bencode_list_push(&list, sentinel, &arena));
+
+    assert(8 == list.len);
+    assert(8 == list.cap);
+    assert(data_before == list.data);
+    assert(start_before == arena.start);
+
+    for (usize i = 0; i < list.len; i++) {
+      assert((isize)i == list.data[i].v.num);
+    }
+  }
+  // OOM while relocating: same, and the old array is still the live one.
+  {
+    Arena arena = test_arena(8 * sizeof(BencodeValue) + 1);
+    BencodeList list = {0};
+
+    for (usize i = 0; i < 8; i++) {
+      const BencodeValue item = {.kind = BencodeKindInteger, .v.num = (isize)i};
+      assert(bencode_list_push(&list, item, &arena));
+    }
+    // Block the in-place path, leaving no room for a relocated array.
+    assert(arena_alloc(&arena, 1, sizeof(u8), 1));
+
+    const BencodeValue *const data_before = list.data;
+    u8 *const start_before = arena.start;
+
+    assert(!bencode_list_push(&list, sentinel, &arena));
+
+    assert(8 == list.len);
+    assert(8 == list.cap);
+    assert(data_before == list.data);
+    assert(start_before == arena.start);
+
+    for (usize i = 0; i < list.len; i++) {
+      assert((isize)i == list.data[i].v.num);
+    }
+  }
+}
+
+static void test_ascii_num_parse(void) {
+  // No data at all.
+  {
+    const ParseUsize res = ascii_num_parse(slice_u8_make(NULL, 0));
+    assert(!res.ok);
+    assert(0 == res.consumed);
+  }
+  // Terminated by a non-digit.
+  {
+    const ParseUsize res = ascii_num_parse(slice_u8_make((u8 *)"123e", 4));
+    assert(res.ok);
+    assert(123 == res.num);
+    assert(3 == res.consumed);
+  }
+  // Unterminated: the digits run to the end of the input.
+  {
+    const ParseUsize res = ascii_num_parse(slice_u8_make((u8 *)"123", 3));
+    assert(!res.ok);
+  }
+  // No digit at all: valid, but consumes nothing. Callers have to check.
+  {
+    const ParseUsize res = ascii_num_parse(slice_u8_make((u8 *)"e", 1));
+    assert(res.ok);
+    assert(0 == res.consumed);
+    assert(0 == res.num);
+  }
+  // A single zero is fine.
+  {
+    const ParseUsize res = ascii_num_parse(slice_u8_make((u8 *)"0e", 2));
+    assert(res.ok);
+    assert(0 == res.num);
+    assert(1 == res.consumed);
+  }
+  // Leading zeroes are not.
+  {
+    const ParseUsize res = ascii_num_parse(slice_u8_make((u8 *)"0123e", 5));
+    assert(!res.ok);
+  }
+  {
+    const ParseUsize res = ascii_num_parse(slice_u8_make((u8 *)"00e", 3));
+    assert(!res.ok);
+  }
+  // The largest representable usize.
+  {
+    const char *const input = "18446744073709551615e";
+    const ParseUsize res =
+        ascii_num_parse(slice_u8_make((u8 *)input, strlen(input)));
+    assert(res.ok);
+    assert(SIZE_MAX == res.num);
+    assert(20 == res.consumed);
+  }
+  // Overflow on the final add: SIZE_MAX + 1.
+  {
+    const char *const input = "18446744073709551616e";
+    const ParseUsize res =
+        ascii_num_parse(slice_u8_make((u8 *)input, strlen(input)));
+    assert(!res.ok);
+  }
+  // Overflow on the multiply: 20 nines.
+  {
+    const char *const input = "99999999999999999999e";
+    const ParseUsize res =
+        ascii_num_parse(slice_u8_make((u8 *)input, strlen(input)));
+    assert(!res.ok);
+  }
+}
+
+static void test_bencode_parse_num(void) {
+  const struct {
+    const char *input;
+    bool ok;
+    isize num;
+  } cases[] = {
+      {"i0e", true, 0},
+      {"i1e", true, 1},
+      {"i-1e", true, -1},
+      {"i-123e", true, -123},
+      {"i9223372036854775807e", true, SSIZE_MAX},
+      {"i-9223372036854775808e", true, -SSIZE_MAX - 1},
+      // Out of range for an isize.
+      {"i9223372036854775808e", false, 0},
+      {"i-9223372036854775809e", false, 0},
+      {"i18446744073709551615e", false, 0},
+      // Out of range for a usize.
+      {"i18446744073709551616e", false, 0},
+      // Malformed.
+      {"i-0e", false, 0},
+      {"ie", false, 0},
+      {"i-e", false, 0},
+      {"i0123e", false, 0},
+      {"i123", false, 0},
+      {"i123x", false, 0},
+      {"i", false, 0},
+      {"", false, 0},
+      {"42e", false, 0},
+      // Trailing data is left for the caller.
+      {"i42ei43e", true, 42},
+  };
+
+  for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    BencodeParser parser = test_parser(cases[i].input);
+    const BencodeParseResult res = bencode_parse_num(&parser);
+
+    assert(res.ok == cases[i].ok);
+    if (cases[i].ok) {
+      assert(BencodeKindInteger == res.bencode.kind);
+      assert(cases[i].num == res.bencode.v.num);
+    }
+  }
+}
+
+static void test_bencode_parse_string(void) {
+  const struct {
+    const char *input;
+    bool ok;
+    const char *str;
+    usize remaining;
+  } cases[] = {
+      {"0:", true, "", 0},
+      {"1:a", true, "a", 0},
+      {"4:spam", true, "spam", 0},
+      {"3:0:x", true, "0:x", 0},
+      // Trailing data is left for the caller.
+      {"4:spameggs", true, "spam", 4},
+      // The length exceeds what is left.
+      {"5:spam", false, NULL, 0},
+      {"1:", false, NULL, 0},
+      // Malformed.
+      {"4spam", false, NULL, 0},
+      {"4", false, NULL, 0},
+      {"e", false, NULL, 0},
+      {"", false, NULL, 0},
+      {"04:spam", false, NULL, 0},
+      {":spam", false, NULL, 0},
+  };
+
+  for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    BencodeParser parser = test_parser(cases[i].input);
+    const BencodeParseResult res = bencode_parse_string(&parser);
+
+    assert(res.ok == cases[i].ok);
+    if (!cases[i].ok) {
+      continue;
+    }
+
+    assert(BencodeKindString == res.bencode.kind);
+    assert(strlen(cases[i].str) == res.bencode.v.s.len);
+    assert(0 ==
+           memcmp(res.bencode.v.s.data, cases[i].str, res.bencode.v.s.len));
+    assert(cases[i].remaining == parser.data.len);
+  }
+}
+
+static void test_bencode_parse_list(void) {
+  // Empty list.
+  {
+    Arena arena = test_arena(1 * KiB);
+    Arena scratch = test_arena(1 * KiB);
+    BencodeParser parser = test_parser("le");
+
+    const BencodeParseResult res = bencode_parse_list(&parser, &arena, scratch);
+    assert(res.ok);
+    assert(BencodeKindList == res.bencode.kind);
+    assert(0 == res.bencode.v.list.len);
+    assert(0 == parser.data.len);
+  }
+  // Mixed items.
+  {
+    Arena arena = test_arena(1 * KiB);
+    Arena scratch = test_arena(1 * KiB);
+    BencodeParser parser = test_parser("l4:spami456ee");
+
+    const BencodeParseResult res = bencode_parse_list(&parser, &arena, scratch);
+    assert(res.ok);
+    assert(2 == res.bencode.v.list.len);
+
+    const BencodeValue *const items = res.bencode.v.list.data;
+    assert(BencodeKindString == items[0].kind);
+    assert(4 == items[0].v.s.len);
+    assert(0 == memcmp(items[0].v.s.data, "spam", 4));
+    assert(BencodeKindInteger == items[1].kind);
+    assert(456 == items[1].v.num);
+    assert(0 == parser.data.len);
+  }
+  // Nested lists.
+  {
+    Arena arena = test_arena(1 * KiB);
+    Arena scratch = test_arena(1 * KiB);
+    BencodeParser parser = test_parser("lli1eee");
+
+    const BencodeParseResult res = bencode_parse_list(&parser, &arena, scratch);
+    assert(res.ok);
+    assert(1 == res.bencode.v.list.len);
+
+    const BencodeValue inner = res.bencode.v.list.data[0];
+    assert(BencodeKindList == inner.kind);
+    assert(1 == inner.v.list.len);
+    assert(BencodeKindInteger == inner.v.list.data[0].kind);
+    assert(1 == inner.v.list.data[0].v.num);
+  }
+  // Not a list at all.
+  {
+    Arena arena = test_arena(1 * KiB);
+    Arena scratch = test_arena(1 * KiB);
+    BencodeParser parser = test_parser("i1e");
+
+    assert(!bencode_parse_list(&parser, &arena, scratch).ok);
+  }
+  // Unterminated, with and without items.
+  {
+    const char *const inputs[] = {"l", "li1e", "lli1ee", "l4:spam"};
+
+    for (usize i = 0; i < sizeof(inputs) / sizeof(inputs[0]); i++) {
+      Arena arena = test_arena(1 * KiB);
+      Arena scratch = test_arena(1 * KiB);
+      BencodeParser parser = test_parser(inputs[i]);
+
+      assert(!bencode_parse_list(&parser, &arena, scratch).ok);
+    }
+  }
+  // An item that fails to parse fails the whole list.
+  {
+    const char *const inputs[] = {"lxe", "li-0ee", "l5:spame"};
+
+    for (usize i = 0; i < sizeof(inputs) / sizeof(inputs[0]); i++) {
+      Arena arena = test_arena(1 * KiB);
+      Arena scratch = test_arena(1 * KiB);
+      BencodeParser parser = test_parser(inputs[i]);
+
+      assert(!bencode_parse_list(&parser, &arena, scratch).ok);
+    }
+  }
+  // OOM while pushing an item.
+  {
+    Arena arena = test_arena(1);
+    Arena scratch = test_arena(1 * KiB);
+    BencodeParser parser = test_parser("li1ee");
+
+    assert(!bencode_parse_list(&parser, &arena, scratch).ok);
+  }
+}
+
+static void test_bencode_parse(void) {
+  Arena arena = test_arena(1 * KiB);
+  Arena scratch = test_arena(1 * KiB);
+
+  // Dispatch to each kind.
+  {
+    BencodeParser parser = test_parser("i42e");
+    const BencodeParseResult res = bencode_parse(&parser, &arena, scratch);
+    assert(res.ok);
+    assert(BencodeKindInteger == res.bencode.kind);
+    assert(42 == res.bencode.v.num);
+  }
+  {
+    BencodeParser parser = test_parser("3:abc");
+    const BencodeParseResult res = bencode_parse(&parser, &arena, scratch);
+    assert(res.ok);
+    assert(BencodeKindString == res.bencode.kind);
+    assert(3 == res.bencode.v.s.len);
+  }
+  {
+    BencodeParser parser = test_parser("l4:spami456ee");
+    const BencodeParseResult res = bencode_parse(&parser, &arena, scratch);
+    assert(res.ok);
+    assert(BencodeKindList == res.bencode.kind);
+    assert(2 == res.bencode.v.list.len);
+  }
+  // Every digit dispatches to the string parser.
+  {
+    for (u8 c = '0'; c <= '9'; c++) {
+      const char input[] = {(char)c, ':', 0};
+      BencodeParser parser = test_parser(input);
+      const BencodeParseResult res = bencode_parse(&parser, &arena, scratch);
+
+      // Only `0:` has a body short enough to succeed.
+      assert(res.ok == ('0' == c));
+    }
+  }
+  // An unknown leading byte.
+  {
+    BencodeParser parser = test_parser("x");
+    assert(!bencode_parse(&parser, &arena, scratch).ok);
+  }
+  // Empty input.
+  {
+    BencodeParser parser = test_parser("");
+    assert(!bencode_parse(&parser, &arena, scratch).ok);
+  }
+}
+
+static void test(const char *filter) {
+  const struct {
+    const char *name;
+    void (*fn)(void);
+  } tests[] = {
+      {"char_is_digit_ascii", test_char_is_digit_ascii},
+      {"isize_from_usize", test_isize_from_usize},
+      {"arena_alloc", test_arena_alloc},
+      {"arena_valloc", test_arena_valloc},
+      {"slice_u8", test_slice_u8},
+      {"bencode_list_push", test_bencode_list_push},
+      {"ascii_num_parse", test_ascii_num_parse},
+      {"bencode_parse_num", test_bencode_parse_num},
+      {"bencode_parse_string", test_bencode_parse_string},
+      {"bencode_parse_list", test_bencode_parse_list},
+      {"bencode_parse", test_bencode_parse},
+  };
+
+  usize run = 0;
+  for (usize i = 0; i < sizeof(tests) / sizeof(tests[0]); i++) {
+    if (filter && 0 != strcmp(filter, tests[i].name)) {
+      continue;
+    }
+
+    printf("test %s\n", tests[i].name);
+    tests[i].fn();
+    run++;
+  }
+
+  // A filter that matches nothing is a typo, not a pass.
+  assert(run > 0);
+  printf("%zu test(s) passed\n", run);
+}
+
+int main(i32 argc, char *argv[]) {
+  assert(argc >= 1);
+  assert(argv);
+
+  test(argc > 1 ? argv[1] : NULL);
+}
