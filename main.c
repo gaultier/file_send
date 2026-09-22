@@ -439,6 +439,38 @@ bencode_parse_string(BencodeParser *parser, BencodeValue *res) {
   return true;
 }
 
+static i32 bytes_cmp(u8 *a, usize a_len, u8 *b, usize b_len) {
+  assert(0 && "todo");
+}
+
+static bool bencode_validate_dict(BencodeList list) {
+  assert(NULL != list.data || 0 == list.len);
+
+  // Mismatched key-value pairs?
+  if (list.len % 2 != 0) {
+    return false;
+  }
+
+  for (usize i = 0; i < list.len; i += 2) {
+    const BencodeValue key = list.data[i];
+
+    if (key.kind != BencodeKindString) {
+      return false;
+    }
+
+    if (i > 1) {
+      const BencodeValue previous = list.data[i - 2];
+
+      if (bytes_cmp(previous.v.s.data, previous.v.s.len, key.v.s.data,
+                    key.v.s.len) >= 0) {
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
 #define BENCODE_MAX_DEPTH 128
 
 // Parse one complete bencode value, with all of its children, into `*res`.
@@ -549,6 +581,11 @@ bencode_parse(BencodeParser *parser, Arena *arena, Arena scratch,
         value.v.list.data = memcpy(children, values + container.children_start,
                                    children_len * sizeof(BencodeValue));
         value.v.list.len = children_len;
+
+        if (BencodeKindDict == value.kind &&
+            !bencode_validate_dict(value.v.list)) {
+          return false;
+        }
       }
 
       // Pop all the items for this container, at once. The popped slots are
