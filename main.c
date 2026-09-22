@@ -193,12 +193,16 @@ static bool bencode_list_push(BencodeList *list, BencodeValue item,
   assert(list->len <= list->cap);
   assert(arena);
 
-  const usize initial_cap = 8;
+  const usize min_cap = 8;
   const usize growth_factor = 2;
+
+  const usize cap_before = list->cap;
+  void *const data_before = list->data;
+  void *const start_before = arena->start;
 
   // Initial alloc.
   if (list->cap == 0) {
-    list->cap = initial_cap;
+    list->cap = min_cap;
     list->data = arena_alloc(arena, __alignof__(BencodeValue),
                              sizeof(BencodeValue), list->cap);
     if (!list->data) {
@@ -207,9 +211,8 @@ static bool bencode_list_push(BencodeList *list, BencodeValue item,
   }
 
   if (list->len == list->cap) {
-    assert(list->cap >= initial_cap);
+    assert(list->cap >= min_cap);
 
-    const usize cap_before = list->cap;
     assert(!__builtin_mul_overflow(list->cap, growth_factor, &list->cap));
     assert(cap_before < list->cap);
 
@@ -224,22 +227,26 @@ static bool bencode_list_push(BencodeList *list, BencodeValue item,
 
       // OOM.
       if (arena->start > arena->end) {
-        // Reset or cap values.
-        list->cap = initial_cap;
-        arena->start = arena->end;
-        return false;
+        goto oom;
       }
     } else {
-      void *const bck = list->data;
       list->data = arena_alloc(arena, __alignof__(BencodeValue),
                                sizeof(BencodeValue), list->cap);
-      memcpy(bck, list->data, sizeof(item) * list->len);
+      if (list->data == NULL) {
+        goto oom;
+      }
+      memcpy(list->data, data_before, sizeof(item) * list->len);
     }
   }
 
   list->data[list->len++] = item;
 
   return true;
+
+oom:
+  list->cap = cap_before;
+  arena->start = start_before;
+  return false;
 }
 
 static bool bencode_parse_consume(BencodeParser *parser, u8 expected) {
