@@ -1,7 +1,6 @@
 #include <assert.h>
 #include <inttypes.h>
 #include <limits.h>
-#include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -89,11 +88,14 @@ typedef struct {
   bool ok;
 } At_U8;
 
-static bool char_is_digit_ascii(u8 c) { return '0' <= c && c <= '9'; }
+__attribute((warn_unused_result)) static bool char_is_digit_ascii(u8 c) {
+  return '0' <= c && c <= '9';
+}
 
 // Convert `magnitude`, optionally negated, to an isize.
 // Returns false if the value does not fit.
-static bool isize_from_usize(usize magnitude, bool negative, isize *res) {
+__attribute((warn_unused_result)) static bool
+isize_from_usize(usize magnitude, bool negative, isize *res) {
   assert(res);
 
   // The overflow builtins compute in infinite precision and report whether the
@@ -105,8 +107,8 @@ static bool isize_from_usize(usize magnitude, bool negative, isize *res) {
                   : !__builtin_add_overflow(magnitude, 0, res);
 }
 
-static void *arena_alloc(Arena *arena, usize align, usize elem_size,
-                         usize elem_count) {
+__attribute((warn_unused_result)) static void *
+arena_alloc(Arena *arena, usize align, usize elem_size, usize elem_count) {
   assert(arena != NULL);
   assert(arena->start != NULL);
   assert(arena->end != NULL);
@@ -139,7 +141,8 @@ static void *arena_alloc(Arena *arena, usize align, usize elem_size,
   return (u8 *)start;
 }
 
-static Arena arena_from_mem(u8 *mem, usize bytes_count) {
+__attribute((warn_unused_result)) static Arena
+arena_from_mem(u8 *mem, usize bytes_count) {
   assert(mem);
   assert(bytes_count);
 
@@ -151,7 +154,8 @@ static Arena arena_from_mem(u8 *mem, usize bytes_count) {
   return res;
 }
 
-static u8 *unix_virtual_mem_alloc(usize bytes_count) {
+__attribute((warn_unused_result)) static u8 *
+unix_virtual_mem_alloc(usize bytes_count) {
   assert(bytes_count > 0);
   void *alloc = mmap(NULL, bytes_count, PROT_READ | PROT_WRITE,
                      MAP_ANON | MAP_PRIVATE, -1, 0);
@@ -163,7 +167,7 @@ static u8 *unix_virtual_mem_alloc(usize bytes_count) {
   return alloc;
 }
 
-static usize unix_get_page_size(void) {
+__attribute((warn_unused_result)) static usize unix_get_page_size(void) {
   i64 res = sysconf(_SC_PAGE_SIZE);
   if (res == -1) {
     return 0;
@@ -172,7 +176,8 @@ static usize unix_get_page_size(void) {
   return (usize)res;
 }
 
-static bool unix_vprotect_none(void *ptr, usize size) {
+__attribute((warn_unused_result)) static bool unix_vprotect_none(void *ptr,
+                                                                 usize size) {
   if (-1 == mprotect(ptr, size, PROT_NONE)) {
     return false;
   }
@@ -180,7 +185,8 @@ static bool unix_vprotect_none(void *ptr, usize size) {
 }
 
 // `multiple` must be a power of two, which every page size is.
-static usize usize_round_up_multiple_of(usize n, usize multiple) {
+__attribute((warn_unused_result)) static usize
+usize_round_up_multiple_of(usize n, usize multiple) {
   assert(multiple != 0);
   assert(0 == (multiple & (multiple - 1)) && "not a power of two");
 
@@ -194,7 +200,7 @@ static usize usize_round_up_multiple_of(usize n, usize multiple) {
   return res;
 }
 
-static Arena arena_valloc(usize bytes_count) {
+__attribute((warn_unused_result)) static Arena arena_valloc(usize bytes_count) {
   const usize page_size = unix_get_page_size();
   assert(page_size > 0);
 
@@ -226,7 +232,7 @@ static Arena arena_valloc(usize bytes_count) {
                         (usize)arena_memory + usable_bytes - start);
 }
 
-static At_U8 slice_u8_first(Slice_u8 slice) {
+__attribute((warn_unused_result)) static At_U8 slice_u8_first(Slice_u8 slice) {
   At_U8 res = {0};
 
   if (!slice.data) {
@@ -242,7 +248,8 @@ static At_U8 slice_u8_first(Slice_u8 slice) {
   return res;
 }
 
-static bool slice_u8_skip(Slice_u8 *slice, usize count) {
+__attribute((warn_unused_result)) static bool slice_u8_skip(Slice_u8 *slice,
+                                                            usize count) {
   assert(slice);
   if (!slice->data) {
     return false;
@@ -260,19 +267,22 @@ static bool slice_u8_skip(Slice_u8 *slice, usize count) {
 // The caller must have already established that `count` bytes are available:
 // silently returning a short slice would turn a malformed length into a
 // successful parse of truncated data.
-static Slice_u8 slice_u8_take(Slice_u8 input, usize count) {
+__attribute((warn_unused_result)) static Slice_u8 slice_u8_take(Slice_u8 input,
+                                                                usize count) {
   assert(count <= input.len);
 
   return (Slice_u8){.data = input.data, .len = count};
 }
 
-static Slice_u8 slice_u8_make(u8 *data, usize len) {
+__attribute((warn_unused_result)) static Slice_u8 slice_u8_make(u8 *data,
+                                                                usize len) {
   assert(data || 0 == len);
 
   return (Slice_u8){.data = data, .len = len};
 }
 
-static bool bencode_parse_consume(BencodeParser *parser, u8 expected) {
+__attribute((warn_unused_result)) static bool
+bencode_parse_consume(BencodeParser *parser, u8 expected) {
   assert(parser);
   assert(parser->data.data);
 
@@ -289,7 +299,8 @@ static bool bencode_parse_consume(BencodeParser *parser, u8 expected) {
   return true;
 }
 
-static ParseUsize ascii_num_parse(Slice_u8 data) {
+__attribute((warn_unused_result)) static ParseUsize
+ascii_num_parse(Slice_u8 data) {
   ParseUsize res = {0};
   if (!data.data) {
     return res;
@@ -343,7 +354,8 @@ static ParseUsize ascii_num_parse(Slice_u8 data) {
 
 // `i123e`
 // `i-123e`
-static BencodeParseResult bencode_parse_num(BencodeParser *parser) {
+__attribute((warn_unused_result)) static BencodeParseResult
+bencode_parse_num(BencodeParser *parser) {
   assert(parser);
   assert(parser->data.data);
 
@@ -389,7 +401,8 @@ static BencodeParseResult bencode_parse_num(BencodeParser *parser) {
 }
 
 // `4:spam`
-static BencodeParseResult bencode_parse_string(BencodeParser *parser) {
+__attribute((warn_unused_result)) static BencodeParseResult
+bencode_parse_string(BencodeParser *parser) {
   assert(parser);
   assert(parser->data.data);
 
@@ -432,8 +445,8 @@ static BencodeParseResult bencode_parse_string(BencodeParser *parser) {
 
 #define BENCODE_MAX_DEPTH 128
 
-static BencodeParseResult bencode_parse(BencodeParser *parser, Arena *arena,
-                                        Arena scratch) {
+__attribute((warn_unused_result)) static BencodeParseResult
+bencode_parse(BencodeParser *parser, Arena *arena, Arena scratch) {
   assert(parser);
   assert(arena);
   assert(arena->start <= arena->end);
