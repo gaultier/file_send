@@ -178,9 +178,12 @@ static bool bencode_list_push(BencodeList *list, BencodeValue item,
   assert(list->len <= list->cap);
   assert(arena);
 
+  const usize initial_cap = 8;
+  const usize growth_factor = 2;
+
   // Initial alloc.
   if (list->cap == 0) {
-    list->cap = 8;
+    list->cap = initial_cap;
     list->data = arena_alloc(arena, __alignof__(BencodeValue),
                              sizeof(BencodeValue), list->cap);
     if (!list->data) {
@@ -189,7 +192,31 @@ static bool bencode_list_push(BencodeList *list, BencodeValue item,
   }
 
   if (list->len == list->cap) {
-    assert(0 && "realloc");
+    assert(list->cap >= initial_cap);
+
+    const usize cap_before = list->cap;
+    assert(!__builtin_mul_overflow(list->cap, growth_factor, &list->cap));
+    assert(cap_before < list->cap);
+
+    const bool in_place_extend_possible =
+        (usize)arena->start == ((usize)list->data + list->len * sizeof(item));
+    if (in_place_extend_possible) {
+      usize bytes_after = list->cap;
+      assert(!__builtin_mul_overflow(list->cap, sizeof(item), &bytes_after));
+
+      assert(!__builtin_add_overflow((usize)arena->start, bytes_after,
+                                     (usize *)&arena->start));
+
+      // OOM.
+      if (arena->start > arena->end) {
+        return false;
+      }
+    } else {
+      void *const bck = list->data;
+      list->data = arena_alloc(arena, __alignof__(BencodeValue),
+                               sizeof(BencodeValue), list->cap);
+      memcpy(bck, list->data, sizeof(item) * list->len);
+    }
   }
 
   list->data[list->len++] = item;
@@ -344,7 +371,7 @@ static BencodeParseResult bencode_parse(BencodeParser *parser, Arena *arena,
 
 // FIXME: rec.
 static BencodeParseResult bencode_parse_list(BencodeParser *parser,
-                                             Arena *arena) {
+                                             Arena *arena, Arena scratch) {
   assert(parser);
 
   BencodeParseResult res = {0};
@@ -362,7 +389,7 @@ static BencodeParseResult bencode_parse_list(BencodeParser *parser,
       return res;
     }
 
-    BencodeParseResult item = bencode_parse(parser, arena);
+    BencodeParseResult item = bencode_parse(parser, arena, scratch);
     if (!item.ok) {
       return res;
     }
@@ -394,7 +421,7 @@ static BencodeParseResult bencode_parse(BencodeParser *parser, Arena *arena,
     case 'i':
       return bencode_parse_num(parser);
     case 'l':
-      return bencode_parse_list(parser, arena);
+      return bencode_parse_list(parser, arena, scratch);
     case 'd':
       assert(0 && "todo");
     case '0':
