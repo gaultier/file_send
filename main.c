@@ -224,6 +224,9 @@ static bool bencode_list_push(BencodeList *list, BencodeValue item,
 
       // OOM.
       if (arena->start > arena->end) {
+        // Reset or cap values.
+        list->cap = initial_cap;
+        arena->start = arena->end;
         return false;
       }
     } else {
@@ -459,7 +462,36 @@ static BencodeParseResult bencode_parse(BencodeParser *parser, Arena *arena,
 }
 
 void test() {
+  // Dynamic array push.
   {
+    Arena arena = arena_valloc(1 * KiB);
+    BencodeList list = {0};
+    for (usize i = 0; i < 4; i++) {
+      BencodeValue num = {.kind = BencodeKindInteger, .v.num = i};
+      assert(bencode_list_push(&list, num, &arena));
+    }
+
+    assert(list.len == 4);
+    assert(list.cap == 8);
+    assert((usize)arena.start ==
+           (usize)list.data + sizeof(BencodeValue) * list.cap);
+  }
+  // Dynamic array OOM.
+  {
+    Arena arena = arena_valloc(8 * sizeof(BencodeValue));
+    BencodeList list = {0};
+    for (usize i = 0; i < 8; i++) {
+      BencodeValue num = {.kind = BencodeKindInteger, .v.num = i};
+      assert(bencode_list_push(&list, num, &arena));
+    }
+
+    BencodeValue num = {.kind = BencodeKindInteger, .v.num = 9};
+    assert(!bencode_list_push(&list, num, &arena));
+
+    assert(list.len == 8);
+    assert(list.cap == 8);
+    assert((usize)arena.start ==
+           (usize)list.data + sizeof(BencodeValue) * list.cap);
   }
   {
     const char *const bencode_input = "i-123e";
