@@ -380,34 +380,31 @@ static BencodeParseResult bencode_parse(BencodeParser *parser, Arena *arena) {
 
   BencodeParseResult res = {0};
 
-  const usize MAX = parser->data.len;
-  for (usize _i = 0; _i < MAX; _i++) {
-    const At_U8 current = slice_u8_first(parser->data);
-    if (!current.ok) {
-      return res;
-    }
+  const At_U8 current = slice_u8_first(parser->data);
+  if (!current.ok) {
+    return res;
+  }
 
-    switch (current.value) {
-    case 'i':
-      return bencode_parse_num(parser);
-    case 'l':
-      return bencode_parse_list(parser, arena);
-    case 'd':
-      assert(0 && "todo");
-    case '0':
-    case '1':
-    case '2':
-    case '3':
-    case '4':
-    case '5':
-    case '6':
-    case '7':
-    case '8':
-    case '9':
-      return bencode_parse_string(parser);
-    default:
-      return res;
-    }
+  switch (current.value) {
+  case 'i':
+    return bencode_parse_num(parser);
+  case 'l':
+    return bencode_parse_list(parser, arena);
+  case 'd':
+    assert(0 && "todo");
+  case '0':
+  case '1':
+  case '2':
+  case '3':
+  case '4':
+  case '5':
+  case '6':
+  case '7':
+  case '8':
+  case '9':
+    return bencode_parse_string(parser);
+  default:
+    return res;
   }
 
   return res;
