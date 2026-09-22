@@ -430,9 +430,6 @@ static BencodeParseResult bencode_parse_string(BencodeParser *parser) {
   return res;
 }
 
-static BencodeParseResult bencode_parse(BencodeParser *parser, Arena *arena,
-                                        Arena scratch);
-
 #define BENCODE_MAX_DEPTH 128
 
 static BencodeParseResult bencode_parse(BencodeParser *parser, Arena *arena,
@@ -453,6 +450,10 @@ static BencodeParseResult bencode_parse(BencodeParser *parser, Arena *arena,
   const usize values_cap = parser->data.len;
   BencodeValue *values = arena_alloc(&scratch, __alignof__(BencodeValue),
                                      sizeof(BencodeValue), values_cap);
+  // OOM?
+  if (!values) {
+    return res;
+  }
   usize values_len = 0;
 
   BencodeContainer containers[BENCODE_MAX_DEPTH] = {0};
@@ -531,10 +532,12 @@ static BencodeParseResult bencode_parse(BencodeParser *parser, Arena *arena,
         value.v.list.len = children_len;
       }
 
-      // Pop all the items for this container, at once.
+      // Pop all the items for this container, at once. The popped slots are
+      // scrubbed so that a stale child cannot be mistaken for a live value.
+      memset(values + container.children_start, 0,
+             children_len * sizeof(BencodeValue));
       values_len = container.children_start;
       assert(values_len < values_cap);
-      memset(values + values_len, 0, values_cap - values_len);
 
       // Do not forget to record this new bencode value!
       values[values_len++] = value;
@@ -942,35 +945,107 @@ static void test_bencode_parse_string(void) {
   }
 }
 
-static void test_bencode_parse(void) {
-  Arena arena = test_arena(1 * KiB);
-  Arena scratch = test_arena(1 * KiB);
+static bool test_bencode_is_string(BencodeValue value, const char *expected) {
+  assert(expected);
 
-  // Dispatch to each kind.
-  {
-    BencodeParser parser = test_parser("i42e");
+  const usize len = strlen(expected);
+  return BencodeKindString == value.kind && len == value.v.s.len &&
+         (0 == len || 0 == memcmp(value.v.s.data, expected, len));
+}
+
+static void test_bencode_parse(void) {
+  const struct {
+    const char *input;
+    bool ok;
+    BencodeKind kind;
+    // Only meaningful for a list or a dict.
+    usize children_len;
+    // What the parser leaves behind for the caller.
+    usize remaining;
+  } cases[] = {
+      // Scalars at the root: `bencode_parse` dispatches, the result is the
+      // value itself and not a one-element container.
+      {"i42e", true, BencodeKindInteger, 0, 0},
+      {"i-1e", true, BencodeKindInteger, 0, 0},
+      {"3:abc", true, BencodeKindString, 0, 0},
+      {"0:", true, BencodeKindString, 0, 0},
+      // Empty containers allocate nothing.
+      {"le", true, BencodeKindList, 0, 0},
+      {"de", true, BencodeKindDict, 0, 0},
+      // Flat containers.
+      {"l4:spami456ee", true, BencodeKindList, 2, 0},
+      {"li1ei2ei3ee", true, BencodeKindList, 3, 0},
+      {"d3:key5:valuee", true, BencodeKindDict, 2, 0},
+      // Nesting: a closed container is one child of its parent, whatever it
+      // holds.
+      {"llee", true, BencodeKindList, 1, 0},
+      {"lli1eee", true, BencodeKindList, 1, 0},
+      {"ld1:a1:beli2eee", true, BencodeKindList, 2, 0},
+      {"d1:ali1ei2ee1:bd1:ci3eee", true, BencodeKindDict, 4, 0},
+      // Trailing data is left for the caller, exactly like the scalar parsers.
+      {"i42etrailing", true, BencodeKindInteger, 0, 8},
+      {"lee", true, BencodeKindList, 0, 1},
+      {"lei42e", true, BencodeKindList, 0, 4},
+      // A dict holds key/value pairs, so an odd number of children is
+      // malformed.
+      {"d3:keye", false, 0, 0, 0},
+      {"di1ee", false, 0, 0, 0},
+      // NOTE: bencode requires dict keys to be strings (and to be sorted);
+      // neither is enforced yet, so this currently parses. Update this case
+      // when it stops doing so.
+      {"di1ei2ee", true, BencodeKindDict, 2, 0},
+      // Unterminated containers, at every depth.
+      {"l", false, 0, 0, 0},
+      {"d", false, 0, 0, 0},
+      {"li1e", false, 0, 0, 0},
+      {"lli1ee", false, 0, 0, 0},
+      {"d3:key5:value", false, 0, 0, 0},
+      // A stray `e` closes nothing.
+      {"e", false, 0, 0, 0},
+      {"i42ee", true, BencodeKindInteger, 0, 1},
+      // A malformed item aborts the whole parse, however deeply nested.
+      {"li-0ee", false, 0, 0, 0},
+      {"l5:spame", false, 0, 0, 0},
+      {"lli0123eee", false, 0, 0, 0},
+      {"ld1:a1:bi0123eee", false, 0, 0, 0},
+      // Unknown characters, at the root and nested.
+      {"x", false, 0, 0, 0},
+      {"lxe", false, 0, 0, 0},
+      {":", false, 0, 0, 0},
+      {"-1e", false, 0, 0, 0},
+      // Empty input.
+      {"", false, 0, 0, 0},
+  };
+
+  for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    Arena arena = test_arena(4 * KiB);
+    Arena scratch = test_arena(4 * KiB);
+
+    BencodeParser parser = test_parser(cases[i].input);
     const BencodeParseResult res = bencode_parse(&parser, &arena, scratch);
-    assert(res.ok);
-    assert(BencodeKindInteger == res.bencode.kind);
-    assert(42 == res.bencode.v.num);
+
+    assert(res.ok == cases[i].ok);
+    if (!cases[i].ok) {
+      continue;
+    }
+
+    assert(cases[i].kind == res.bencode.kind);
+    assert(cases[i].remaining == parser.data.len);
+
+    if (BencodeKindList == res.bencode.kind ||
+        BencodeKindDict == res.bencode.kind) {
+      assert(cases[i].children_len == res.bencode.v.list.len);
+      // An empty container owns no allocation at all.
+      assert(res.bencode.v.list.data || 0 == res.bencode.v.list.len);
+    }
   }
-  {
-    BencodeParser parser = test_parser("3:abc");
-    const BencodeParseResult res = bencode_parse(&parser, &arena, scratch);
-    assert(res.ok);
-    assert(BencodeKindString == res.bencode.kind);
-    assert(3 == res.bencode.v.s.len);
-  }
-  {
-    BencodeParser parser = test_parser("l4:spami456ee");
-    const BencodeParseResult res = bencode_parse(&parser, &arena, scratch);
-    assert(res.ok);
-    assert(BencodeKindList == res.bencode.kind);
-    assert(2 == res.bencode.v.list.len);
-  }
+
   // Every digit dispatches to the string parser.
   {
     for (u8 c = '0'; c <= '9'; c++) {
+      Arena arena = test_arena(1 * KiB);
+      Arena scratch = test_arena(1 * KiB);
+
       const char input[] = {(char)c, ':', 0};
       BencodeParser parser = test_parser(input);
       const BencodeParseResult res = bencode_parse(&parser, &arena, scratch);
@@ -979,14 +1054,149 @@ static void test_bencode_parse(void) {
       assert(res.ok == ('0' == c));
     }
   }
-  // An unknown leading byte.
+
+  // The whole tree, spelled out: children are stored in input order and the
+  // nested containers point at their own right-sized allocations.
   {
-    BencodeParser parser = test_parser("x");
+    Arena arena = test_arena(4 * KiB);
+    Arena scratch = test_arena(4 * KiB);
+
+    BencodeParser parser = test_parser("ld1:a1:beli2eee");
+    const BencodeParseResult res = bencode_parse(&parser, &arena, scratch);
+    assert(res.ok);
+    assert(BencodeKindList == res.bencode.kind);
+    assert(2 == res.bencode.v.list.len);
+
+    const BencodeValue dict = res.bencode.v.list.data[0];
+    assert(BencodeKindDict == dict.kind);
+    assert(2 == dict.v.list.len);
+    assert(test_bencode_is_string(dict.v.list.data[0], "a"));
+    assert(test_bencode_is_string(dict.v.list.data[1], "b"));
+
+    const BencodeValue list = res.bencode.v.list.data[1];
+    assert(BencodeKindList == list.kind);
+    assert(1 == list.v.list.len);
+    assert(BencodeKindInteger == list.v.list.data[0].kind);
+    assert(2 == list.v.list.data[0].v.num);
+  }
+
+  // Strings point into the input, they are not copied.
+  {
+    Arena arena = test_arena(1 * KiB);
+    Arena scratch = test_arena(1 * KiB);
+
+    const char *const input = "l4:spame";
+    BencodeParser parser = test_parser(input);
+    const BencodeParseResult res = bencode_parse(&parser, &arena, scratch);
+    assert(res.ok);
+    assert((u8 *)input + 3 == res.bencode.v.list.data[0].v.s.data);
+  }
+
+  // Nesting is bounded, and the bound is not off by one.
+  {
+    // `BENCODE_MAX_DEPTH` nested lists, then one more.
+    for (usize depth = BENCODE_MAX_DEPTH; depth <= BENCODE_MAX_DEPTH + 1;
+         depth++) {
+      Arena arena = test_arena(16 * KiB);
+      Arena scratch = test_arena(16 * KiB);
+
+      u8 input[2 * (BENCODE_MAX_DEPTH + 1)] = {0};
+      memset(input, 'l', depth);
+      memset(input + depth, 'e', depth);
+
+      BencodeParser parser = {.data = slice_u8_make(input, 2 * depth)};
+      const BencodeParseResult res = bencode_parse(&parser, &arena, scratch);
+
+      assert(res.ok == (depth <= BENCODE_MAX_DEPTH));
+      if (res.ok) {
+        assert(BencodeKindList == res.bencode.kind);
+        assert(1 == res.bencode.v.list.len);
+      }
+    }
+  }
+
+  // A long flat list: `values` is sized from the input length, so this is the
+  // case that comes closest to filling it.
+  {
+    const usize children_len = 200;
+    Arena arena = test_arena(64 * KiB);
+    Arena scratch = test_arena(64 * KiB);
+
+    u8 input[1 + 2 * 200 + 1] = {0};
+    input[0] = 'l';
+    for (usize i = 0; i < children_len; i++) {
+      input[1 + 2 * i] = '0';
+      input[1 + 2 * i + 1] = ':';
+    }
+    input[1 + 2 * children_len] = 'e';
+
+    BencodeParser parser = {.data = slice_u8_make(input, sizeof(input))};
+    const BencodeParseResult res = bencode_parse(&parser, &arena, scratch);
+    assert(res.ok);
+    assert(BencodeKindList == res.bencode.kind);
+    assert(children_len == res.bencode.v.list.len);
+
+    for (usize i = 0; i < children_len; i++) {
+      assert(test_bencode_is_string(res.bencode.v.list.data[i], ""));
+    }
+  }
+
+  // Out of scratch: the scratch arena cannot even hold the `values` array.
+  {
+    Arena arena = test_arena(4 * KiB);
+    Arena scratch = test_arena(8);
+
+    BencodeParser parser = test_parser("li1ei2ee");
     assert(!bencode_parse(&parser, &arena, scratch).ok);
   }
-  // Empty input.
+  // Out of output arena: the children of a container do not fit.
   {
-    BencodeParser parser = test_parser("");
+    Arena arena = test_arena(8);
+    Arena scratch = test_arena(4 * KiB);
+
+    BencodeParser parser = test_parser("li1ee");
+    assert(!bencode_parse(&parser, &arena, scratch).ok);
+
+    // An empty container needs no allocation at all, so it still succeeds.
+    BencodeParser parser_empty = test_parser("le");
+    const BencodeParseResult res =
+        bencode_parse(&parser_empty, &arena, scratch);
+    assert(res.ok);
+    assert(0 == res.bencode.v.list.len);
+  }
+
+  // `scratch` is taken by value: it is not consumed, and two parses in a row
+  // do not tread on each other. `arena` *is* consumed, so the first result
+  // stays valid while the second one is built.
+  {
+    Arena arena = test_arena(4 * KiB);
+    Arena scratch = test_arena(4 * KiB);
+    const u8 *const scratch_start = scratch.start;
+
+    BencodeParser parser_a = test_parser("li1ei2ee");
+    const BencodeParseResult a = bencode_parse(&parser_a, &arena, scratch);
+    assert(a.ok);
+    assert(scratch_start == scratch.start);
+
+    BencodeParser parser_b = test_parser("li3ee");
+    const BencodeParseResult b = bencode_parse(&parser_b, &arena, scratch);
+    assert(b.ok);
+    assert(scratch_start == scratch.start);
+
+    assert(a.bencode.v.list.data != b.bencode.v.list.data);
+    assert(2 == a.bencode.v.list.len);
+    assert(1 == a.bencode.v.list.data[0].v.num);
+    assert(2 == a.bencode.v.list.data[1].v.num);
+    assert(1 == b.bencode.v.list.len);
+    assert(3 == b.bencode.v.list.data[0].v.num);
+  }
+
+  // An input with no data at all.
+  {
+    Arena arena = test_arena(1 * KiB);
+    Arena scratch = test_arena(1 * KiB);
+
+    BencodeParser parser = {.data = slice_u8_make(NULL, 0)};
     assert(!bencode_parse(&parser, &arena, scratch).ok);
   }
 }
