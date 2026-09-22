@@ -66,6 +66,12 @@ struct BencodeValue {
   } v;
 };
 
+typedef struct MerkleNode MerkleNode;
+struct MerkleNode {
+  MerkleNode *left, *right;
+  u8 sha256[32];
+};
+
 __attribute((warn_unused_result)) static bool char_is_digit_ascii(u8 c) {
   return '0' <= c && c <= '9';
 }
@@ -947,17 +953,53 @@ static void sha256_final(Sha256Ctx *ctx, u8 res[SHA256_DIGEST_LENGTH]) {
 static const usize TORRENT_BLOCK_SIZE = 16 * KiB;
 static const usize TORRENT_PIECES_PER_BLOCK = 16;
 
-static void torrent_compute_merkle_tree(Slice_u8 data) {
-  for (usize i = 0; i < data.len / TORRENT_BLOCK_SIZE; i++) {
+__attribute((warn_unused_result)) static bool
+torrent_compute_merkle_tree(Slice_u8 data, MerkleNode *root, Arena *arena) {
+  assert(root);
+  assert(arena);
+  assert(arena->start);
+
+  MerkleNode *const first_leaf = (MerkleNode *)arena->start;
+
+  usize i = 0;
+  for (i = 0; i < data.len / TORRENT_BLOCK_SIZE; i++) {
     const Slice_u8 block_data = {.data = &data.data[i * TORRENT_BLOCK_SIZE],
                                  .len = TORRENT_BLOCK_SIZE};
+
+    MerkleNode *node =
+        arena_alloc(arena, __alignof__(MerkleNode), sizeof(MerkleNode), 1);
+    if (!node) {
+      return false;
+    }
 
     Sha256Ctx sha = {0};
     sha256_init(&sha);
     sha256_update(&sha, block_data);
-    sha256_final(&sha, NULL);
+    sha256_final(&sha, node->sha256);
   }
-  // TODO: last block.
+
+  // Last block.
+  assert(i * TORRENT_BLOCK_SIZE <= data.len);
+  if (i * TORRENT_BLOCK_SIZE < data.len) {
+    const Slice_u8 block_data = {.data = &data.data[i * TORRENT_BLOCK_SIZE],
+                                 .len = data.len - i * TORRENT_BLOCK_SIZE};
+
+    MerkleNode *node =
+        arena_alloc(arena, __alignof__(MerkleNode), sizeof(MerkleNode), 1);
+    if (!node) {
+      return false;
+    }
+
+    Sha256Ctx sha = {0};
+    sha256_init(&sha);
+    sha256_update(&sha, block_data);
+    sha256_final(&sha, node->sha256);
+  }
+
+  const usize leaves_count =
+      (((MerkleNode *)arena->start - first_leaf)) / sizeof(MerkleNode *);
+
+  return true;
 }
 
 // ---------------------------------------------------------------------------
