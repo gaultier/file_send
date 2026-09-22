@@ -145,9 +145,7 @@ unix_virtual_mem_alloc(usize bytes_count) {
 
 __attribute((warn_unused_result)) static usize unix_get_page_size(void) {
   i64 res = sysconf(_SC_PAGE_SIZE);
-  if (res == -1) {
-    return 0;
-  }
+  assert(-1 != res && "unreachable");
 
   return (usize)res;
 }
@@ -350,10 +348,7 @@ __attribute((warn_unused_result)) static bool ascii_num_parse(Slice_u8 *data,
     slice_u8_advance(&remaining, 1);
   }
 
-  // Unreachable: a usize overflows after at most 20 digits, so the overflow
-  // checks above always return before `MAX_LEN` iterations.
   assert(0 && "unreachable");
-  return false;
 }
 
 // `i123e`
@@ -1357,7 +1352,9 @@ static void test_bytes_cmp(void) {
       {"", 0},
       {"\x00", 1},
       {"\x00\x00", 2},
-      {"\x00" "a", 2},
+      {"\x00"
+       "a",
+       2},
       {"a", 1},
       {"a\x00", 2},
       {"ab", 2},
@@ -1442,8 +1439,10 @@ static void test_bencode_validate_dict(void) {
   // Out of order, anywhere in the dict.
   {
     BencodeValue children[] = {
-        test_bencode_make_string("b", 1), num,
-        test_bencode_make_string("a", 1), num,
+        test_bencode_make_string("b", 1),
+        num,
+        test_bencode_make_string("a", 1),
+        num,
     };
     const BencodeList list = {.len = 4, .data = children};
     assert(!bencode_validate_dict(list));
@@ -1460,8 +1459,10 @@ static void test_bencode_validate_dict(void) {
   // Duplicate keys: sorted is not enough, the order has to be strict.
   {
     BencodeValue children[] = {
-        test_bencode_make_string("a", 1), num,
-        test_bencode_make_string("a", 1), num,
+        test_bencode_make_string("a", 1),
+        num,
+        test_bencode_make_string("a", 1),
+        num,
     };
     const BencodeList list = {.len = 4, .data = children};
     assert(!bencode_validate_dict(list));
@@ -1483,8 +1484,10 @@ static void test_bencode_validate_dict(void) {
     const BencodeValue nested_list = {.kind = BencodeKindList};
     const BencodeValue nested_dict = {.kind = BencodeKindDict};
     BencodeValue children[] = {
-        test_bencode_make_string("a", 1), nested_list,
-        test_bencode_make_string("b", 1), nested_dict,
+        test_bencode_make_string("a", 1),
+        nested_list,
+        test_bencode_make_string("b", 1),
+        nested_dict,
     };
     const BencodeList list = {.len = 4, .data = children};
     assert(bencode_validate_dict(list));
@@ -1504,8 +1507,10 @@ static void test_bencode_validate_dict(void) {
   // The empty key is legal and sorts before every other key.
   {
     BencodeValue children[] = {
-        test_bencode_make_string("", 0), num,
-        test_bencode_make_string("a", 1), num,
+        test_bencode_make_string("", 0),
+        num,
+        test_bencode_make_string("a", 1),
+        num,
     };
     const BencodeList list = {.len = 4, .data = children};
     assert(bencode_validate_dict(list));
@@ -1513,16 +1518,20 @@ static void test_bencode_validate_dict(void) {
   // A key that is a prefix of the next one is in order; the reverse is not.
   {
     BencodeValue children[] = {
-        test_bencode_make_string("a", 1), num,
-        test_bencode_make_string("ab", 2), num,
+        test_bencode_make_string("a", 1),
+        num,
+        test_bencode_make_string("ab", 2),
+        num,
     };
     const BencodeList list = {.len = 4, .data = children};
     assert(bencode_validate_dict(list));
   }
   {
     BencodeValue children[] = {
-        test_bencode_make_string("ab", 2), num,
-        test_bencode_make_string("a", 1), num,
+        test_bencode_make_string("ab", 2),
+        num,
+        test_bencode_make_string("a", 1),
+        num,
     };
     const BencodeList list = {.len = 4, .data = children};
     assert(!bencode_validate_dict(list));
@@ -1531,16 +1540,20 @@ static void test_bencode_validate_dict(void) {
   // comparison would get this pair backwards.
   {
     BencodeValue children[] = {
-        test_bencode_make_string("\x7f", 1), num,
-        test_bencode_make_string("\x80", 1), num,
+        test_bencode_make_string("\x7f", 1),
+        num,
+        test_bencode_make_string("\x80", 1),
+        num,
     };
     const BencodeList list = {.len = 4, .data = children};
     assert(bencode_validate_dict(list));
   }
   {
     BencodeValue children[] = {
-        test_bencode_make_string("\x80", 1), num,
-        test_bencode_make_string("\x7f", 1), num,
+        test_bencode_make_string("\x80", 1),
+        num,
+        test_bencode_make_string("\x7f", 1),
+        num,
     };
     const BencodeList list = {.len = 4, .data = children};
     assert(!bencode_validate_dict(list));
