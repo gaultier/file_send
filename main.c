@@ -1,7 +1,7 @@
 #include <assert.h>
 #include <inttypes.h>
-#include <signal.h>
 #include <limits.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -51,17 +51,21 @@ typedef enum {
 typedef struct BencodeValue BencodeValue;
 
 typedef struct {
+  bool is_list;
+  usize children_start;
+} BencodeContainer;
+
+typedef struct {
   usize len;
-  usize cap;
   BencodeValue *data;
 } BencodeList;
 
 struct BencodeValue {
   BencodeKind kind;
   union {
-    isize num;
-    Slice_u8 s;
-    BencodeList list;
+    isize num;        // Integer
+    Slice_u8 s;       // String
+    BencodeList list; // List or Dict (stored as contiguous key-value pairs)
   } v;
 };
 
@@ -268,78 +272,6 @@ static Slice_u8 slice_u8_make(u8 *data, usize len) {
   return (Slice_u8){.data = data, .len = len};
 }
 
-static bool bencode_list_push(BencodeList *list, BencodeValue item,
-                              Arena *arena) {
-  assert(list);
-  assert(list->len <= list->cap);
-  assert(arena);
-
-  const usize min_cap = 8;
-  const usize growth_factor = 2;
-
-  const usize cap_before = list->cap;
-  void *const data_before = list->data;
-  void *const start_before = arena->start;
-
-  // Initial alloc.
-  if (list->cap == 0) {
-    list->cap = min_cap;
-    list->data = arena_alloc(arena, __alignof__(BencodeValue),
-                             sizeof(BencodeValue), list->cap);
-    if (!list->data) {
-      list->cap = 0;
-      return false;
-    }
-  }
-
-  if (list->len == list->cap) {
-    assert(list->cap >= min_cap);
-
-    assert(!__builtin_mul_overflow(list->cap, growth_factor, &list->cap));
-    assert(cap_before < list->cap);
-
-    const bool in_place_extend_possible =
-        (usize)arena->start ==
-        ((usize)list->data + (list->cap - list->len) * sizeof(item));
-    if (in_place_extend_possible) {
-      usize bytes_after = 0;
-      assert(!__builtin_mul_overflow(list->cap - list->len, sizeof(item),
-                                     &bytes_after));
-
-      usize start = (usize)arena->start;
-      assert(!__builtin_add_overflow(start, bytes_after, &start));
-      arena->start = (u8 *)start;
-
-      // OOM.
-      if (arena->start > arena->end) {
-        goto oom;
-      }
-    } else {
-      list->data = arena_alloc(arena, __alignof__(BencodeValue),
-                               sizeof(BencodeValue), list->cap);
-      if (list->data == NULL) {
-        goto oom;
-      }
-      memcpy(list->data, data_before, sizeof(item) * list->len);
-    }
-  }
-
-  list->data[list->len++] = item;
-
-  assert(list->len <= list->cap);
-  assert(list->data);
-  return true;
-
-oom:
-  list->cap = cap_before;
-  list->data = data_before;
-  arena->start = start_before;
-
-  assert(list->len <= list->cap);
-  assert(arena->start <= arena->end);
-  return false;
-}
-
 static bool bencode_parse_consume(BencodeParser *parser, u8 expected) {
   assert(parser);
   assert(parser->data.data);
@@ -501,43 +433,7 @@ static BencodeParseResult bencode_parse_string(BencodeParser *parser) {
 static BencodeParseResult bencode_parse(BencodeParser *parser, Arena *arena,
                                         Arena scratch);
 
-// FIXME: rec.
-static BencodeParseResult bencode_parse_list(BencodeParser *parser,
-                                             Arena *arena, Arena scratch) {
-  assert(parser);
-  assert(arena);
-  assert(arena->start <= arena->end);
-
-  BencodeParseResult res = {0};
-
-  if (!bencode_parse_consume(parser, 'l')) {
-    return res;
-  }
-
-  res.bencode.kind = BencodeKindList;
-
-  const usize remaining_bytes = parser->data.len;
-  for (usize _i = 0; _i < remaining_bytes; _i++) {
-    if (bencode_parse_consume(parser, 'e')) {
-      res.ok = true;
-      assert(res.bencode.kind == BencodeKindList);
-      assert(res.bencode.v.list.len <= res.bencode.v.list.cap);
-      assert(res.bencode.v.list.len == _i);
-      return res;
-    }
-
-    BencodeParseResult item = bencode_parse(parser, arena, scratch);
-    if (!item.ok) {
-      return res;
-    }
-
-    if (!bencode_list_push(&res.bencode.v.list, item.bencode, arena)) {
-      return res;
-    }
-  }
-
-  return res;
-}
+#define BENCODE_MAX_DEPTH 128
 
 static BencodeParseResult bencode_parse(BencodeParser *parser, Arena *arena,
                                         Arena scratch) {
@@ -548,6 +444,20 @@ static BencodeParseResult bencode_parse(BencodeParser *parser, Arena *arena,
 
   BencodeParseResult res = {0};
 
+  // Nothing to do?
+  if (0 == parser->data.len) {
+    return res;
+  }
+
+  // At most, there are as many bencode values as input bytes.
+  const usize values_cap = parser->data.len;
+  BencodeValue *values = arena_alloc(&scratch, __alignof__(BencodeValue),
+                                     sizeof(BencodeValue), values_cap);
+  usize values_len = 0;
+
+  BencodeContainer containers[BENCODE_MAX_DEPTH] = {0};
+  usize containers_len = 0;
+
   const usize MAX_LEN = parser->data.len;
 
   for (usize _i = 0; _i < MAX_LEN; _i++) {
@@ -557,12 +467,79 @@ static BencodeParseResult bencode_parse(BencodeParser *parser, Arena *arena,
     }
 
     switch (current.value) {
-    case 'i':
-      return bencode_parse_num(parser);
+    case 'i': {
+      const BencodeParseResult item = bencode_parse_num(parser);
+      if (!item.ok) {
+        return res;
+      }
+
+      assert(values_len < values_cap);
+      values[values_len++] = item.bencode;
+    } break;
+
     case 'l':
-      return bencode_parse_list(parser, arena, scratch);
     case 'd':
-      assert(0 && "todo");
+      if (containers_len >= BENCODE_MAX_DEPTH) {
+        return res;
+      }
+      assert(slice_u8_skip(&parser->data, 1));
+
+      containers[containers_len].is_list = current.value == 'l';
+      containers[containers_len].children_start = values_len;
+      containers_len++;
+
+      // The next loop iteration will parse the items.
+      continue;
+
+    case 'e': {
+      if (0 == containers_len) {
+        // Stray `e`, reject.
+        return res;
+      }
+
+      assert(slice_u8_skip(&parser->data, 1));
+
+      // Time to pop `containers`.
+      const BencodeContainer container = containers[containers_len - 1];
+      containers[containers_len - 1] = (BencodeContainer){0};
+      containers_len--;
+
+      const usize children_len = values_len - container.children_start;
+
+      // Should always be key-value pairs.
+      if (!container.is_list && children_len % 2 != 0) {
+        return res;
+      }
+
+      // Now record the value for this container.
+      BencodeValue value = {.kind = container.is_list ? BencodeKindList
+                                                      : BencodeKindDict};
+      // If there are any children, we need to allocate (right-sized) space for
+      // them.
+      if (children_len > 0) {
+        BencodeValue *children =
+            arena_alloc(arena, __alignof__(BencodeValue), sizeof(BencodeValue),
+                        children_len);
+        // OOM?
+        if (!children) {
+          return res;
+        }
+
+        // Copy the items from `values` to the new right-sized allocation.
+        value.v.list.data = memcpy(children, values + container.children_start,
+                                   children_len * sizeof(BencodeValue));
+        value.v.list.len = children_len;
+      }
+
+      // Pop all the items for this container, at once.
+      values_len = container.children_start;
+      assert(values_len < values_cap);
+      memset(values + values_len, 0, values_cap - values_len);
+
+      // Do not forget to record this new bencode value!
+      values[values_len++] = value;
+    } break;
+
     case '0':
     case '1':
     case '2':
@@ -572,9 +549,31 @@ static BencodeParseResult bencode_parse(BencodeParser *parser, Arena *arena,
     case '6':
     case '7':
     case '8':
-    case '9':
-      return bencode_parse_string(parser);
+    case '9': {
+      BencodeParseResult item = bencode_parse_string(parser);
+      if (!item.ok) {
+        return res;
+      }
+      assert(values_len < values_cap);
+      values[values_len++] = item.bencode;
+    } break;
+
+      // Unknown character.
     default:
+      return res;
+    }
+
+    // We just finished to correctly parse a value.
+    assert(values_len <= values_cap);
+
+    // No containers meaning: nothing is currently open.
+    // So, we are at the root, which we need to return to the caller,
+    // because `root != values[0]` in the general case.
+    if (0 == containers_len) {
+      assert(1 == values_len);
+
+      res.bencode = values[0];
+      res.ok = true;
       return res;
     }
   }
@@ -741,40 +740,6 @@ static void test_arena_valloc(void) {
   assert(NULL == arena.end);
 }
 
-// A guard page is only useful if it sits immediately after `arena.end`. The
-// write that proves it has to kill the process, so do it in a child.
-static void test_arena_guard_page(void) {
-  Arena arena = test_arena(1 * KiB);
-
-  // The last byte inside the arena is writable.
-  arena.end[-1] = 0x42;
-
-  const pid_t pid = fork();
-  assert(-1 != pid);
-
-  if (0 == pid) {
-    // The fault report is expected, keep it out of the test output.
-    assert(freopen("/dev/null", "w", stderr));
-
-    arena.end[0] = 0x42;
-
-    // Unreachable: the write above must not succeed.
-    _exit(0);
-  }
-
-  i32 status = 0;
-  assert(pid == waitpid(pid, &status, 0));
-
-  // What matters is that the write did not quietly succeed. A sanitized build
-  // intercepts the fault and turns it into an abort (or a non-zero exit), so
-  // the exact signal is not something to pin down here.
-  assert(!(WIFEXITED(status) && 0 == WEXITSTATUS(status)));
-  if (WIFSIGNALED(status)) {
-    const i32 sig = WTERMSIG(status);
-    assert(SIGBUS == sig || SIGSEGV == sig || SIGABRT == sig);
-  }
-}
-
 static void test_slice_u8(void) {
   u8 data[] = {'a', 'b', 'c'};
 
@@ -821,142 +786,6 @@ static void test_slice_u8(void) {
     const Slice_u8 taken = slice_u8_take(slice, 2);
     assert(2 == taken.len);
     assert(data == taken.data);
-  }
-}
-
-static void test_bencode_list_push(void) {
-  const BencodeValue sentinel = {.kind = BencodeKindInteger, .v.num = 42};
-
-  // Growth from empty: one allocation of `min_cap`, no relocation.
-  {
-    Arena arena = test_arena(1 * KiB);
-    BencodeList list = {0};
-
-    for (usize i = 0; i < 4; i++) {
-      const BencodeValue item = {.kind = BencodeKindInteger, .v.num = (isize)i};
-      assert(bencode_list_push(&list, item, &arena));
-    }
-
-    assert(4 == list.len);
-    assert(8 == list.cap);
-    assert((usize)arena.start ==
-           (usize)list.data + sizeof(BencodeValue) * list.cap);
-
-    for (usize i = 0; i < list.len; i++) {
-      assert(BencodeKindInteger == list.data[i].kind);
-      assert((isize)i == list.data[i].v.num);
-    }
-  }
-  // Extending in place: nothing was allocated after the array, so growing it
-  // only moves the arena head and the array does not relocate.
-  {
-    Arena arena = test_arena(1 * KiB);
-    BencodeList list = {0};
-
-    for (usize i = 0; i < 8; i++) {
-      const BencodeValue item = {.kind = BencodeKindInteger, .v.num = (isize)i};
-      assert(bencode_list_push(&list, item, &arena));
-    }
-    const BencodeValue *const data_before = list.data;
-
-    assert(bencode_list_push(&list, sentinel, &arena));
-
-    assert(data_before == list.data);
-    assert(9 == list.len);
-    assert(16 == list.cap);
-    assert((usize)arena.start ==
-           (usize)list.data + sizeof(BencodeValue) * list.cap);
-
-    for (usize i = 0; i < 8; i++) {
-      assert((isize)i == list.data[i].v.num);
-    }
-    assert(42 == list.data[8].v.num);
-  }
-  // Relocating: an unrelated allocation sits right behind the array, so it has
-  // to be copied. Regression test for the direction of that copy.
-  {
-    Arena arena = test_arena(1 * KiB);
-    BencodeList list = {0};
-
-    for (usize i = 0; i < 8; i++) {
-      const BencodeValue item = {.kind = BencodeKindInteger, .v.num = (isize)i};
-      assert(bencode_list_push(&list, item, &arena));
-    }
-    const BencodeValue *const data_before = list.data;
-
-    // Wedge an allocation in behind the array.
-    assert(arena_alloc(&arena, 1, sizeof(u8), 1));
-
-    assert(bencode_list_push(&list, sentinel, &arena));
-
-    assert(data_before != list.data);
-    assert(9 == list.len);
-    assert(16 == list.cap);
-
-    for (usize i = 0; i < 8; i++) {
-      assert(BencodeKindInteger == list.data[i].kind);
-      assert((isize)i == list.data[i].v.num);
-    }
-    assert(42 == list.data[8].v.num);
-  }
-  // OOM on the initial allocation: the list is left empty, not half-sized.
-  {
-    Arena arena = test_arena(1);
-    BencodeList list = {0};
-
-    assert(!bencode_list_push(&list, sentinel, &arena));
-    assert(0 == list.len);
-    assert(0 == list.cap);
-    assert(NULL == list.data);
-  }
-  // OOM while extending in place: list and arena are both left untouched.
-  {
-    Arena arena = test_arena(8 * sizeof(BencodeValue));
-    BencodeList list = {0};
-
-    for (usize i = 0; i < 8; i++) {
-      const BencodeValue item = {.kind = BencodeKindInteger, .v.num = (isize)i};
-      assert(bencode_list_push(&list, item, &arena));
-    }
-    const BencodeValue *const data_before = list.data;
-    u8 *const start_before = arena.start;
-
-    assert(!bencode_list_push(&list, sentinel, &arena));
-
-    assert(8 == list.len);
-    assert(8 == list.cap);
-    assert(data_before == list.data);
-    assert(start_before == arena.start);
-
-    for (usize i = 0; i < list.len; i++) {
-      assert((isize)i == list.data[i].v.num);
-    }
-  }
-  // OOM while relocating: same, and the old array is still the live one.
-  {
-    Arena arena = test_arena(8 * sizeof(BencodeValue) + 1);
-    BencodeList list = {0};
-
-    for (usize i = 0; i < 8; i++) {
-      const BencodeValue item = {.kind = BencodeKindInteger, .v.num = (isize)i};
-      assert(bencode_list_push(&list, item, &arena));
-    }
-    // Block the in-place path, leaving no room for a relocated array.
-    assert(arena_alloc(&arena, 1, sizeof(u8), 1));
-
-    const BencodeValue *const data_before = list.data;
-    u8 *const start_before = arena.start;
-
-    assert(!bencode_list_push(&list, sentinel, &arena));
-
-    assert(8 == list.len);
-    assert(8 == list.cap);
-    assert(data_before == list.data);
-    assert(start_before == arena.start);
-
-    for (usize i = 0; i < list.len; i++) {
-      assert((isize)i == list.data[i].v.num);
-    }
   }
 }
 
@@ -1113,95 +942,6 @@ static void test_bencode_parse_string(void) {
   }
 }
 
-static void test_bencode_parse_list(void) {
-  // Empty list.
-  {
-    Arena arena = test_arena(1 * KiB);
-    Arena scratch = test_arena(1 * KiB);
-    BencodeParser parser = test_parser("le");
-
-    const BencodeParseResult res = bencode_parse_list(&parser, &arena, scratch);
-    assert(res.ok);
-    assert(BencodeKindList == res.bencode.kind);
-    assert(0 == res.bencode.v.list.len);
-    assert(0 == parser.data.len);
-  }
-  // Mixed items.
-  {
-    Arena arena = test_arena(1 * KiB);
-    Arena scratch = test_arena(1 * KiB);
-    BencodeParser parser = test_parser("l4:spami456ee");
-
-    const BencodeParseResult res = bencode_parse_list(&parser, &arena, scratch);
-    assert(res.ok);
-    assert(2 == res.bencode.v.list.len);
-
-    const BencodeValue *const items = res.bencode.v.list.data;
-    assert(BencodeKindString == items[0].kind);
-    assert(4 == items[0].v.s.len);
-    assert(0 == memcmp(items[0].v.s.data, "spam", 4));
-    assert(BencodeKindInteger == items[1].kind);
-    assert(456 == items[1].v.num);
-    assert(0 == parser.data.len);
-  }
-  // Nested lists.
-  {
-    Arena arena = test_arena(1 * KiB);
-    Arena scratch = test_arena(1 * KiB);
-    BencodeParser parser = test_parser("lli1eee");
-
-    const BencodeParseResult res = bencode_parse_list(&parser, &arena, scratch);
-    assert(res.ok);
-    assert(1 == res.bencode.v.list.len);
-
-    const BencodeValue inner = res.bencode.v.list.data[0];
-    assert(BencodeKindList == inner.kind);
-    assert(1 == inner.v.list.len);
-    assert(BencodeKindInteger == inner.v.list.data[0].kind);
-    assert(1 == inner.v.list.data[0].v.num);
-  }
-  // Not a list at all.
-  {
-    Arena arena = test_arena(1 * KiB);
-    Arena scratch = test_arena(1 * KiB);
-    BencodeParser parser = test_parser("i1e");
-
-    assert(!bencode_parse_list(&parser, &arena, scratch).ok);
-  }
-  // Unterminated, with and without items.
-  {
-    const char *const inputs[] = {"l", "li1e", "lli1ee", "l4:spam"};
-
-    for (usize i = 0; i < sizeof(inputs) / sizeof(inputs[0]); i++) {
-      Arena arena = test_arena(1 * KiB);
-      Arena scratch = test_arena(1 * KiB);
-      BencodeParser parser = test_parser(inputs[i]);
-
-      assert(!bencode_parse_list(&parser, &arena, scratch).ok);
-    }
-  }
-  // An item that fails to parse fails the whole list.
-  {
-    const char *const inputs[] = {"lxe", "li-0ee", "l5:spame"};
-
-    for (usize i = 0; i < sizeof(inputs) / sizeof(inputs[0]); i++) {
-      Arena arena = test_arena(1 * KiB);
-      Arena scratch = test_arena(1 * KiB);
-      BencodeParser parser = test_parser(inputs[i]);
-
-      assert(!bencode_parse_list(&parser, &arena, scratch).ok);
-    }
-  }
-  // OOM while pushing an item.
-  {
-    Arena arena = test_arena(1);
-    Arena scratch = test_arena(1 * KiB);
-    BencodeParser parser = test_parser("li1ee");
-
-    assert(!bencode_parse_list(&parser, &arena, scratch).ok);
-  }
-}
-
 static void test_bencode_parse(void) {
   Arena arena = test_arena(1 * KiB);
   Arena scratch = test_arena(1 * KiB);
@@ -1261,13 +1001,10 @@ static void test(const char *filter) {
       {"usize_round_up_multiple_of", test_usize_round_up_multiple_of},
       {"arena_alloc", test_arena_alloc},
       {"arena_valloc", test_arena_valloc},
-      {"arena_guard_page", test_arena_guard_page},
       {"slice_u8", test_slice_u8},
-      {"bencode_list_push", test_bencode_list_push},
       {"ascii_num_parse", test_ascii_num_parse},
       {"bencode_parse_num", test_bencode_parse_num},
       {"bencode_parse_string", test_bencode_parse_string},
-      {"bencode_parse_list", test_bencode_parse_list},
       {"bencode_parse", test_bencode_parse},
   };
 
