@@ -638,6 +638,49 @@ static void test_isize_from_usize(void) {
   assert(!isize_from_usize(SIZE_MAX, true, &res));
 }
 
+static void test_usize_round_up_multiple_of(void) {
+  // A multiple of 1 rounds nothing.
+  assert(0 == usize_round_up_multiple_of(0, 1));
+  assert(1 == usize_round_up_multiple_of(1, 1));
+  assert(SIZE_MAX == usize_round_up_multiple_of(SIZE_MAX, 1));
+
+  // Zero is already a multiple of everything.
+  assert(0 == usize_round_up_multiple_of(0, 8));
+  assert(0 == usize_round_up_multiple_of(0, 16384));
+
+  // Exact multiples are left alone.
+  assert(8 == usize_round_up_multiple_of(8, 8));
+  assert(16 == usize_round_up_multiple_of(16, 8));
+  assert(16384 == usize_round_up_multiple_of(16384, 16384));
+  assert(32768 == usize_round_up_multiple_of(32768, 16384));
+
+  // Everything else goes up to the next one.
+  assert(8 == usize_round_up_multiple_of(1, 8));
+  assert(8 == usize_round_up_multiple_of(7, 8));
+  assert(16 == usize_round_up_multiple_of(9, 8));
+  assert(16384 == usize_round_up_multiple_of(1, 16384));
+  assert(16384 == usize_round_up_multiple_of(1 * KiB, 16384));
+  assert(16384 == usize_round_up_multiple_of(16383, 16384));
+  assert(32768 == usize_round_up_multiple_of(16385, 16384));
+
+  // The largest input that does not overflow `n + multiple - 1`, which is
+  // itself an exact multiple.
+  assert(SIZE_MAX - 8191 == usize_round_up_multiple_of(SIZE_MAX - 8191, 8192));
+
+  // The postcondition holds for every power of two, and rounding an already
+  // rounded value changes nothing.
+  for (usize multiple = 1; multiple <= ((usize)1 << 20); multiple *= 2) {
+    for (usize n = 0; n < 4 * multiple; n += (multiple / 4) + 1) {
+      const usize res = usize_round_up_multiple_of(n, multiple);
+
+      assert(res >= n);
+      assert(res - n < multiple);
+      assert(0 == (res & (multiple - 1)));
+      assert(res == usize_round_up_multiple_of(res, multiple));
+    }
+  }
+}
+
 static void test_arena_alloc(void) {
   // Alignment: a 1 byte allocation leaves the head misaligned, the next
   // 8-aligned allocation has to round up over 7 bytes of padding.
@@ -1215,6 +1258,7 @@ static void test(const char *filter) {
   } tests[] = {
       {"char_is_digit_ascii", test_char_is_digit_ascii},
       {"isize_from_usize", test_isize_from_usize},
+      {"usize_round_up_multiple_of", test_usize_round_up_multiple_of},
       {"arena_alloc", test_arena_alloc},
       {"arena_valloc", test_arena_valloc},
       {"arena_guard_page", test_arena_guard_page},
