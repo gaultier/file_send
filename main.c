@@ -30,12 +30,6 @@ typedef struct {
 } Arena;
 
 typedef struct {
-  usize num;
-  usize consumed;
-  bool ok;
-} ParseUsize;
-
-typedef struct {
   usize len;
   u8 *data;
 } Slice_u8;
@@ -68,26 +62,9 @@ struct BencodeValue {
   } v;
 };
 
-typedef enum {
-  BencodeParseKindOk,
-  BencodeParseKindUnterminated,
-  BencodeParseKindUnexpectedCharacter,
-} BencodeParseResultKind;
-
-typedef struct {
-  BencodeValue bencode;
-  bool ok;
-} BencodeParseResult;
-
 typedef struct {
   Slice_u8 data;
 } BencodeParser;
-
-typedef struct {
-  u8 value;
-  bool ok;
-} At_U8;
-
 __attribute((warn_unused_result)) static bool char_is_digit_ascii(u8 c) {
   return '0' <= c && c <= '9';
 }
@@ -232,20 +209,22 @@ __attribute((warn_unused_result)) static Arena arena_valloc(usize bytes_count) {
                         (usize)arena_memory + usable_bytes - start);
 }
 
-__attribute((warn_unused_result)) static At_U8 slice_u8_first(Slice_u8 slice) {
-  At_U8 res = {0};
+// Peek at the first byte of `slice`, leaving it in place.
+// Returns false, and does not touch `*res`, if there is no first byte.
+__attribute((warn_unused_result)) static bool slice_u8_first(Slice_u8 slice,
+                                                             u8 *res) {
+  assert(res);
 
   if (!slice.data) {
-    return res;
+    return false;
   }
 
   if (slice.len == 0) {
-    return res;
+    return false;
   }
 
-  res.value = slice.data[0];
-  res.ok = true;
-  return res;
+  *res = slice.data[0];
+  return true;
 }
 
 __attribute((warn_unused_result)) static bool slice_u8_skip(Slice_u8 *slice,
@@ -262,6 +241,19 @@ __attribute((warn_unused_result)) static bool slice_u8_skip(Slice_u8 *slice,
   slice->len -= count;
   slice->data += count;
   return true;
+}
+
+// Advance past `count` bytes. The caller must have already established that
+// they are available, which is why this cannot fail; use `slice_u8_skip` when
+// the input may be short. Unlike an `assert(slice_u8_skip(...))`, the advance
+// still happens when asserts are compiled out.
+static void slice_u8_advance(Slice_u8 *slice, usize count) {
+  assert(slice);
+  assert(slice->data);
+  assert(count <= slice->len);
+
+  slice->len -= count;
+  slice->data += count;
 }
 
 // The caller must have already established that `count` bytes are available:
@@ -286,220 +278,234 @@ bencode_parse_consume(BencodeParser *parser, u8 expected) {
   assert(parser);
   assert(parser->data.data);
 
-  At_U8 actual = slice_u8_first(parser->data);
-
-  if (!actual.ok) {
+  u8 actual = 0;
+  if (!slice_u8_first(parser->data, &actual)) {
     return false;
   }
-  if (actual.value != expected) {
+  if (actual != expected) {
     return false;
   }
 
-  assert(slice_u8_skip(&parser->data, 1));
+  slice_u8_advance(&parser->data, 1);
   return true;
 }
 
-__attribute((warn_unused_result)) static ParseUsize
-ascii_num_parse(Slice_u8 data) {
-  ParseUsize res = {0};
-  if (!data.data) {
-    return res;
+// Parse a run of ASCII digits from the front of `*data`, consuming them.
+//
+// Rejects a run with no digits at all, one that is not terminated by a
+// non-digit, one with a leading zero, and one that overflows a `usize`.
+// `*data` is only advanced, and `*res` only written, when the parse succeeds.
+__attribute((warn_unused_result)) static bool ascii_num_parse(Slice_u8 *data,
+                                                              usize *res) {
+  assert(data);
+  assert(res);
+
+  if (!data->data) {
+    return false;
   }
 
-  const usize MAX_LEN = 30;
+  Slice_u8 remaining = *data;
+  usize num = 0;
   bool has_leading_zero = false;
 
-  for (; res.consumed < MAX_LEN; res.consumed++) {
-    const At_U8 current = slice_u8_first(data);
+  const usize MAX_LEN = 30;
+
+  for (usize consumed = 0; consumed < MAX_LEN; consumed++) {
+    u8 current = 0;
 
     // Unterminated.
-    if (!current.ok) {
-      return res;
+    if (!slice_u8_first(remaining, &current)) {
+      return false;
     }
-
-    assert(current.ok);
 
     // End.
-    if (!char_is_digit_ascii(current.value)) {
-      res.ok = true;
-      assert(res.consumed < MAX_LEN);
-      return res;
+    if (!char_is_digit_ascii(current)) {
+      // No digit at all e.g. `e` or `:spam`: not a number.
+      if (0 == consumed) {
+        return false;
+      }
+
+      assert(consumed < MAX_LEN);
+      *data = remaining;
+      *res = num;
+      return true;
     }
 
-    if (current.value == '0' && res.consumed == 0) {
+    if (current == '0' && consumed == 0) {
       has_leading_zero = true;
     }
 
     // Leading zeroes forbidden except `i0e`.
-    if (res.consumed > 0 && has_leading_zero) {
-      return res;
+    if (consumed > 0 && has_leading_zero) {
+      return false;
     }
 
-    const usize digit = current.value - '0';
-    if (__builtin_mul_overflow(res.num, 10, &res.num)) {
-      return res;
+    const usize digit = current - '0';
+    if (__builtin_mul_overflow(num, 10, &num)) {
+      return false;
     }
-    if (__builtin_add_overflow(res.num, digit, &res.num)) {
-      return res;
+    if (__builtin_add_overflow(num, digit, &num)) {
+      return false;
     }
 
-    assert(slice_u8_skip(&data, 1));
+    slice_u8_advance(&remaining, 1);
   }
 
   // Unreachable: a usize overflows after at most 20 digits, so the overflow
   // checks above always return before `MAX_LEN` iterations.
   assert(0 && "unreachable");
-  return res;
+  return false;
 }
 
 // `i123e`
 // `i-123e`
-__attribute((warn_unused_result)) static BencodeParseResult
-bencode_parse_num(BencodeParser *parser) {
+//
+// `*parser` is only advanced, and `*res` only written, when the parse
+// succeeds.
+__attribute((warn_unused_result)) static bool
+bencode_parse_num(BencodeParser *parser, BencodeValue *res) {
   assert(parser);
   assert(parser->data.data);
+  assert(res);
 
-  BencodeParseResult res = {0};
-  if (!bencode_parse_consume(parser, 'i')) {
-    return res;
-  };
-  res.bencode.kind = BencodeKindInteger;
+  BencodeParser remaining = *parser;
 
-  bool negative_sign = bencode_parse_consume(parser, '-');
-
-  ParseUsize parsed_usize = ascii_num_parse(parser->data);
-
-  if (!parsed_usize.ok) {
-    return res;
+  if (!bencode_parse_consume(&remaining, 'i')) {
+    return false;
   }
 
-  // No digit consumed e.g. `ie`: invalid.
-  if (parsed_usize.consumed == 0) {
-    return res;
-  }
+  const bool negative_sign = bencode_parse_consume(&remaining, '-');
 
-  assert(slice_u8_skip(&parser->data, parsed_usize.consumed));
+  // Also rejects `ie` and `i-e`: a number needs at least one digit.
+  usize magnitude = 0;
+  if (!ascii_num_parse(&remaining.data, &magnitude)) {
+    return false;
+  }
 
   // `i-0e` is invalid bencode.
-  if (negative_sign && parsed_usize.num == 0) {
-    return res;
+  if (negative_sign && 0 == magnitude) {
+    return false;
   }
 
   isize num = 0;
-  if (!isize_from_usize(parsed_usize.num, negative_sign, &num)) {
-    return res;
+  if (!isize_from_usize(magnitude, negative_sign, &num)) {
+    return false;
   }
-  res.bencode.v.num = num;
 
-  if (!bencode_parse_consume(parser, 'e')) {
-    return res;
-  };
+  if (!bencode_parse_consume(&remaining, 'e')) {
+    return false;
+  }
 
-  res.ok = true;
-  assert(res.bencode.kind == BencodeKindInteger);
-  return res;
+  *parser = remaining;
+  *res = (BencodeValue){.kind = BencodeKindInteger, .v.num = num};
+  return true;
 }
 
 // `4:spam`
-__attribute((warn_unused_result)) static BencodeParseResult
-bencode_parse_string(BencodeParser *parser) {
+//
+// The string is not copied: it points into the parser's input.
+// `*parser` is only advanced, and `*res` only written, when the parse
+// succeeds.
+__attribute((warn_unused_result)) static bool
+bencode_parse_string(BencodeParser *parser, BencodeValue *res) {
   assert(parser);
   assert(parser->data.data);
+  assert(res);
 
-  BencodeParseResult res = {0};
+  BencodeParser remaining = *parser;
 
-  const At_U8 first = slice_u8_first(parser->data);
-  if (!first.ok) {
-    return res;
+  // Also rejects a leading `:` or any non-digit: a length needs a digit.
+  usize len = 0;
+  if (!ascii_num_parse(&remaining.data, &len)) {
+    return false;
   }
 
-  if (!char_is_digit_ascii(first.value)) {
-    return res;
+  if (!bencode_parse_consume(&remaining, ':')) {
+    return false;
   }
 
-  res.bencode.kind = BencodeKindString;
-
-  ParseUsize parsed_usize = ascii_num_parse(parser->data);
-  if (!parsed_usize.ok) {
-    return res;
-  }
-  assert(slice_u8_skip(&parser->data, parsed_usize.consumed));
-
-  if (!bencode_parse_consume(parser, ':')) {
-    return res;
-  };
-
-  if (parsed_usize.num > parser->data.len) {
-    return res;
+  // Truncated body.
+  if (len > remaining.data.len) {
+    return false;
   }
 
-  res.bencode.v.s = slice_u8_take(parser->data, parsed_usize.num);
-  assert(slice_u8_skip(&parser->data, parsed_usize.num));
+  const Slice_u8 s = slice_u8_take(remaining.data, len);
+  slice_u8_advance(&remaining.data, len);
 
-  res.ok = true;
-  assert(res.bencode.kind == BencodeKindString);
-  assert(res.bencode.v.s.len == parsed_usize.num);
-  assert(res.bencode.v.s.data || 0 == res.bencode.v.s.len);
-  return res;
+  *parser = remaining;
+  *res = (BencodeValue){.kind = BencodeKindString, .v.s = s};
+
+  assert(res->v.s.len == len);
+  assert(res->v.s.data || 0 == res->v.s.len);
+  return true;
 }
 
 #define BENCODE_MAX_DEPTH 128
 
-__attribute((warn_unused_result)) static BencodeParseResult
-bencode_parse(BencodeParser *parser, Arena *arena, Arena scratch) {
+// Parse one complete bencode value, with all of its children, into `*res`.
+//
+// `*parser` and `*arena` are only advanced when the parse succeeds: rolling
+// back a bump allocator is just restoring its start pointer, so a failed parse
+// leaves the caller with neither consumed input nor consumed memory.
+//
+// `scratch` is taken by value and is not consumed by the call.
+__attribute((warn_unused_result)) static bool
+bencode_parse(BencodeParser *parser, Arena *arena, Arena scratch,
+              BencodeValue *res) {
   assert(parser);
   assert(arena);
   assert(arena->start <= arena->end);
   assert(parser->data.data || 0 == parser->data.len);
-
-  BencodeParseResult res = {0};
+  assert(res);
 
   // Nothing to do?
   if (0 == parser->data.len) {
-    return res;
+    return false;
   }
+
+  BencodeParser remaining = *parser;
+  Arena arena_local = *arena;
 
   // At most, there are as many bencode values as `input bytes/2+1` since each
   // value takes at least 2 bytes.
-  const usize values_cap = parser->data.len / 2 + 1;
+  const usize values_cap = remaining.data.len / 2 + 1;
   BencodeValue *values = arena_alloc(&scratch, __alignof__(BencodeValue),
                                      sizeof(BencodeValue), values_cap);
   // OOM?
   if (!values) {
-    return res;
+    return false;
   }
   usize values_len = 0;
 
   BencodeContainer containers[BENCODE_MAX_DEPTH] = {0};
   usize containers_len = 0;
 
-  const usize MAX_LEN = parser->data.len;
+  const usize MAX_LEN = remaining.data.len;
 
   for (usize _i = 0; _i < MAX_LEN; _i++) {
-    const At_U8 current = slice_u8_first(parser->data);
-    if (!current.ok) {
-      return res;
+    u8 current = 0;
+    if (!slice_u8_first(remaining.data, &current)) {
+      return false;
     }
 
-    switch (current.value) {
-    case 'i': {
-      const BencodeParseResult item = bencode_parse_num(parser);
-      if (!item.ok) {
-        return res;
-      }
-
+    switch (current) {
+    case 'i':
+      // Parsed straight into its final slot: no intermediate copy.
       assert(values_len < values_cap);
-      values[values_len++] = item.bencode;
-    } break;
+      if (!bencode_parse_num(&remaining, &values[values_len])) {
+        return false;
+      }
+      values_len++;
+      break;
 
     case 'l':
     case 'd':
       if (containers_len >= BENCODE_MAX_DEPTH) {
-        return res;
+        return false;
       }
-      assert(slice_u8_skip(&parser->data, 1));
+      slice_u8_advance(&remaining.data, 1);
 
-      containers[containers_len].is_list = current.value == 'l';
+      containers[containers_len].is_list = current == 'l';
       containers[containers_len].children_start = values_len;
       containers_len++;
 
@@ -509,10 +515,10 @@ bencode_parse(BencodeParser *parser, Arena *arena, Arena scratch) {
     case 'e': {
       if (0 == containers_len) {
         // Stray `e`, reject.
-        return res;
+        return false;
       }
 
-      assert(slice_u8_skip(&parser->data, 1));
+      slice_u8_advance(&remaining.data, 1);
 
       // Time to pop `containers`.
       const BencodeContainer container = containers[containers_len - 1];
@@ -523,7 +529,7 @@ bencode_parse(BencodeParser *parser, Arena *arena, Arena scratch) {
 
       // Should always be key-value pairs.
       if (!container.is_list && children_len % 2 != 0) {
-        return res;
+        return false;
       }
 
       // Now record the value for this container.
@@ -533,11 +539,11 @@ bencode_parse(BencodeParser *parser, Arena *arena, Arena scratch) {
       // them.
       if (children_len > 0) {
         BencodeValue *children =
-            arena_alloc(arena, __alignof__(BencodeValue), sizeof(BencodeValue),
-                        children_len);
+            arena_alloc(&arena_local, __alignof__(BencodeValue),
+                        sizeof(BencodeValue), children_len);
         // OOM?
         if (!children) {
-          return res;
+          return false;
         }
 
         // Copy the items from `values` to the new right-sized allocation.
@@ -566,18 +572,18 @@ bencode_parse(BencodeParser *parser, Arena *arena, Arena scratch) {
     case '6':
     case '7':
     case '8':
-    case '9': {
-      BencodeParseResult item = bencode_parse_string(parser);
-      if (!item.ok) {
-        return res;
-      }
+    case '9':
+      // Parsed straight into its final slot: no intermediate copy.
       assert(values_len < values_cap);
-      values[values_len++] = item.bencode;
-    } break;
+      if (!bencode_parse_string(&remaining, &values[values_len])) {
+        return false;
+      }
+      values_len++;
+      break;
 
       // Unknown character.
     default:
-      return res;
+      return false;
     }
 
     // We just finished to correctly parse a value.
@@ -589,13 +595,15 @@ bencode_parse(BencodeParser *parser, Arena *arena, Arena scratch) {
     if (0 == containers_len) {
       assert(1 == values_len);
 
-      res.bencode = values[0];
-      res.ok = true;
-      return res;
+      // The single success exit: everything is committed here, at once.
+      *parser = remaining;
+      *arena = arena_local;
+      *res = values[0];
+      return true;
     }
   }
 
-  return res;
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -762,12 +770,19 @@ static void test_slice_u8(void) {
 
   // slice_u8_first.
   {
-    assert(!slice_u8_first(slice_u8_make(NULL, 0)).ok);
-    assert(!slice_u8_first(slice_u8_make(data, 0)).ok);
+    u8 first = 0xAA;
+    assert(!slice_u8_first(slice_u8_make(NULL, 0), &first));
+    assert(!slice_u8_first(slice_u8_make(data, 0), &first));
+    // Nothing is written when there is no first byte.
+    assert(0xAA == first);
 
-    const At_U8 first = slice_u8_first(slice_u8_make(data, sizeof(data)));
-    assert(first.ok);
-    assert('a' == first.value);
+    assert(slice_u8_first(slice_u8_make(data, sizeof(data)), &first));
+    assert('a' == first);
+
+    // Peeking does not consume.
+    Slice_u8 slice = slice_u8_make(data, sizeof(data));
+    assert(slice_u8_first(slice, &first));
+    assert(sizeof(data) == slice.len);
   }
   // slice_u8_skip.
   {
@@ -786,12 +801,15 @@ static void test_slice_u8(void) {
 
     assert(slice_u8_skip(&slice, 2));
     assert(1 == slice.len);
-    assert('c' == slice_u8_first(slice).value);
+
+    u8 first = 0;
+    assert(slice_u8_first(slice, &first));
+    assert('c' == first);
 
     // Skipping exactly to the end is legal.
     assert(slice_u8_skip(&slice, 1));
     assert(0 == slice.len);
-    assert(!slice_u8_first(slice).ok);
+    assert(!slice_u8_first(slice, &first));
   }
   // slice_u8_take.
   {
@@ -807,69 +825,61 @@ static void test_slice_u8(void) {
 }
 
 static void test_ascii_num_parse(void) {
+  const struct {
+    const char *input;
+    bool ok;
+    usize num;
+    // What is left of the input afterwards. Only meaningful on success.
+    const char *remaining;
+  } cases[] = {
+      {"123e", true, 123, "e"},
+      {"0e", true, 0, "e"},
+      {"7:spam", true, 7, ":spam"},
+      // The largest representable usize.
+      {"18446744073709551615e", true, SIZE_MAX, "e"},
+      // Unterminated: the digits run to the end of the input.
+      {"123", false, 0, NULL},
+      {"", false, 0, NULL},
+      // No digit at all. The old API reported this as a success consuming
+      // nothing and left it to the caller to notice.
+      {"e", false, 0, NULL},
+      {":spam", false, 0, NULL},
+      {"-1e", false, 0, NULL},
+      // A single zero is fine, leading zeroes are not.
+      {"0123e", false, 0, NULL},
+      {"00e", false, 0, NULL},
+      // Overflow on the final add: SIZE_MAX + 1.
+      {"18446744073709551616e", false, 0, NULL},
+      // Overflow on the multiply: 20 nines.
+      {"99999999999999999999e", false, 0, NULL},
+  };
+
+  for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    Slice_u8 data =
+        slice_u8_make((u8 *)cases[i].input, strlen(cases[i].input));
+    const Slice_u8 before = data;
+
+    usize num = 0xAA;
+    assert(ascii_num_parse(&data, &num) == cases[i].ok);
+
+    if (!cases[i].ok) {
+      // A failed parse consumes nothing and writes nothing.
+      assert(before.data == data.data);
+      assert(before.len == data.len);
+      assert(0xAA == num);
+      continue;
+    }
+
+    assert(cases[i].num == num);
+    assert(strlen(cases[i].remaining) == data.len);
+    assert(0 == memcmp(data.data, cases[i].remaining, data.len));
+  }
+
   // No data at all.
   {
-    const ParseUsize res = ascii_num_parse(slice_u8_make(NULL, 0));
-    assert(!res.ok);
-    assert(0 == res.consumed);
-  }
-  // Terminated by a non-digit.
-  {
-    const ParseUsize res = ascii_num_parse(slice_u8_make((u8 *)"123e", 4));
-    assert(res.ok);
-    assert(123 == res.num);
-    assert(3 == res.consumed);
-  }
-  // Unterminated: the digits run to the end of the input.
-  {
-    const ParseUsize res = ascii_num_parse(slice_u8_make((u8 *)"123", 3));
-    assert(!res.ok);
-  }
-  // No digit at all: valid, but consumes nothing. Callers have to check.
-  {
-    const ParseUsize res = ascii_num_parse(slice_u8_make((u8 *)"e", 1));
-    assert(res.ok);
-    assert(0 == res.consumed);
-    assert(0 == res.num);
-  }
-  // A single zero is fine.
-  {
-    const ParseUsize res = ascii_num_parse(slice_u8_make((u8 *)"0e", 2));
-    assert(res.ok);
-    assert(0 == res.num);
-    assert(1 == res.consumed);
-  }
-  // Leading zeroes are not.
-  {
-    const ParseUsize res = ascii_num_parse(slice_u8_make((u8 *)"0123e", 5));
-    assert(!res.ok);
-  }
-  {
-    const ParseUsize res = ascii_num_parse(slice_u8_make((u8 *)"00e", 3));
-    assert(!res.ok);
-  }
-  // The largest representable usize.
-  {
-    const char *const input = "18446744073709551615e";
-    const ParseUsize res =
-        ascii_num_parse(slice_u8_make((u8 *)input, strlen(input)));
-    assert(res.ok);
-    assert(SIZE_MAX == res.num);
-    assert(20 == res.consumed);
-  }
-  // Overflow on the final add: SIZE_MAX + 1.
-  {
-    const char *const input = "18446744073709551616e";
-    const ParseUsize res =
-        ascii_num_parse(slice_u8_make((u8 *)input, strlen(input)));
-    assert(!res.ok);
-  }
-  // Overflow on the multiply: 20 nines.
-  {
-    const char *const input = "99999999999999999999e";
-    const ParseUsize res =
-        ascii_num_parse(slice_u8_make((u8 *)input, strlen(input)));
-    assert(!res.ok);
+    Slice_u8 data = slice_u8_make(NULL, 0);
+    usize num = 0;
+    assert(!ascii_num_parse(&data, &num));
   }
 }
 
@@ -878,42 +888,52 @@ static void test_bencode_parse_num(void) {
     const char *input;
     bool ok;
     isize num;
+    // What the parser leaves behind for the caller.
+    usize remaining;
   } cases[] = {
-      {"i0e", true, 0},
-      {"i1e", true, 1},
-      {"i-1e", true, -1},
-      {"i-123e", true, -123},
-      {"i9223372036854775807e", true, SSIZE_MAX},
-      {"i-9223372036854775808e", true, -SSIZE_MAX - 1},
+      {"i0e", true, 0, 0},
+      {"i1e", true, 1, 0},
+      {"i-1e", true, -1, 0},
+      {"i-123e", true, -123, 0},
+      {"i9223372036854775807e", true, SSIZE_MAX, 0},
+      {"i-9223372036854775808e", true, -SSIZE_MAX - 1, 0},
       // Out of range for an isize.
-      {"i9223372036854775808e", false, 0},
-      {"i-9223372036854775809e", false, 0},
-      {"i18446744073709551615e", false, 0},
+      {"i9223372036854775808e", false, 0, 0},
+      {"i-9223372036854775809e", false, 0, 0},
+      {"i18446744073709551615e", false, 0, 0},
       // Out of range for a usize.
-      {"i18446744073709551616e", false, 0},
+      {"i18446744073709551616e", false, 0, 0},
       // Malformed.
-      {"i-0e", false, 0},
-      {"ie", false, 0},
-      {"i-e", false, 0},
-      {"i0123e", false, 0},
-      {"i123", false, 0},
-      {"i123x", false, 0},
-      {"i", false, 0},
-      {"", false, 0},
-      {"42e", false, 0},
+      {"i-0e", false, 0, 0},
+      {"ie", false, 0, 0},
+      {"i-e", false, 0, 0},
+      {"i0123e", false, 0, 0},
+      {"i123", false, 0, 0},
+      {"i123x", false, 0, 0},
+      {"i", false, 0, 0},
+      {"", false, 0, 0},
+      {"42e", false, 0, 0},
       // Trailing data is left for the caller.
-      {"i42ei43e", true, 42},
+      {"i42ei43e", true, 42, 4},
   };
 
   for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
     BencodeParser parser = test_parser(cases[i].input);
-    const BencodeParseResult res = bencode_parse_num(&parser);
 
-    assert(res.ok == cases[i].ok);
-    if (cases[i].ok) {
-      assert(BencodeKindInteger == res.bencode.kind);
-      assert(cases[i].num == res.bencode.v.num);
+    // Poisoned so that a write on the failure path is visible.
+    BencodeValue value = {.kind = BencodeKindDict};
+    assert(bencode_parse_num(&parser, &value) == cases[i].ok);
+
+    if (!cases[i].ok) {
+      // A failed parse consumes nothing and writes nothing.
+      assert(strlen(cases[i].input) == parser.data.len);
+      assert(BencodeKindDict == value.kind);
+      continue;
     }
+
+    assert(BencodeKindInteger == value.kind);
+    assert(cases[i].num == value.v.num);
+    assert(cases[i].remaining == parser.data.len);
   }
 }
 
@@ -922,6 +942,7 @@ static void test_bencode_parse_string(void) {
     const char *input;
     bool ok;
     const char *str;
+    // What the parser leaves behind for the caller.
     usize remaining;
   } cases[] = {
       {"0:", true, "", 0},
@@ -944,18 +965,32 @@ static void test_bencode_parse_string(void) {
 
   for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
     BencodeParser parser = test_parser(cases[i].input);
-    const BencodeParseResult res = bencode_parse_string(&parser);
 
-    assert(res.ok == cases[i].ok);
+    // Poisoned so that a write on the failure path is visible.
+    BencodeValue value = {.kind = BencodeKindDict};
+    assert(bencode_parse_string(&parser, &value) == cases[i].ok);
+
     if (!cases[i].ok) {
+      // A failed parse consumes nothing and writes nothing.
+      assert(strlen(cases[i].input) == parser.data.len);
+      assert(BencodeKindDict == value.kind);
       continue;
     }
 
-    assert(BencodeKindString == res.bencode.kind);
-    assert(strlen(cases[i].str) == res.bencode.v.s.len);
-    assert(0 ==
-           memcmp(res.bencode.v.s.data, cases[i].str, res.bencode.v.s.len));
+    assert(BencodeKindString == value.kind);
+    assert(strlen(cases[i].str) == value.v.s.len);
+    assert(0 == memcmp(value.v.s.data, cases[i].str, value.v.s.len));
     assert(cases[i].remaining == parser.data.len);
+  }
+
+  // The string points into the input, it is not copied.
+  {
+    const char *const input = "4:spam";
+    BencodeParser parser = test_parser(input);
+
+    BencodeValue value = {0};
+    assert(bencode_parse_string(&parser, &value));
+    assert((u8 *)input + 2 == value.v.s.data);
   }
 }
 
@@ -1036,21 +1071,25 @@ static void test_bencode_parse(void) {
     Arena scratch = test_arena(4 * KiB);
 
     BencodeParser parser = test_parser(cases[i].input);
-    const BencodeParseResult res = bencode_parse(&parser, &arena, scratch);
+    u8 *const arena_start = arena.start;
 
-    assert(res.ok == cases[i].ok);
+    BencodeValue value = {0};
+    assert(bencode_parse(&parser, &arena, scratch, &value) == cases[i].ok);
+
     if (!cases[i].ok) {
+      // A failed parse rolls back the input and the output arena both.
+      assert(strlen(cases[i].input) == parser.data.len);
+      assert(arena_start == arena.start);
       continue;
     }
 
-    assert(cases[i].kind == res.bencode.kind);
+    assert(cases[i].kind == value.kind);
     assert(cases[i].remaining == parser.data.len);
 
-    if (BencodeKindList == res.bencode.kind ||
-        BencodeKindDict == res.bencode.kind) {
-      assert(cases[i].children_len == res.bencode.v.list.len);
+    if (BencodeKindList == value.kind || BencodeKindDict == value.kind) {
+      assert(cases[i].children_len == value.v.list.len);
       // An empty container owns no allocation at all.
-      assert(res.bencode.v.list.data || 0 == res.bencode.v.list.len);
+      assert(value.v.list.data || 0 == value.v.list.len);
     }
   }
 
@@ -1062,10 +1101,10 @@ static void test_bencode_parse(void) {
 
       const char input[] = {(char)c, ':', 0};
       BencodeParser parser = test_parser(input);
-      const BencodeParseResult res = bencode_parse(&parser, &arena, scratch);
 
+      BencodeValue value = {0};
       // Only `0:` has a body short enough to succeed.
-      assert(res.ok == ('0' == c));
+      assert(bencode_parse(&parser, &arena, scratch, &value) == ('0' == c));
     }
   }
 
@@ -1076,18 +1115,18 @@ static void test_bencode_parse(void) {
     Arena scratch = test_arena(4 * KiB);
 
     BencodeParser parser = test_parser("ld1:a1:beli2eee");
-    const BencodeParseResult res = bencode_parse(&parser, &arena, scratch);
-    assert(res.ok);
-    assert(BencodeKindList == res.bencode.kind);
-    assert(2 == res.bencode.v.list.len);
+    BencodeValue value = {0};
+    assert(bencode_parse(&parser, &arena, scratch, &value));
+    assert(BencodeKindList == value.kind);
+    assert(2 == value.v.list.len);
 
-    const BencodeValue dict = res.bencode.v.list.data[0];
+    const BencodeValue dict = value.v.list.data[0];
     assert(BencodeKindDict == dict.kind);
     assert(2 == dict.v.list.len);
     assert(test_bencode_is_string(dict.v.list.data[0], "a"));
     assert(test_bencode_is_string(dict.v.list.data[1], "b"));
 
-    const BencodeValue list = res.bencode.v.list.data[1];
+    const BencodeValue list = value.v.list.data[1];
     assert(BencodeKindList == list.kind);
     assert(1 == list.v.list.len);
     assert(BencodeKindInteger == list.v.list.data[0].kind);
@@ -1101,9 +1140,9 @@ static void test_bencode_parse(void) {
 
     const char *const input = "l4:spame";
     BencodeParser parser = test_parser(input);
-    const BencodeParseResult res = bencode_parse(&parser, &arena, scratch);
-    assert(res.ok);
-    assert((u8 *)input + 3 == res.bencode.v.list.data[0].v.s.data);
+    BencodeValue value = {0};
+    assert(bencode_parse(&parser, &arena, scratch, &value));
+    assert((u8 *)input + 3 == value.v.list.data[0].v.s.data);
   }
 
   // Nesting is bounded, and the bound is not off by one.
@@ -1119,12 +1158,13 @@ static void test_bencode_parse(void) {
       memset(input + depth, 'e', depth);
 
       BencodeParser parser = {.data = slice_u8_make(input, 2 * depth)};
-      const BencodeParseResult res = bencode_parse(&parser, &arena, scratch);
+      BencodeValue value = {0};
+      const bool ok = bencode_parse(&parser, &arena, scratch, &value);
 
-      assert(res.ok == (depth <= BENCODE_MAX_DEPTH));
-      if (res.ok) {
-        assert(BencodeKindList == res.bencode.kind);
-        assert(1 == res.bencode.v.list.len);
+      assert(ok == (depth <= BENCODE_MAX_DEPTH));
+      if (ok) {
+        assert(BencodeKindList == value.kind);
+        assert(1 == value.v.list.len);
       }
     }
   }
@@ -1145,13 +1185,13 @@ static void test_bencode_parse(void) {
     input[1 + 2 * children_len] = 'e';
 
     BencodeParser parser = {.data = slice_u8_make(input, sizeof(input))};
-    const BencodeParseResult res = bencode_parse(&parser, &arena, scratch);
-    assert(res.ok);
-    assert(BencodeKindList == res.bencode.kind);
-    assert(children_len == res.bencode.v.list.len);
+    BencodeValue value = {0};
+    assert(bencode_parse(&parser, &arena, scratch, &value));
+    assert(BencodeKindList == value.kind);
+    assert(children_len == value.v.list.len);
 
     for (usize i = 0; i < children_len; i++) {
-      assert(test_bencode_is_string(res.bencode.v.list.data[i], ""));
+      assert(test_bencode_is_string(value.v.list.data[i], ""));
     }
   }
 
@@ -1161,7 +1201,8 @@ static void test_bencode_parse(void) {
     Arena scratch = test_arena(8);
 
     BencodeParser parser = test_parser("li1ei2ee");
-    assert(!bencode_parse(&parser, &arena, scratch).ok);
+    BencodeValue value = {0};
+    assert(!bencode_parse(&parser, &arena, scratch, &value));
   }
   // Out of output arena: the children of a container do not fit.
   {
@@ -1169,14 +1210,13 @@ static void test_bencode_parse(void) {
     Arena scratch = test_arena(4 * KiB);
 
     BencodeParser parser = test_parser("li1ee");
-    assert(!bencode_parse(&parser, &arena, scratch).ok);
+    BencodeValue value = {0};
+    assert(!bencode_parse(&parser, &arena, scratch, &value));
 
     // An empty container needs no allocation at all, so it still succeeds.
     BencodeParser parser_empty = test_parser("le");
-    const BencodeParseResult res =
-        bencode_parse(&parser_empty, &arena, scratch);
-    assert(res.ok);
-    assert(0 == res.bencode.v.list.len);
+    assert(bencode_parse(&parser_empty, &arena, scratch, &value));
+    assert(0 == value.v.list.len);
   }
 
   // `scratch` is taken by value: it is not consumed, and two parses in a row
@@ -1188,21 +1228,21 @@ static void test_bencode_parse(void) {
     const u8 *const scratch_start = scratch.start;
 
     BencodeParser parser_a = test_parser("li1ei2ee");
-    const BencodeParseResult a = bencode_parse(&parser_a, &arena, scratch);
-    assert(a.ok);
+    BencodeValue a = {0};
+    assert(bencode_parse(&parser_a, &arena, scratch, &a));
     assert(scratch_start == scratch.start);
 
     BencodeParser parser_b = test_parser("li3ee");
-    const BencodeParseResult b = bencode_parse(&parser_b, &arena, scratch);
-    assert(b.ok);
+    BencodeValue b = {0};
+    assert(bencode_parse(&parser_b, &arena, scratch, &b));
     assert(scratch_start == scratch.start);
 
-    assert(a.bencode.v.list.data != b.bencode.v.list.data);
-    assert(2 == a.bencode.v.list.len);
-    assert(1 == a.bencode.v.list.data[0].v.num);
-    assert(2 == a.bencode.v.list.data[1].v.num);
-    assert(1 == b.bencode.v.list.len);
-    assert(3 == b.bencode.v.list.data[0].v.num);
+    assert(a.v.list.data != b.v.list.data);
+    assert(2 == a.v.list.len);
+    assert(1 == a.v.list.data[0].v.num);
+    assert(2 == a.v.list.data[1].v.num);
+    assert(1 == b.v.list.len);
+    assert(3 == b.v.list.data[0].v.num);
   }
 
   // An input with no data at all.
@@ -1211,7 +1251,27 @@ static void test_bencode_parse(void) {
     Arena scratch = test_arena(1 * KiB);
 
     BencodeParser parser = {.data = slice_u8_make(NULL, 0)};
-    assert(!bencode_parse(&parser, &arena, scratch).ok);
+    BencodeValue value = {0};
+    assert(!bencode_parse(&parser, &arena, scratch, &value));
+  }
+
+  // A parse that fails *after* allocating gives the memory back: the inner
+  // list is allocated, then the unterminated outer one fails.
+  {
+    Arena arena = test_arena(4 * KiB);
+    Arena scratch = test_arena(4 * KiB);
+    u8 *const arena_start = arena.start;
+
+    const char *const input = "lli1ee";
+    BencodeParser parser = test_parser(input);
+
+    // Poisoned so that a write on the failure path is visible.
+    BencodeValue value = {.kind = BencodeKindString};
+    assert(!bencode_parse(&parser, &arena, scratch, &value));
+
+    assert(arena_start == arena.start);
+    assert(strlen(input) == parser.data.len);
+    assert(BencodeKindString == value.kind);
   }
 }
 
