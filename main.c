@@ -182,6 +182,10 @@ usize_round_up_multiple_of(usize n, usize multiple) {
   return res;
 }
 
+__attribute((warn_unused_result)) static bool is_power_of_two(usize value) {
+  return (value != 0) && ((value & (value - 1)) == 0);
+}
+
 __attribute((warn_unused_result)) static usize next_power_of_two(usize val) {
   if (0 == val) {
     return 1;
@@ -1090,8 +1094,8 @@ __attribute__((warn_unused_result)) static bool
 torrent_make_info_dict_v2(Slice_u8 name, usize piece_length, Slice_u8 file_data,
                           Slice_u8 file_name, BencodeValue *info,
                           Arena *arena) {
-  assert(piece_length >= 16 * KiB); // Per spec.
-  assert(piece_length % 2 == 0);    // Per spec.
+  assert(piece_length >= 16 * KiB);      // Per spec.
+  assert(is_power_of_two(piece_length)); // Per spec.
   assert(info);
   assert(arena);
   const usize dict_items_count = 4;
