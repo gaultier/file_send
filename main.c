@@ -182,6 +182,29 @@ usize_round_up_multiple_of(usize n, usize multiple) {
   return res;
 }
 
+// The smallest power of two that is `>= n`. A merkle tree pads its leaf layer
+// to this count, which is why `0` gives `1`: even an empty layer is a tree
+// with one (zeroed) leaf, never a tree with none.
+__attribute((warn_unused_result)) static usize next_power_of_two(usize n) {
+  assert(n <= SIZE_MAX / 2 + 1 && "no representable power of two");
+
+  // `n - 1` puts an exact power of two just below the next bit, so it maps to
+  // itself. The count-leading-zeros builtin is undefined on zero, which the
+  // early return above already excludes.
+  if (n <= 1) {
+    return 1;
+  }
+  const usize bits = 8 * sizeof(usize);
+  const usize res = (usize)1 << (bits - (usize)__builtin_clzg(n - 1));
+
+  assert(0 == (res & (res - 1)));
+  assert(res >= n);
+  // The result is the *next* one: halving it must land below `n`. `1` is the
+  // exception, having nothing below it.
+  assert(1 == res || res / 2 < n);
+  return res;
+}
+
 __attribute((warn_unused_result)) static Arena arena_valloc(usize bytes_count) {
   const usize page_size = unix_get_page_size();
   assert(page_size > 0);
@@ -964,14 +987,15 @@ static const usize TORRENT_BLOCK_SIZE = 16 * KiB;
 // static const usize TORRENT_PIECES_PER_BLOCK = 16;
 
 __attribute((warn_unused_result)) static bool
-torrent_compute_merkle_tree(Slice_u8 data, Arena *arena) {
-  assert(root);
+torrent_compute_merkle_tree(Slice_u8 data, MerkleNode **nodes,
+                            usize *nodes_count, Arena *arena) {
+  assert(nodes);
   assert(arena);
   assert(arena->start);
 
-  const usize nodes_count = next_power_of_two(data.len);
-  MerkleNode *nodes = arena_alloc(arena, __alignof__(MerkleNode),
-                                  sizeof(MerkleNode), nodes_count);
+  *nodes_count = next_power_of_two(data.len);
+  nodes = arena_alloc(arena, __alignof__(MerkleNode), sizeof(MerkleNode),
+                      *nodes_count);
   if (!nodes) {
     return false;
   }
@@ -982,8 +1006,8 @@ torrent_compute_merkle_tree(Slice_u8 data, Arena *arena) {
     const Slice_u8 block_data = {.data = &data.data[i * TORRENT_BLOCK_SIZE],
                                  .len = TORRENT_BLOCK_SIZE};
 
-    assert(i < nodes_count);
-    MerkleNode *const node = &nodes[i];
+    assert(i < *nodes_count);
+    MerkleNode *const node = nodes[i];
 
     Sha256Ctx sha = {0};
     sha256_init(&sha);
@@ -1000,8 +1024,8 @@ torrent_compute_merkle_tree(Slice_u8 data, Arena *arena) {
     const Slice_u8 block_data = {.data = &data.data[i * TORRENT_BLOCK_SIZE],
                                  .len = data.len - i * TORRENT_BLOCK_SIZE};
 
-    assert(i < nodes_count);
-    MerkleNode *node = &nodes[i];
+    assert(i < *nodes_count);
+    MerkleNode *node = nodes[i];
 
     Sha256Ctx sha = {0};
     sha256_init(&sha);
@@ -1112,6 +1136,44 @@ static void test_usize_round_up_multiple_of(void) {
       assert(0 == (res & (multiple - 1)));
       assert(res == usize_round_up_multiple_of(res, multiple));
     }
+  }
+}
+
+static void test_next_power_of_two(void) {
+  assert(1 == next_power_of_two(0));
+  assert(1 == next_power_of_two(1));
+  assert(2 == next_power_of_two(2));
+  assert(4 == next_power_of_two(3));
+  assert(4 == next_power_of_two(4));
+  assert(8 == next_power_of_two(5));
+  assert(8 == next_power_of_two(8));
+  assert(16 == next_power_of_two(9));
+
+  // Block counts, the reason this exists.
+  assert(1024 == next_power_of_two(1024));
+  assert(2048 == next_power_of_two(1025));
+
+  // The largest representable power of two, and the largest input that still
+  // has one.
+  const usize max_power_of_two = SIZE_MAX / 2 + 1;
+  assert(max_power_of_two == next_power_of_two(max_power_of_two));
+  assert(max_power_of_two == next_power_of_two(max_power_of_two - 1));
+
+  // A power of two is left alone; one past it goes up to the next.
+  for (usize p = 1; p <= ((usize)1 << 20); p *= 2) {
+    assert(p == next_power_of_two(p));
+    assert(2 * p == next_power_of_two(p + 1));
+  }
+
+  // The postcondition holds everywhere, and rounding an already rounded value
+  // changes nothing.
+  for (usize n = 0; n < 4096; n++) {
+    const usize res = next_power_of_two(n);
+
+    assert(res >= n);
+    assert(0 == (res & (res - 1)));
+    assert(1 == res || res / 2 < n);
+    assert(res == next_power_of_two(res));
   }
 }
 
@@ -2101,6 +2163,7 @@ static void test(const char *filter) {
       {"char_is_digit_ascii", test_char_is_digit_ascii},
       {"isize_from_usize", test_isize_from_usize},
       {"usize_round_up_multiple_of", test_usize_round_up_multiple_of},
+      {"next_power_of_two", test_next_power_of_two},
       {"arena_alloc", test_arena_alloc},
       {"arena_valloc", test_arena_valloc},
       {"slice_u8", test_slice_u8},
@@ -2178,8 +2241,9 @@ int main(i32 argc, char *argv[]) {
     Slice_u8 input = slice_u8_make((u8 *)input_data, (usize)st.st_size);
     Arena arena = arena_valloc(32 * MiB);
 
-    MerkleNode root = {0};
-    assert(torrent_compute_merkle_tree(input, &root, &arena));
+    MerkleNode *nodes = NULL;
+    usize nodes_count = 0;
+    assert(torrent_compute_merkle_tree(input, &nodes, &nodes_count, &arena));
 
   } else {
     fprintf(stderr, "unknown command\n");
