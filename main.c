@@ -10,8 +10,19 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+// The ARMv8 SHA-256 extension. Only the AArch64 spelling is implemented; every
+// other target falls back to the scalar block function below, which stays the
+// reference the vector one is checked against.
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#define SHA256_HAS_NEON 1
+#else
+#define SHA256_HAS_NEON 0
+#endif
 
 typedef uint8_t u8;
 typedef uint32_t u32;
@@ -892,6 +903,107 @@ static void sha256_compress(u32 h[8], const u8 block[SHA256_CBLOCK]) {
 
 // First 32 bits of the fractional parts of the square roots of the first 8
 // primes (FIPS 180-4, 5.3.3).
+#if SHA256_HAS_NEON
+
+// `+crypto` is a function level target, not a build flag, because `-march`
+// does not necessarily enable it: on this toolchain plain `-march=native`
+// leaves `__ARM_FEATURE_SHA2` undefined and the intrinsics below refuse to
+// compile without it.
+__attribute__((target("+crypto"))) static void
+sha256_compress_neon(u32 h[8], const u8 block[SHA256_CBLOCK]) {
+  assert(h);
+  assert(block);
+
+  // Unlike the x86 extension, the ARM one keeps the working variables in their
+  // natural order, so the state needs no shuffling on the way in or out.
+  uint32x4_t state0 = vld1q_u32(&h[0]); // a b c d
+  uint32x4_t state1 = vld1q_u32(&h[4]); // e f g h
+
+  const uint32x4_t state0_in = state0;
+  const uint32x4_t state1_in = state1;
+
+  // The message is big endian, the vector unit little endian.
+  uint32x4_t msg[4] = {0};
+  for (usize i = 0; i < 4; i++) {
+    msg[i] = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(block + i * 16)));
+  }
+
+  // Each instruction pair consumes four rounds at once, so 64 rounds are 16
+  // iterations rather than the scalar version's 64.
+  uint32x4_t wk = vaddq_u32(msg[0], vld1q_u32(&sha256_k[0]));
+
+  for (usize i = 0; i < 16; i++) {
+    const usize j = i & 3;
+
+    // The next group's `w + k` reads a message word that this group's schedule
+    // is about to overwrite, so compute it first.
+    uint32x4_t wk_next = wk;
+    if (i < 15) {
+      wk_next = vaddq_u32(msg[(j + 1) & 3], vld1q_u32(&sha256_k[4 * (i + 1)]));
+    }
+
+    // The last four groups consume the schedule without extending it: there is
+    // no `w[64]`.
+    if (i < 12) {
+      msg[j] = vsha256su0q_u32(msg[j], msg[(j + 1) & 3]);
+    }
+
+    // `SHA256H` needs the old `a b c d`, which `SHA256H` itself overwrites.
+    const uint32x4_t abcd = state0;
+    state0 = vsha256hq_u32(state0, state1, wk);
+    state1 = vsha256h2q_u32(state1, abcd, wk);
+
+    if (i < 12) {
+      msg[j] = vsha256su1q_u32(msg[j], msg[(j + 2) & 3], msg[(j + 3) & 3]);
+    }
+
+    wk = wk_next;
+  }
+
+  vst1q_u32(&h[0], vaddq_u32(state0, state0_in));
+  vst1q_u32(&h[4], vaddq_u32(state1, state1_in));
+}
+
+// The extension is optional even on AArch64, so ask rather than assume.
+// Cached because this sits on the hot path of every hash and `sysctlbyname` is
+// a syscall. Racing callers compute the same answer, so the race is benign.
+__attribute((warn_unused_result)) static bool sha256_neon_supported(void) {
+  static i32 cached = -1;
+
+  if (cached < 0) {
+    i32 present = 0;
+    usize present_size = sizeof(present);
+    const bool ok = 0 == sysctlbyname("hw.optional.arm.FEAT_SHA256", &present,
+                                      &present_size, NULL, 0);
+    cached = (ok && 0 != present) ? 1 : 0;
+  }
+
+  return 1 == cached;
+}
+
+#endif
+
+// Compress `blocks_count` consecutive blocks. The implementation is chosen once
+// here rather than per block, so the check stays out of the inner loop.
+static void sha256_compress_blocks(u32 h[8], const u8 *blocks,
+                                   usize blocks_count) {
+  assert(h);
+  assert(blocks || 0 == blocks_count);
+
+#if SHA256_HAS_NEON
+  if (sha256_neon_supported()) {
+    for (usize i = 0; i < blocks_count; i++) {
+      sha256_compress_neon(h, blocks + i * SHA256_CBLOCK);
+    }
+    return;
+  }
+#endif
+
+  for (usize i = 0; i < blocks_count; i++) {
+    sha256_compress(h, blocks + i * SHA256_CBLOCK);
+  }
+}
+
 static void sha256_init(Sha256Ctx *ctx) {
   assert(ctx);
 
@@ -926,14 +1038,15 @@ static void sha256_update(Sha256Ctx *ctx, Slice_u8 data) {
       return;
     }
 
-    sha256_compress(ctx->h, ctx->partial);
+    sha256_compress_blocks(ctx->h, ctx->partial, 1);
     ctx->partial_len = 0;
   }
 
-  while (len >= SHA256_CBLOCK) {
-    sha256_compress(ctx->h, remaining);
-    remaining += SHA256_CBLOCK;
-    len -= SHA256_CBLOCK;
+  {
+    const usize blocks_count = len / SHA256_CBLOCK;
+    sha256_compress_blocks(ctx->h, remaining, blocks_count);
+    remaining += blocks_count * SHA256_CBLOCK;
+    len -= blocks_count * SHA256_CBLOCK;
   }
 
   if (len > 0) {
@@ -3315,6 +3428,110 @@ static void test_bencode_encode_torrent_info(void) {
   assert(0 == memcmp(infohash, expected_infohash, sizeof(infohash)));
 }
 
+// The vector block function must be indistinguishable from the scalar one, so
+// compare them directly rather than only through the public digest: a
+// disagreement on one block is otherwise easy to miss behind a passing vector.
+static void test_sha256_neon_matches_scalar(void) {
+#if !SHA256_HAS_NEON
+  return;
+#else
+  if (!sha256_neon_supported()) {
+    return;
+  }
+
+  // Blocks and chaining states that the extension is prone to getting wrong:
+  // all zeroes, all ones, and the byte order boundaries.
+  const u8 patterns[] = {0x00, 0xff, 0x80, 0x01, 0x7f};
+  for (usize p = 0; p < sizeof(patterns); p++) {
+    u8 block[SHA256_CBLOCK];
+    memset(block, patterns[p], sizeof(block));
+
+    u32 scalar[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+                     0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+    u32 neon[8] = {0};
+    memcpy(neon, scalar, sizeof(neon));
+
+    sha256_compress(scalar, block);
+    sha256_compress_neon(neon, block);
+    assert(0 == memcmp(scalar, neon, sizeof(scalar)));
+  }
+
+  // Then a deterministic sweep over both inputs. The chaining state is varied
+  // too, not just the block: the two differ in how they carry state in and out.
+  u32 x = 0x00c0ffee;
+  for (usize iter = 0; iter < 20000; iter++) {
+    u8 block[SHA256_CBLOCK];
+    for (usize i = 0; i < sizeof(block); i++) {
+      x = x * 1664525u + 1013904223u;
+      block[i] = (u8)(x >> 24);
+    }
+
+    u32 scalar[8] = {0};
+    u32 neon[8] = {0};
+    for (usize i = 0; i < 8; i++) {
+      x = x * 1664525u + 1013904223u;
+      scalar[i] = x;
+      neon[i] = x;
+    }
+
+    sha256_compress(scalar, block);
+    sha256_compress_neon(neon, block);
+    assert(0 == memcmp(scalar, neon, sizeof(scalar)));
+  }
+#endif
+}
+
+// Every message length that changes how blocks are cut up: empty, short, exact
+// multiples, and one byte either side of each. Hashed through the dispatcher,
+// which is what callers actually reach.
+static void test_sha256_neon_lengths(void) {
+#if !SHA256_HAS_NEON
+  return;
+#else
+  if (!sha256_neon_supported()) {
+    return;
+  }
+
+  const usize max_len = 4 * SHA256_CBLOCK + 8;
+
+  Arena arena = test_arena(64 * KiB);
+  u8 *const data = arena_alloc(&arena, __alignof__(u8), sizeof(u8), max_len);
+  assert(data);
+
+  u32 x = 0x12345678;
+  for (usize i = 0; i < max_len; i++) {
+    x = x * 1664525u + 1013904223u;
+    data[i] = (u8)(x >> 24);
+  }
+
+  for (usize len = 0; len <= max_len; len++) {
+    // The dispatcher picks the vector path here.
+    u8 dispatched[SHA256_DIGEST_LENGTH] = {0};
+    sha256_digest(slice_u8_make(data, len), dispatched);
+
+    // The same message, forced through the scalar block function.
+    Sha256Ctx ctx = {0};
+    sha256_init(&ctx);
+
+    usize offset = 0;
+    while (len - offset >= SHA256_CBLOCK) {
+      sha256_compress(ctx.h, data + offset);
+      offset += SHA256_CBLOCK;
+    }
+    ctx.len = len;
+    ctx.partial_len = (u32)(len - offset);
+    if (ctx.partial_len > 0) {
+      memcpy(ctx.partial, data + offset, ctx.partial_len);
+    }
+
+    u8 scalar[SHA256_DIGEST_LENGTH] = {0};
+    sha256_final(&ctx, scalar);
+
+    assert(0 == memcmp(dispatched, scalar, sizeof(scalar)));
+  }
+#endif
+}
+
 static void test(const char *filter) {
   const struct {
     const char *name;
@@ -3338,6 +3555,8 @@ static void test(const char *filter) {
       {"sha256_incremental", test_sha256_incremental},
       {"sha256_lengths", test_sha256_lengths},
       {"sha256_reuse", test_sha256_reuse},
+      {"sha256_neon_matches_scalar", test_sha256_neon_matches_scalar},
+      {"sha256_neon_lengths", test_sha256_neon_lengths},
       {"torrent_merkle_vectors", test_torrent_merkle_vectors},
       {"torrent_merkle_structure", test_torrent_merkle_structure},
       {"torrent_merkle_padding", test_torrent_merkle_padding},
