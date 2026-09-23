@@ -968,6 +968,13 @@ static void sha256_final(Sha256Ctx *ctx, u8 res[SHA256_DIGEST_LENGTH]) {
   *ctx = (Sha256Ctx){0};
 }
 
+static void sha_digest(Slice_u8 data, u8 res[SHA256_DIGEST_LENGTH]) {
+  Sha256Ctx sha = {0};
+  sha256_init(&sha);
+  sha256_update(&sha, data);
+  sha256_final(&sha, res);
+}
+
 static void sha256_print_hex(u8 digest[SHA256_DIGEST_LENGTH]) {
   const u8 lut[] = "0123456789abcdef";
 
@@ -1005,10 +1012,7 @@ torrent_compute_merkle_tree(Slice_u8 data, MerkleNode **nodes,
     assert(i < *nodes_count);
     MerkleNode *const node = &((*nodes)[i]);
 
-    Sha256Ctx sha = {0};
-    sha256_init(&sha);
-    sha256_update(&sha, block_data);
-    sha256_final(&sha, node->digest);
+    sha_digest(block_data, node->digest);
 
     sha256_print_hex(node->digest);
     puts("");
@@ -1023,10 +1027,8 @@ torrent_compute_merkle_tree(Slice_u8 data, MerkleNode **nodes,
     assert(i < *nodes_count);
     MerkleNode *const node = &((*nodes)[i]);
 
-    Sha256Ctx sha = {0};
-    sha256_init(&sha);
-    sha256_update(&sha, block_data);
-    sha256_final(&sha, node->digest);
+    sha_digest(block_data, node->digest);
+
     sha256_print_hex(node->digest);
     puts("\n");
   }
