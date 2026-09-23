@@ -1259,7 +1259,7 @@ bencode_encode_max_size(BencodeValue b, usize depth) {
     assert(!__builtin_add_overflow(res, 1 + 20 + 2, &res));
     break;
   case BencodeKindString:
-    assert(!__builtin_add_overflow(res, 19 + 1 + b.v.s.len, &res));
+    assert(!__builtin_add_overflow(res, 20 + 1 + b.v.s.len, &res));
     break;
   case BencodeKindList:
   case BencodeKindDict:
@@ -1278,7 +1278,25 @@ bencode_encode_max_size(BencodeValue b, usize depth) {
   return res;
 }
 
-__attribute__((warn_unused_result)) static bool
+__attribute__((warn_unused_result)) static Slice_u8
+encode_usize_base_10(usize n, Slice_u8 dst) {
+  assert(dst.data);
+  assert(dst.len >= 20);
+
+  u8 *end = dst.data + dst.len - 1;
+  while (n > 0) {
+    assert(end >= dst.data);
+
+    const usize digit = n % 10;
+    *(end--) = digit + '0';
+
+    n /= 10;
+  }
+
+  return (Slice_u8){.data = end, .len = dst.data + dst.len - 1 - end};
+}
+
+__attribute__((warn_unused_result)) static usize
 bencode_encode(BencodeValue b, Slice_u8 *encoded, usize depth) {
   if (depth > BENCODE_MAX_DEPTH) {
     return 0;
@@ -1291,7 +1309,7 @@ bencode_encode(BencodeValue b, Slice_u8 *encoded, usize depth) {
   switch (b.kind) {
   case BencodeKindInteger:
     encoded->data[0] = 'i';
-    usize n = b.v.num;
+    // usize n = b.v.num;
     // TODO
 
     break;
@@ -1300,10 +1318,11 @@ bencode_encode(BencodeValue b, Slice_u8 *encoded, usize depth) {
     break;
   case BencodeKindList:
   case BencodeKindDict:
-    assert(b.v.list.len <= BENCODE_MAX_DEPTH);
     encoded->data[0] = b.kind == BencodeKindList ? 'l' : 'd';
     break;
   }
+
+  return true;
 }
 
 // ---------------------------------------------------------------------------
