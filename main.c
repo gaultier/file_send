@@ -66,11 +66,11 @@ struct BencodeValue {
   } v;
 };
 
-typedef struct MerkleNode MerkleNode;
-struct MerkleNode {
-  MerkleNode *left, *right;
-  u8 sha256[32];
-};
+#define SHA256_DIGEST_LENGTH 32
+
+typedef struct {
+  u8 digest[SHA256_DIGEST_LENGTH];
+} MerkleNode;
 
 __attribute((warn_unused_result)) static bool char_is_digit_ascii(u8 c) {
   return '0' <= c && c <= '9';
@@ -762,7 +762,6 @@ void bencode_print(BencodeValue v, usize indent) {
 //   u8 digest[SHA256_DIGEST_LENGTH] = {0};
 //   SHA256_Final(&ctx, digest);
 
-#define SHA256_DIGEST_LENGTH 32
 #define SHA256_CBLOCK 64
 
 typedef struct {
@@ -965,30 +964,33 @@ static const usize TORRENT_BLOCK_SIZE = 16 * KiB;
 // static const usize TORRENT_PIECES_PER_BLOCK = 16;
 
 __attribute((warn_unused_result)) static bool
-torrent_compute_merkle_tree(Slice_u8 data, MerkleNode *root, Arena *arena) {
+torrent_compute_merkle_tree(Slice_u8 data, Arena *arena) {
   assert(root);
   assert(arena);
   assert(arena->start);
 
-  MerkleNode *const first_leaf = (MerkleNode *)arena->start;
+  const usize nodes_count = next_power_of_two(data.len);
+  MerkleNode *nodes = arena_alloc(arena, __alignof__(MerkleNode),
+                                  sizeof(MerkleNode), nodes_count);
+  if (!nodes) {
+    return false;
+  }
 
   usize i = 0;
+  assert(nodes);
   for (i = 0; i < data.len / TORRENT_BLOCK_SIZE; i++) {
     const Slice_u8 block_data = {.data = &data.data[i * TORRENT_BLOCK_SIZE],
                                  .len = TORRENT_BLOCK_SIZE};
 
-    MerkleNode *node =
-        arena_alloc(arena, __alignof__(MerkleNode), sizeof(MerkleNode), 1);
-    if (!node) {
-      return false;
-    }
+    assert(i < nodes_count);
+    MerkleNode *const node = &nodes[i];
 
     Sha256Ctx sha = {0};
     sha256_init(&sha);
     sha256_update(&sha, block_data);
-    sha256_final(&sha, node->sha256);
+    sha256_final(&sha, node->digest);
 
-    sha256_print_hex(node->sha256);
+    sha256_print_hex(node->digest);
     puts("\n");
   }
 
@@ -998,25 +1000,20 @@ torrent_compute_merkle_tree(Slice_u8 data, MerkleNode *root, Arena *arena) {
     const Slice_u8 block_data = {.data = &data.data[i * TORRENT_BLOCK_SIZE],
                                  .len = data.len - i * TORRENT_BLOCK_SIZE};
 
-    MerkleNode *node =
-        arena_alloc(arena, __alignof__(MerkleNode), sizeof(MerkleNode), 1);
-    if (!node) {
-      return false;
-    }
+    assert(i < nodes_count);
+    MerkleNode *node = &nodes[i];
 
     Sha256Ctx sha = {0};
     sha256_init(&sha);
     sha256_update(&sha, block_data);
-    sha256_final(&sha, node->sha256);
-    sha256_print_hex(node->sha256);
+    sha256_final(&sha, node->digest);
+    sha256_print_hex(node->digest);
     puts("\n");
   }
 
-  // const usize leaves_count =
-  //     (((MerkleNode *)arena->start - first_leaf)) / sizeof(MerkleNode *);
+  // TODO: Fill remaining nodes with 0 or sha256(0).
 
   // TODO: build the binary tree.
-  *root = *first_leaf;
 
   return true;
 }
