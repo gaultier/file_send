@@ -186,23 +186,24 @@ usize_round_up_multiple_of(usize n, usize multiple) {
 // to this count, which is why `0` gives `1`: even an empty layer is a tree
 // with one (zeroed) leaf, never a tree with none.
 __attribute((warn_unused_result)) static usize next_power_of_two(usize n) {
-  assert(n <= SIZE_MAX / 2 + 1 && "no representable power of two");
-
-  // `n - 1` puts an exact power of two just below the next bit, so it maps to
-  // itself. The count-leading-zeros builtin is undefined on zero, which the
-  // early return above already excludes.
-  if (n <= 1) {
+  if (0 == n) {
     return 1;
   }
-  const usize bits = 8 * sizeof(usize);
-  const usize res = (usize)1 << (bits - (usize)__builtin_clzg(n - 1));
 
-  assert(0 == (res & (res - 1)));
-  assert(res >= n);
-  // The result is the *next* one: halving it must land below `n`. `1` is the
-  // exception, having nothing below it.
-  assert(1 == res || res / 2 < n);
-  return res;
+  usize val = n;
+
+  val -= 1;
+  val |= val >> 1;
+  val |= val >> 2;
+  val |= val >> 4;
+  val |= val >> 8;
+  val |= val >> 16;
+  val |= val >> 32;
+  val += 1;
+
+  assert(1 == __builtin_popcount(val));
+
+  return val;
 }
 
 __attribute((warn_unused_result)) static Arena arena_valloc(usize bytes_count) {
