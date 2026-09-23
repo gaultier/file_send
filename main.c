@@ -968,7 +968,7 @@ static void sha256_final(Sha256Ctx *ctx, u8 res[SHA256_DIGEST_LENGTH]) {
   *ctx = (Sha256Ctx){0};
 }
 
-static void sha_digest(Slice_u8 data, u8 res[SHA256_DIGEST_LENGTH]) {
+static void sha256_digest(Slice_u8 data, u8 res[SHA256_DIGEST_LENGTH]) {
   Sha256Ctx sha = {0};
   sha256_init(&sha);
   sha256_update(&sha, data);
@@ -1020,14 +1020,41 @@ torrent_compute_merkle_tree(Slice_u8 data, MerkleNode **nodes,
                                    .len = data.len >= TORRENT_BLOCK_SIZE
                                               ? TORRENT_BLOCK_SIZE
                                               : data.len};
-      sha_digest(block_data, node->digest);
+      sha256_digest(block_data, node->digest);
 
       (void)slice_u8_skip(&data, TORRENT_BLOCK_SIZE);
     } // Otherwise leave the block as zero, per spec.
 
-    printf("%zu: ", i);
+    printf("h=0 w=%zu: ", i);
     sha256_print_hex(node->digest);
     puts("");
+  }
+
+  usize width = *nodes_count;
+  usize offset = 0;
+  for (; width > 1;) {
+    const usize next_width = width / 2;
+    const usize next_offset = offset + width;
+
+    for (usize w = 0; w < next_width; w++) {
+      const MerkleNode *const left = &((*nodes)[offset + 2 * w]);
+      const MerkleNode *const right = &((*nodes)[offset + 2 * w + 1]);
+
+      Sha256Ctx ctx = {0};
+      sha256_init(&ctx);
+      sha256_update(&ctx, (Slice_u8){.data = (u8 *)left->digest,
+                                     .len = SHA256_DIGEST_LENGTH});
+      sha256_update(&ctx, (Slice_u8){.data = (u8 *)right->digest,
+                                     .len = SHA256_DIGEST_LENGTH});
+      sha256_final(&ctx, (*nodes)[next_offset + w].digest);
+
+      printf("width=%zu offset=%zu: ", width, offset);
+      sha256_print_hex((*nodes)[next_offset + w].digest);
+      puts("");
+    }
+
+    offset = next_offset;
+    width = next_width;
   }
 
   return true;
@@ -2236,6 +2263,9 @@ int main(i32 argc, char *argv[]) {
     usize nodes_count = 0;
     assert(torrent_compute_merkle_tree(input, &nodes, &nodes_count, &arena));
 
+    MerkleNode root = nodes[nodes_count - 1];
+    printf("root=");
+    sha256_print_hex(root.digest);
   } else {
     fprintf(stderr, "unknown command\n");
     exit(1);
