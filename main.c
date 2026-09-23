@@ -1246,6 +1246,66 @@ torrent_make_info_dict_v2(Slice_u8 name, usize piece_length, Slice_u8 file_data,
   return true;
 }
 
+__attribute__((warn_unused_result)) static usize
+bencode_encode_max_size(BencodeValue b, usize depth) {
+  if (depth > BENCODE_MAX_DEPTH) {
+    return 0;
+  }
+
+  usize res = 0;
+
+  switch (b.kind) {
+  case BencodeKindInteger:
+    assert(!__builtin_add_overflow(res, 1 + 20 + 2, &res));
+    break;
+  case BencodeKindString:
+    assert(!__builtin_add_overflow(res, 19 + 1 + b.v.s.len, &res));
+    break;
+  case BencodeKindList:
+  case BencodeKindDict:
+    assert(b.v.list.len <= BENCODE_MAX_DEPTH);
+
+    assert(!__builtin_add_overflow(res, 2, &res));
+
+    for (usize i = 0; i < b.v.list.len; i++) {
+      const usize item_size =
+          bencode_encode_max_size(b.v.list.data[i], depth + 1);
+      assert(!__builtin_add_overflow(res, item_size, &res));
+    }
+    break;
+  }
+
+  return res;
+}
+
+__attribute__((warn_unused_result)) static bool
+bencode_encode(BencodeValue b, Slice_u8 *encoded, usize depth) {
+  if (depth > BENCODE_MAX_DEPTH) {
+    return 0;
+  }
+  assert(encoded);
+  assert(encoded->data);
+  assert(encoded->len >= 2);
+  // assert(encoded->len >= bencode_encode_max_size(b, 0));
+
+  switch (b.kind) {
+  case BencodeKindInteger:
+    encoded->data[0] = 'i';
+    usize n = b.v.num;
+    // TODO
+
+    break;
+  case BencodeKindString:
+    // TODO
+    break;
+  case BencodeKindList:
+  case BencodeKindDict:
+    assert(b.v.list.len <= BENCODE_MAX_DEPTH);
+    encoded->data[0] = b.kind == BencodeKindList ? 'l' : 'd';
+    break;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1253,7 +1313,7 @@ torrent_make_info_dict_v2(Slice_u8 name, usize piece_length, Slice_u8 file_data,
 // Arena memory comes straight from `mmap` and is therefore zeroed, which makes
 // a read of never-written memory look like a perfectly valid zeroed struct.
 // Poison it so such a read shows up as an obviously bogus value instead.
-static Arena test_arena(usize bytes_count) {
+__attribute__((warn_unused_result)) static Arena test_arena(usize bytes_count) {
   Arena arena = arena_valloc(bytes_count);
   assert(arena.start);
   assert(arena.end);
