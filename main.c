@@ -1160,6 +1160,7 @@ torrent_make_info_dict_v2(Slice_u8 name, usize piece_length, Slice_u8 file_data,
     const MerkleNode *const root = &nodes[nodes_count - 1];
     printf("root=");
     sha256_print_hex(root->digest);
+    puts("");
 
     BencodeValue *const file_tree_dict = &info->v.list.data[1];
     file_tree_dict->kind = BencodeKindDict;
@@ -1207,7 +1208,7 @@ torrent_make_info_dict_v2(Slice_u8 name, usize piece_length, Slice_u8 file_data,
         {
           BencodeValue *const length_key = &empty_dict->v.list.data[0];
           length_key->kind = BencodeKindString;
-          length_key->v.s = slice_u8_make((u8 *)"length", 5);
+          length_key->v.s = slice_u8_make((u8 *)"length", sizeof("length") - 1);
 
           BencodeValue *const length_value = &empty_dict->v.list.data[1];
           length_value->kind = BencodeKindInteger;
@@ -1218,12 +1219,12 @@ torrent_make_info_dict_v2(Slice_u8 name, usize piece_length, Slice_u8 file_data,
 
         // `info["file tree"][file_name][""]["pieces root"] = root.digest`
         {
-          BencodeValue *const pieces_root_key = &empty_dict->v.list.data[1];
+          BencodeValue *const pieces_root_key = &empty_dict->v.list.data[2];
           pieces_root_key->kind = BencodeKindString;
           pieces_root_key->v.s =
               slice_u8_make((u8 *)"pieces root", sizeof("pieces root") - 1);
 
-          BencodeValue *const pieces_root_value = &empty_dict->v.list.data[2];
+          BencodeValue *const pieces_root_value = &empty_dict->v.list.data[3];
           pieces_root_value->kind = BencodeKindString;
           pieces_root_value->v.s.len = SHA256_DIGEST_LENGTH;
           pieces_root_value->v.s.data = arena_alloc(
@@ -2702,6 +2703,8 @@ int main(i32 argc, char *argv[]) {
     BencodeValue info_dict = {0};
     assert(torrent_make_info_dict_v2(name, TORRENT_BLOCK_SIZE * 16, input,
                                      file_name, &info_dict, &arena));
+
+    bencode_print(info_dict, 0);
   } else {
     fprintf(stderr, "unknown command\n");
     exit(1);
