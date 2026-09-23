@@ -1348,36 +1348,63 @@ bencode_encode(BencodeValue b, Slice_u8 dst, usize depth) {
   }
   assert(dst.data);
   assert(dst.len >= 2);
-  // assert(encoded->len >= bencode_encode_max_size(b, 0));
+  u8 *const dst_before = dst.data;
 
   switch (b.kind) {
-  case BencodeKindInteger:
+  case BencodeKindInteger: {
     dst.data[0] = 'i';
-    dst = encode_isize_base_10(b.v.num, dst);
-    dst.data[0] = 'e';
+    slice_u8_advance(&dst, 1);
 
-    break;
-  case BencodeKindString:
-    dst = encode_usize_base_10(b.v.s.len, dst);
+    const usize written = encode_isize_base_10(b.v.num, dst).len;
+    slice_u8_advance(&dst, written);
+
+    dst.data[0] = 'e';
+    slice_u8_advance(&dst, 1);
+
+  } break;
+  case BencodeKindString: {
+    const usize written = encode_usize_base_10(b.v.s.len, dst).len;
+    slice_u8_advance(&dst, written);
+
     dst.data[0] = ':';
-    // TODO
-    break;
+    slice_u8_advance(&dst, 1);
+
+    memcpy(dst.data, b.v.s.data, b.v.s.len);
+    slice_u8_advance(&dst, b.v.s.len);
+  } break;
   case BencodeKindList:
-  case BencodeKindDict:
-    dst->data[0] = b.kind == BencodeKindList ? 'l' : 'd';
-    break;
+  case BencodeKindDict: {
+    dst.data[0] = b.kind == BencodeKindList ? 'l' : 'd';
+    slice_u8_advance(&dst, 1);
+
+    for (usize i = 0; i < b.v.list.len; i++) {
+      BencodeValue item = b.v.list.data[i];
+      const usize written = bencode_encode(item, dst, depth + 1).len;
+      slice_u8_advance(&dst, written);
+    }
+
+    dst.data[0] = 'e';
+    slice_u8_advance(&dst, 1);
+  } break;
+
+  default:
+    assert(0 && "unreachable");
   }
 
-  return true;
+  assert(dst.data > dst_before);
+  assert(dst.data - dst_before >= 2);
+
+  return (Slice_u8){.data = dst_before, .len = dst.data - dst_before};
 }
 
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
-// Arena memory comes straight from `mmap` and is therefore zeroed, which makes
-// a read of never-written memory look like a perfectly valid zeroed struct.
-// Poison it so such a read shows up as an obviously bogus value instead.
+// Arena memory comes straight from `mmap` and is therefore zeroed, which
+// makes a read of never-written memory look like a perfectly valid zeroed
+// struct. Poison it so such a read shows up as an obviously bogus value
+// instead.
 __attribute__((warn_unused_result)) static Arena test_arena(usize bytes_count) {
   Arena arena = arena_valloc(bytes_count);
   assert(arena.start);
@@ -1559,8 +1586,8 @@ static void test_arena_alloc(void) {
 }
 
 static void test_arena_valloc(void) {
-  // A request the kernel cannot satisfy. `mmap` reports `MAP_FAILED`, not NULL,
-  // so this also pins down that conversion.
+  // A request the kernel cannot satisfy. `mmap` reports `MAP_FAILED`, not
+  // NULL, so this also pins down that conversion.
   const Arena arena = arena_valloc((usize)1 << 62);
   assert(NULL == arena.start);
   assert(NULL == arena.end);
@@ -1838,7 +1865,8 @@ static void test_bencode_parse(void) {
       {"lli1eee", true, BencodeKindList, 1, 0},
       {"ld1:a1:beli2eee", true, BencodeKindList, 2, 0},
       {"d1:ali1ei2ee1:bd1:ci3eee", true, BencodeKindDict, 4, 0},
-      // Trailing data is left for the caller, exactly like the scalar parsers.
+      // Trailing data is left for the caller, exactly like the scalar
+      // parsers.
       {"i42etrailing", true, BencodeKindInteger, 0, 8},
       {"lee", true, BencodeKindList, 0, 1},
       {"lei42e", true, BencodeKindList, 0, 4},
@@ -2507,8 +2535,8 @@ static Slice_u8 test_merkle_data(Arena *arena) {
 
   u32 x = 0x12345678;
   for (usize i = 0; i < TEST_MERKLE_MAX_LEN; i++) {
-    // Numerical Recipes LCG. Only the top byte is used, the low bits of an LCG
-    // being far too regular to tell two blocks apart.
+    // Numerical Recipes LCG. Only the top byte is used, the low bits of an
+    // LCG being far too regular to tell two blocks apart.
     x = x * 1664525u + 1013904223u;
     buf[i] = (u8)(x >> 24);
   }
@@ -2517,9 +2545,9 @@ static Slice_u8 test_merkle_data(Arena *arena) {
 }
 
 // Known answer tests. Sizes bracket every boundary the tree construction has:
-// shorter than a block, exactly a block, one byte past a block, an exact power
-// of two number of blocks, and block counts needing one or several padding
-// leaves.
+// shorter than a block, exactly a block, one byte past a block, an exact
+// power of two number of blocks, and block counts needing one or several
+// padding leaves.
 static void test_torrent_merkle_vectors(void) {
   Arena data_arena = arena_valloc(TEST_MERKLE_MAX_LEN + 4 * KiB);
   assert(data_arena.start);
@@ -2573,8 +2601,8 @@ static void test_torrent_merkle_vectors(void) {
   }
 }
 
-// Check the whole array, not just the root: a tree can hash to the right value
-// while laying its layers out somewhere a caller cannot find them.
+// Check the whole array, not just the root: a tree can hash to the right
+// value while laying its layers out somewhere a caller cannot find them.
 static void test_torrent_merkle_structure(void) {
   Arena data_arena = arena_valloc(TEST_MERKLE_MAX_LEN + 4 * KiB);
   assert(data_arena.start);
@@ -2697,8 +2725,8 @@ static void test_torrent_merkle_padding(void) {
 static void test_torrent_merkle_empty(void) {
   Arena arena = test_arena(64 * KiB);
 
-  // Preset to garbage: both out parameters must be cleared, since a caller has
-  // no other way to tell that no tree was built.
+  // Preset to garbage: both out parameters must be cleared, since a caller
+  // has no other way to tell that no tree was built.
   MerkleNode *nodes = (MerkleNode *)(usize)0xdeadbeef;
   usize nodes_count = 123;
 
@@ -2814,9 +2842,9 @@ static void test_encode_usize_base_10(void) {
   test_encode_usize_once(SIZE_MAX, "18446744073709551615");
 }
 
-// There is no fixed minimum `dst`: a buffer of exactly the needed width works,
-// which is what lets a caller size its output exactly instead of padding for
-// the widest possible number.
+// There is no fixed minimum `dst`: a buffer of exactly the needed width
+// works, which is what lets a caller size its output exactly instead of
+// padding for the widest possible number.
 static void test_encode_usize_base_10_exact_fit(void) {
   u8 buf[24];
 
@@ -2888,7 +2916,8 @@ static void test_encode_usize_base_10_round_trip(void) {
     assert((usize)written == got.len);
     assert(0 == memcmp(got.data, expected, got.len));
 
-    // `ascii_num_parse` wants a non-digit terminator, the way `i123e` has one.
+    // `ascii_num_parse` wants a non-digit terminator, the way `i123e` has
+    // one.
     u8 terminated[32] = {0};
     memcpy(terminated, got.data, got.len);
     terminated[got.len] = 'e';
@@ -2942,8 +2971,8 @@ static void test_encode_isize_base_10(void) {
   test_encode_isize_once(123456789, "123456789");
   test_encode_isize_once(-123456789, "-123456789");
 
-  // The asymmetric boundary: `|ISIZE_MIN|` is one greater than `ISIZE_MAX`, so
-  // negating it in the signed domain would overflow.
+  // The asymmetric boundary: `|ISIZE_MIN|` is one greater than `ISIZE_MAX`,
+  // so negating it in the signed domain would overflow.
   test_encode_isize_once(INT64_MAX, "9223372036854775807");
   test_encode_isize_once(INT64_MIN + 1, "-9223372036854775807");
   test_encode_isize_once(INT64_MIN, "-9223372036854775808");
@@ -3113,6 +3142,18 @@ int main(i32 argc, char *argv[]) {
                                      file_name, &info_dict, &arena));
 
     bencode_print(info_dict, 0);
+    puts("");
+
+    const usize encode_cap = bencode_encode_max_size(info_dict, 0);
+    assert(encode_cap > 0);
+
+    Slice_u8 encoded = {
+        .data = arena_alloc(&arena, __alignof__(u8), sizeof(u8), encode_cap),
+        .len = encode_cap};
+    assert(encoded.data);
+
+    encoded = bencode_encode(info_dict, encoded, 0);
+    printf("info dict encoded: %.*s\n", (i32)encoded.len, encoded.data);
   } else {
     fprintf(stderr, "unknown command\n");
     exit(1);
