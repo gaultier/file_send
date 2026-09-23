@@ -996,13 +996,23 @@ torrent_compute_merkle_tree(Slice_u8 data, MerkleNode **nodes,
   assert(arena);
   assert(arena->start);
 
+  *nodes = NULL;
+  *nodes_count = 0;
+
   if (0 == data.len) {
     return true;
   }
   assert(data.data);
 
-  *nodes_count = next_power_of_two(data.len / TORRENT_BLOCK_SIZE +
-                                   (data.len % TORRENT_BLOCK_SIZE == 1));
+  const usize leaves_count = next_power_of_two(
+      data.len / TORRENT_BLOCK_SIZE + (data.len % TORRENT_BLOCK_SIZE != 0));
+  assert(leaves_count > 0);
+
+  // Nodes count = leaves_count * (leaves_count-1).
+  assert(__builtin_mul_overflow(leaves_count, leaves_count - 1, nodes_count));
+  assert(*nodes_count > 0);
+  assert(leaves_count < *nodes_count);
+
   *nodes = arena_alloc(arena, __alignof__(MerkleNode), sizeof(MerkleNode),
                        *nodes_count);
   // OOM?
@@ -1012,7 +1022,8 @@ torrent_compute_merkle_tree(Slice_u8 data, MerkleNode **nodes,
 
   assert(*nodes);
 
-  for (usize i = 0; i < *nodes_count; i++) {
+  for (usize i = 0; i < leaves_count; i++) {
+    assert(i < *nodes_count);
     MerkleNode *const node = &((*nodes)[i]);
 
     if (data.len > 0) { // Still inside the file?
@@ -1022,7 +1033,11 @@ torrent_compute_merkle_tree(Slice_u8 data, MerkleNode **nodes,
                                               : data.len};
       sha256_digest(block_data, node->digest);
 
-      (void)slice_u8_skip(&data, TORRENT_BLOCK_SIZE);
+      // Unconditionally advance.
+      data.data += TORRENT_BLOCK_SIZE;
+      // Clamp at 0.
+      data.len =
+          data.len > TORRENT_BLOCK_SIZE ? data.len - TORRENT_BLOCK_SIZE : 0;
     } // Otherwise leave the block as zero, per spec.
 
     printf("h=0 w=%zu: ", i);
