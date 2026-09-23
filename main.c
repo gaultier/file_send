@@ -975,7 +975,7 @@ static void sha256_digest(Slice_u8 data, u8 res[SHA256_DIGEST_LENGTH]) {
   sha256_final(&sha, res);
 }
 
-static void sha256_print_hex(u8 digest[SHA256_DIGEST_LENGTH]) {
+static void sha256_print_hex(const u8 digest[SHA256_DIGEST_LENGTH]) {
   const u8 lut[] = "0123456789abcdef";
 
   for (usize i = 0; i < SHA256_DIGEST_LENGTH; i++) {
@@ -2281,9 +2281,9 @@ int main(i32 argc, char *argv[]) {
     usize nodes_count = 0;
     assert(torrent_compute_merkle_tree(input, &nodes, &nodes_count, &arena));
 
-    MerkleNode root = nodes[nodes_count - 1];
+    const MerkleNode *const root = &nodes[nodes_count - 1];
     printf("root=");
-    sha256_print_hex(root.digest);
+    sha256_print_hex(root->digest);
   } else {
     fprintf(stderr, "unknown command\n");
     exit(1);
