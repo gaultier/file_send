@@ -182,15 +182,10 @@ usize_round_up_multiple_of(usize n, usize multiple) {
   return res;
 }
 
-// The smallest power of two that is `>= n`. A merkle tree pads its leaf layer
-// to this count, which is why `0` gives `1`: even an empty layer is a tree
-// with one (zeroed) leaf, never a tree with none.
-__attribute((warn_unused_result)) static usize next_power_of_two(usize n) {
-  if (0 == n) {
+__attribute((warn_unused_result)) static usize next_power_of_two(usize val) {
+  if (0 == val) {
     return 1;
   }
-
-  usize val = n;
 
   val -= 1;
   val |= val >> 1;
@@ -201,7 +196,9 @@ __attribute((warn_unused_result)) static usize next_power_of_two(usize n) {
   val |= val >> 32;
   val += 1;
 
-  assert(1 == __builtin_popcount(val));
+  // `val` wrapping back to zero is the overflow case: `n` was above the
+  // largest representable power of two.
+  assert(0 != val && 0 == (val & (val - 1)) && "not a power of two");
 
   return val;
 }
