@@ -196,8 +196,6 @@ __attribute((warn_unused_result)) static usize next_power_of_two(usize val) {
   val |= val >> 32;
   val += 1;
 
-  // `val` wrapping back to zero is the overflow case: `n` was above the
-  // largest representable power of two.
   assert(0 != val && 0 == (val & (val - 1)) && "not a power of two");
 
   return val;
