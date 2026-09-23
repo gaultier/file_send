@@ -1011,7 +1011,7 @@ torrent_compute_merkle_tree(Slice_u8 data, MerkleNode **nodes,
     sha256_final(&sha, node->digest);
 
     sha256_print_hex(node->digest);
-    puts("\n");
+    puts("");
   }
 
   // Last block.
