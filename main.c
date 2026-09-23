@@ -1309,7 +1309,6 @@ encode_isize_base_10(isize n, Slice_u8 dst) {
   return (Slice_u8){.data = dst.data, .len = 1 + digits.len};
 }
 
-#if 0
 __attribute__((warn_unused_result)) static usize
 bencode_encode_max_size(BencodeValue b, usize depth) {
   if (depth > BENCODE_MAX_DEPTH) {
@@ -1342,35 +1341,35 @@ bencode_encode_max_size(BencodeValue b, usize depth) {
   return res;
 }
 
-__attribute__((warn_unused_result)) static usize
-bencode_encode(BencodeValue b, Slice_u8 *encoded, usize depth) {
+__attribute__((warn_unused_result)) static Slice_u8
+bencode_encode(BencodeValue b, Slice_u8 dst, usize depth) {
   if (depth > BENCODE_MAX_DEPTH) {
-    return 0;
+    return (Slice_u8){0};
   }
-  assert(encoded);
-  assert(encoded->data);
-  assert(encoded->len >= 2);
+  assert(dst.data);
+  assert(dst.len >= 2);
   // assert(encoded->len >= bencode_encode_max_size(b, 0));
 
   switch (b.kind) {
   case BencodeKindInteger:
-    encoded->data[0] = 'i';
-    // usize n = b.v.num;
-    // TODO
+    dst.data[0] = 'i';
+    dst = encode_isize_base_10(b.v.num, dst);
+    dst.data[0] = 'e';
 
     break;
   case BencodeKindString:
+    dst = encode_usize_base_10(b.v.s.len, dst);
+    dst.data[0] = ':';
     // TODO
     break;
   case BencodeKindList:
   case BencodeKindDict:
-    encoded->data[0] = b.kind == BencodeKindList ? 'l' : 'd';
+    dst->data[0] = b.kind == BencodeKindList ? 'l' : 'd';
     break;
   }
 
   return true;
 }
-#endif
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -2822,7 +2821,8 @@ static void test_encode_usize_base_10_exact_fit(void) {
   u8 buf[24];
 
   memset(buf, '#', sizeof(buf));
-  const Slice_u8 widest = encode_usize_base_10(SIZE_MAX, slice_u8_make(buf, 20));
+  const Slice_u8 widest =
+      encode_usize_base_10(SIZE_MAX, slice_u8_make(buf, 20));
   assert(20 == widest.len);
   assert(buf == widest.data);
   assert(0 == memcmp(widest.data, "18446744073709551615", 20));
@@ -2973,11 +2973,10 @@ static void test_encode_isize_base_10_exact_fit(void) {
 // bencode integer and read them back with this project's own parser.
 static void test_encode_isize_base_10_round_trip(void) {
   const isize values[] = {
-      0,        1,         -1,        2,          -2,
-      9,        -9,        10,        -10,        99,
-      -99,      100,       -100,      255,        -256,
-      65535,    -65536,    1000000,   -1000000,   4294967296,
-      -4294967296, INT64_MAX, INT64_MIN, INT64_MIN + 1,
+      0,        1,          -1,          2,         -2,        9,
+      -9,       10,         -10,         99,        -99,       100,
+      -100,     255,        -256,        65535,     -65536,    1000000,
+      -1000000, 4294967296, -4294967296, INT64_MAX, INT64_MIN, INT64_MIN + 1,
   };
 
   for (usize i = 0; i < sizeof(values) / sizeof(values[0]); i++) {
