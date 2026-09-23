@@ -996,46 +996,40 @@ torrent_compute_merkle_tree(Slice_u8 data, MerkleNode **nodes,
   assert(arena);
   assert(arena->start);
 
-  *nodes_count = next_power_of_two(data.len);
+  if (0 == data.len) {
+    return true;
+  }
+  assert(data.data);
+
+  *nodes_count = next_power_of_two(data.len / TORRENT_BLOCK_SIZE +
+                                   (data.len % TORRENT_BLOCK_SIZE == 1));
   *nodes = arena_alloc(arena, __alignof__(MerkleNode), sizeof(MerkleNode),
                        *nodes_count);
+  // OOM?
   if (!*nodes) {
     return false;
   }
 
-  usize i = 0;
   assert(*nodes);
-  for (i = 0; i < data.len / TORRENT_BLOCK_SIZE; i++) {
-    const Slice_u8 block_data = {.data = &data.data[i * TORRENT_BLOCK_SIZE],
-                                 .len = TORRENT_BLOCK_SIZE};
 
-    assert(i < *nodes_count);
+  for (usize i = 0; i < *nodes_count; i++) {
     MerkleNode *const node = &((*nodes)[i]);
 
-    sha_digest(block_data, node->digest);
+    if (data.len > 0) { // Still inside the file?
+      const Slice_u8 block_data = {.data = data.data,
+                                   .len = data.len >= TORRENT_BLOCK_SIZE
+                                              ? TORRENT_BLOCK_SIZE
+                                              : data.len};
+      sha_digest(block_data, node->digest);
 
+      (void)slice_u8_skip(&data, TORRENT_BLOCK_SIZE);
+    } else {
+      // sha_digest(zero, node->digest);
+    }
+    printf("%zu: ", i);
     sha256_print_hex(node->digest);
     puts("");
   }
-
-  // Last block.
-  assert(i * TORRENT_BLOCK_SIZE <= data.len);
-  if (i * TORRENT_BLOCK_SIZE < data.len) {
-    const Slice_u8 block_data = {.data = &data.data[i * TORRENT_BLOCK_SIZE],
-                                 .len = data.len - i * TORRENT_BLOCK_SIZE};
-
-    assert(i < *nodes_count);
-    MerkleNode *const node = &((*nodes)[i]);
-
-    sha_digest(block_data, node->digest);
-
-    sha256_print_hex(node->digest);
-    puts("\n");
-  }
-
-  // TODO: Fill remaining nodes with 0 or sha256(0).
-
-  // TODO: build the binary tree.
 
   return true;
 }
