@@ -1023,9 +1023,8 @@ torrent_compute_merkle_tree(Slice_u8 data, MerkleNode **nodes,
       sha_digest(block_data, node->digest);
 
       (void)slice_u8_skip(&data, TORRENT_BLOCK_SIZE);
-    } else {
-      // sha_digest(zero, node->digest);
-    }
+    } // Otherwise leave the block as zero, per spec.
+
     printf("%zu: ", i);
     sha256_print_hex(node->digest);
     puts("");
