@@ -1246,6 +1246,25 @@ torrent_make_info_dict_v2(Slice_u8 name, usize piece_length, Slice_u8 file_data,
   return true;
 }
 
+__attribute__((warn_unused_result)) static Slice_u8
+encode_usize_base_10(usize n, Slice_u8 dst) {
+  assert(dst.data);
+  assert(dst.len >= 20);
+
+  u8 *end = dst.data + dst.len - 1;
+  while (n > 0) {
+    assert(end >= dst.data);
+
+    const usize digit = n % 10;
+    *(end--) = digit + '0';
+
+    n /= 10;
+  }
+
+  return (Slice_u8){.data = end, .len = dst.data + dst.len - 1 - end};
+}
+
+#if 0
 __attribute__((warn_unused_result)) static usize
 bencode_encode_max_size(BencodeValue b, usize depth) {
   if (depth > BENCODE_MAX_DEPTH) {
@@ -1278,24 +1297,6 @@ bencode_encode_max_size(BencodeValue b, usize depth) {
   return res;
 }
 
-__attribute__((warn_unused_result)) static Slice_u8
-encode_usize_base_10(usize n, Slice_u8 dst) {
-  assert(dst.data);
-  assert(dst.len >= 20);
-
-  u8 *end = dst.data + dst.len - 1;
-  while (n > 0) {
-    assert(end >= dst.data);
-
-    const usize digit = n % 10;
-    *(end--) = digit + '0';
-
-    n /= 10;
-  }
-
-  return (Slice_u8){.data = end, .len = dst.data + dst.len - 1 - end};
-}
-
 __attribute__((warn_unused_result)) static usize
 bencode_encode(BencodeValue b, Slice_u8 *encoded, usize depth) {
   if (depth > BENCODE_MAX_DEPTH) {
@@ -1324,6 +1325,7 @@ bencode_encode(BencodeValue b, Slice_u8 *encoded, usize depth) {
 
   return true;
 }
+#endif
 
 // ---------------------------------------------------------------------------
 // Tests
