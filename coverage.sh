@@ -6,8 +6,8 @@ trap 'rm -rf "$OUT"' EXIT
 
 clang -std=c99 -g -fprofile-instr-generate -fcoverage-mapping -o "$OUT/cov" main.c
 # Once with no filter, once with one, so the filter path is exercised too.
-LLVM_PROFILE_FILE="$OUT/cov-%p.profraw" "$OUT/cov" >/dev/null 2>&1
-LLVM_PROFILE_FILE="$OUT/cov-%p.profraw" "$OUT/cov" slice_u8 >/dev/null 2>&1
+LLVM_PROFILE_FILE="$OUT/cov-%p.profraw" "$OUT/cov" test >/dev/null 2>&1
+LLVM_PROFILE_FILE="$OUT/cov-%p.profraw" "$OUT/cov" test slice_u8 >/dev/null 2>&1
 xcrun llvm-profdata merge -sparse "$OUT"/cov-*.profraw -o "$OUT/cov.profdata"
 
 xcrun llvm-cov report "$OUT/cov" -instr-profile="$OUT/cov.profdata" main.c
