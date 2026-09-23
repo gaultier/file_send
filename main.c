@@ -1086,6 +1086,86 @@ torrent_build_merkle_tree(Slice_u8 data, MerkleNode **nodes, usize *nodes_count,
   return true;
 }
 
+__attribute__((unused)) static bool
+torrent_make_info_dict_v2(Slice_u8 name, usize piece_length, Slice_u8 file_data,
+                          BencodeValue *info, Arena *arena) {
+  assert(piece_length > 0);
+  assert(info);
+  assert(arena);
+  const usize dict_items_count = 4;
+  *info = (BencodeValue){
+      .kind = BencodeKindDict,
+      .v.list.len = dict_items_count * 2,
+      .v.list.data = arena_alloc(arena, __alignof__(BencodeValue),
+                                 sizeof(BencodeValue), dict_items_count * 2),
+  };
+  if (NULL == info->v.list.data) {
+    return false;
+  }
+
+  // k1
+  BencodeValue *it = info->v.list.data;
+  it->kind = BencodeKindString;
+  it->v.s.len = sizeof("name");
+  it->v.s.data = (u8 *)"name";
+
+  // v1
+  it++;
+  it->kind = BencodeKindString;
+  it->v.s = name;
+
+  // k2
+  it++;
+  it->kind = BencodeKindString;
+  it->v.s.len = sizeof("piece length");
+  it->v.s.data = (u8 *)"piece length";
+
+  // v2
+  it++;
+  it->kind = BencodeKindInteger;
+  if (!isize_from_usize(piece_length, false, &it->v.num)) {
+    return false;
+  }
+
+  // k3
+  it++;
+  it->kind = BencodeKindString;
+  it->v.s.len = sizeof("meta version");
+  it->v.s.data = (u8 *)"meta version";
+
+  // v3
+  it++;
+  it->kind = BencodeKindInteger;
+  it->v.num = 2;
+
+  // k4
+  it++;
+  it->kind = BencodeKindString;
+  it->v.s.len = sizeof("file tree");
+  it->v.s.data = (u8 *)"file tree";
+
+  MerkleNode *nodes = NULL;
+  usize nodes_count = 0;
+  if (!torrent_build_merkle_tree(file_data, &nodes, &nodes_count, arena)) {
+    return false;
+  }
+  const MerkleNode *const root = &nodes[nodes_count - 1];
+  printf("root=");
+  sha256_print_hex(root->digest);
+
+  // v4
+  it++;
+  it->kind = BencodeKindDict;
+  it->v.list.len = 1; // TODO
+  it->v.list.data = arena_alloc(arena, __alignof__(BencodeValue),
+                                sizeof(BencodeValue), it->v.list.len);
+  if (NULL == it->v.list.data) {
+    return false;
+  }
+
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -2395,7 +2475,8 @@ static void test_torrent_merkle_padding(void) {
 
   u8 zero_block_hash[SHA256_DIGEST_LENGTH] = {0};
   sha256_digest(slice_u8_make(zero_block, TORRENT_BLOCK_SIZE), zero_block_hash);
-  assert(0 != memcmp(nodes[3].digest, zero_block_hash, sizeof(zero_block_hash)));
+  assert(0 !=
+         memcmp(nodes[3].digest, zero_block_hash, sizeof(zero_block_hash)));
 
   // The short tail block is hashed at its real length, not zero extended to a
   // full block.
@@ -2416,8 +2497,8 @@ static void test_torrent_merkle_empty(void) {
   MerkleNode *nodes = (MerkleNode *)(usize)0xdeadbeef;
   usize nodes_count = 123;
 
-  assert(torrent_build_merkle_tree((Slice_u8){0}, &nodes, &nodes_count,
-                                   &arena));
+  assert(
+      torrent_build_merkle_tree((Slice_u8){0}, &nodes, &nodes_count, &arena));
   assert(NULL == nodes);
   assert(0 == nodes_count);
 }
@@ -2541,13 +2622,10 @@ int main(i32 argc, char *argv[]) {
     Slice_u8 input = slice_u8_make((u8 *)input_data, (usize)st.st_size);
     Arena arena = arena_valloc(32 * MiB);
 
-    MerkleNode *nodes = NULL;
-    usize nodes_count = 0;
-    assert(torrent_build_merkle_tree(input, &nodes, &nodes_count, &arena));
-
-    const MerkleNode *const root = &nodes[nodes_count - 1];
-    printf("root=");
-    sha256_print_hex(root->digest);
+    Slice_u8 name = {.data = (u8 *)"test", .len = 4};
+    BencodeValue info_dict = {0};
+    assert(torrent_make_info_dict_v2(name, TORRENT_BLOCK_SIZE * 16, input,
+                                     &info_dict, &arena));
   } else {
     fprintf(stderr, "unknown command\n");
     exit(1);
