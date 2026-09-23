@@ -1086,11 +1086,12 @@ torrent_build_merkle_tree(Slice_u8 data, MerkleNode **nodes, usize *nodes_count,
   return true;
 }
 
-__attribute__((unused)) static bool
+__attribute__((warn_unused_result)) static bool
 torrent_make_info_dict_v2(Slice_u8 name, usize piece_length, Slice_u8 file_data,
                           Slice_u8 file_name, BencodeValue *info,
                           Arena *arena) {
-  assert(piece_length > 0);
+  assert(piece_length >= 16 * KiB); // Per spec.
+  assert(piece_length % 2 == 0);    // Per spec.
   assert(info);
   assert(arena);
   const usize dict_items_count = 4;
@@ -1107,7 +1108,7 @@ torrent_make_info_dict_v2(Slice_u8 name, usize piece_length, Slice_u8 file_data,
   // k1
   BencodeValue *it = info->v.list.data;
   it->kind = BencodeKindString;
-  it->v.s.len = sizeof("name");
+  it->v.s.len = sizeof("name") - 1;
   it->v.s.data = (u8 *)"name";
 
   // v1
@@ -1118,7 +1119,7 @@ torrent_make_info_dict_v2(Slice_u8 name, usize piece_length, Slice_u8 file_data,
   // k2
   it++;
   it->kind = BencodeKindString;
-  it->v.s.len = sizeof("piece length");
+  it->v.s.len = sizeof("piece length") - 1;
   it->v.s.data = (u8 *)"piece length";
 
   // v2
@@ -1131,7 +1132,7 @@ torrent_make_info_dict_v2(Slice_u8 name, usize piece_length, Slice_u8 file_data,
   // k3
   it++;
   it->kind = BencodeKindString;
-  it->v.s.len = sizeof("meta version");
+  it->v.s.len = sizeof("meta version") - 1;
   it->v.s.data = (u8 *)"meta version";
 
   // v3
@@ -1142,7 +1143,7 @@ torrent_make_info_dict_v2(Slice_u8 name, usize piece_length, Slice_u8 file_data,
   // k4
   it++;
   it->kind = BencodeKindString;
-  it->v.s.len = sizeof("file tree");
+  it->v.s.len = sizeof("file tree") - 1;
   it->v.s.data = (u8 *)"file tree";
 
   MerkleNode *nodes = NULL;
@@ -1150,6 +1151,7 @@ torrent_make_info_dict_v2(Slice_u8 name, usize piece_length, Slice_u8 file_data,
   if (!torrent_build_merkle_tree(file_data, &nodes, &nodes_count, arena)) {
     return false;
   }
+  assert(nodes_count > 0);
   const MerkleNode *const root = &nodes[nodes_count - 1];
   printf("root=");
   sha256_print_hex(root->digest);
@@ -1167,7 +1169,6 @@ torrent_make_info_dict_v2(Slice_u8 name, usize piece_length, Slice_u8 file_data,
   it = it->v.list.data;
 
   // file tree k1
-  it++;
   it->kind = BencodeKindString;
   it->v.s = file_name;
 
@@ -1184,20 +1185,21 @@ torrent_make_info_dict_v2(Slice_u8 name, usize piece_length, Slice_u8 file_data,
   it = it->v.list.data;
 
   // file tree first entry k1
-  it++;
   it->kind = BencodeKindString;
-  it->v.s.len = sizeof("length");
+  it->v.s.len = sizeof("length") - 1;
   it->v.s.data = (u8 *)"length";
 
   // file tree first entry v1
   it++;
   it->kind = BencodeKindInteger;
-  it->v.num = file_data.len;
+  if (!isize_from_usize(file_data.len, false, &it->v.num)) {
+    return false;
+  }
 
   // file tree first entry k2
   it++;
   it->kind = BencodeKindString;
-  it->v.s.len = sizeof("pieces root");
+  it->v.s.len = sizeof("pieces root") - 1;
   it->v.s.data = (u8 *)"pieces root";
 
   // file tree first entry v2
