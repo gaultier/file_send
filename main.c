@@ -1088,7 +1088,8 @@ torrent_build_merkle_tree(Slice_u8 data, MerkleNode **nodes, usize *nodes_count,
 
 __attribute__((unused)) static bool
 torrent_make_info_dict_v2(Slice_u8 name, usize piece_length, Slice_u8 file_data,
-                          BencodeValue *info, Arena *arena) {
+                          Slice_u8 file_name, BencodeValue *info,
+                          Arena *arena) {
   assert(piece_length > 0);
   assert(info);
   assert(arena);
@@ -1156,12 +1157,59 @@ torrent_make_info_dict_v2(Slice_u8 name, usize piece_length, Slice_u8 file_data,
   // v4
   it++;
   it->kind = BencodeKindDict;
-  it->v.list.len = 1; // TODO
+  it->v.list.len = 2;
   it->v.list.data = arena_alloc(arena, __alignof__(BencodeValue),
                                 sizeof(BencodeValue), it->v.list.len);
   if (NULL == it->v.list.data) {
     return false;
   }
+
+  it = it->v.list.data;
+
+  // file tree k1
+  it++;
+  it->kind = BencodeKindString;
+  it->v.s = file_name;
+
+  // file tree v1
+  it++;
+  it->kind = BencodeKindDict;
+  it->v.list.len = 2 * 2;
+  it->v.list.data = arena_alloc(arena, __alignof__(BencodeValue),
+                                sizeof(BencodeValue), it->v.list.len);
+  if (NULL == it->v.list.data) {
+    return false;
+  }
+
+  it = it->v.list.data;
+
+  // file tree first entry k1
+  it++;
+  it->kind = BencodeKindString;
+  it->v.s.len = sizeof("length");
+  it->v.s.data = (u8 *)"length";
+
+  // file tree first entry v1
+  it++;
+  it->kind = BencodeKindInteger;
+  it->v.num = file_data.len;
+
+  // file tree first entry k2
+  it++;
+  it->kind = BencodeKindString;
+  it->v.s.len = sizeof("pieces root");
+  it->v.s.data = (u8 *)"pieces root";
+
+  // file tree first entry v2
+  it++;
+  it->kind = BencodeKindString;
+  it->v.s.len = SHA256_DIGEST_LENGTH;
+  it->v.s.data =
+      arena_alloc(arena, __alignof__(u8), sizeof(u8), SHA256_DIGEST_LENGTH);
+  if (NULL == it->v.s.data) {
+    return false;
+  }
+  memcpy(it->v.s.data, root->digest, SHA256_DIGEST_LENGTH);
 
   return true;
 }
@@ -2620,12 +2668,13 @@ int main(i32 argc, char *argv[]) {
     assert((void *)-1 != input_data);
 
     Slice_u8 input = slice_u8_make((u8 *)input_data, (usize)st.st_size);
+    Slice_u8 file_name = {.data = (u8 *)argv[2], .len = strlen(argv[2])};
     Arena arena = arena_valloc(32 * MiB);
 
     Slice_u8 name = {.data = (u8 *)"test", .len = 4};
     BencodeValue info_dict = {0};
     assert(torrent_make_info_dict_v2(name, TORRENT_BLOCK_SIZE * 16, input,
-                                     &info_dict, &arena));
+                                     file_name, &info_dict, &arena));
   } else {
     fprintf(stderr, "unknown command\n");
     exit(1);
