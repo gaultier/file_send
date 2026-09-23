@@ -1009,9 +1009,12 @@ torrent_compute_merkle_tree(Slice_u8 data, MerkleNode **nodes,
   assert(leaves_count > 0);
 
   // Nodes count = leaves_count * (leaves_count-1).
-  assert(__builtin_mul_overflow(leaves_count, leaves_count - 1, nodes_count));
+  assert(!__builtin_mul_overflow(leaves_count, 2, nodes_count));
   assert(*nodes_count > 0);
-  assert(leaves_count < *nodes_count);
+  *nodes_count -= 1;
+  assert(*nodes_count > 0);
+
+  assert(leaves_count <= *nodes_count);
 
   *nodes = arena_alloc(arena, __alignof__(MerkleNode), sizeof(MerkleNode),
                        *nodes_count);
