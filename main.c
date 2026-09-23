@@ -1256,6 +1256,19 @@ __attribute__((warn_unused_result)) static usize usize_digits_base_10(usize n) {
   return digits;
 }
 
+// `-ISIZE_MIN` is not representable as an `isize`, so the magnitude is taken
+// in `usize`, where it always is. Conversion of a negative value to an
+// unsigned type is modular, so subtracting it from zero yields exactly the
+// magnitude, `ISIZE_MIN` included.
+__attribute__((warn_unused_result)) static usize isize_magnitude(isize n) {
+  return n < 0 ? (usize)0 - (usize)n : (usize)n;
+}
+
+// Decimal width including the sign, the mirror of `usize_digits_base_10`.
+__attribute__((warn_unused_result)) static usize isize_digits_base_10(isize n) {
+  return (n < 0 ? 1 : 0) + usize_digits_base_10(isize_magnitude(n));
+}
+
 // The digits are written at the *front* of `dst`, so a caller can encode
 // straight into its own output buffer instead of copying out of a scratch one.
 // Base 10 yields the least significant digit first, hence the up front width.
@@ -1288,12 +1301,7 @@ encode_isize_base_10(isize n, Slice_u8 dst) {
   assert(dst.data);
 
   const bool negative = n < 0;
-
-  // `-ISIZE_MIN` is not representable as an `isize`, so the magnitude is taken
-  // in `usize`, where it always is. Conversion of a negative value to an
-  // unsigned type is modular, so subtracting it from zero yields exactly the
-  // magnitude, `ISIZE_MIN` included.
-  const usize magnitude = negative ? (usize)0 - (usize)n : (usize)n;
+  const usize magnitude = isize_magnitude(n);
 
   if (!negative) {
     return encode_usize_base_10(magnitude, dst);
@@ -1309,25 +1317,31 @@ encode_isize_base_10(isize n, Slice_u8 dst) {
 }
 
 __attribute__((warn_unused_result)) static usize
-bencode_encode_max_size(BencodeValue b, usize depth) {
+bencode_encode_exact_size(BencodeValue b, usize depth) {
   assert(depth <= BENCODE_MAX_DEPTH);
 
   usize res = 0;
 
   switch (b.kind) {
   case BencodeKindInteger:
-    assert(!__builtin_add_overflow(res, 1 + 20 + 2, &res));
+    // `i` <digits> `e`
+    assert(!__builtin_add_overflow(res, 2 + isize_digits_base_10(b.v.num),
+                                   &res));
     break;
   case BencodeKindString:
-    assert(!__builtin_add_overflow(res, 20 + 1 + b.v.s.len, &res));
+    // <length> `:` <bytes>
+    assert(!__builtin_add_overflow(res, usize_digits_base_10(b.v.s.len) + 1,
+                                   &res));
+    assert(!__builtin_add_overflow(res, b.v.s.len, &res));
     break;
   case BencodeKindList:
   case BencodeKindDict:
+    // `l` or `d`, then `e`
     assert(!__builtin_add_overflow(res, 2, &res));
 
     for (usize i = 0; i < b.v.list.len; i++) {
       const usize item_size =
-          bencode_encode_max_size(b.v.list.data[i], depth + 1);
+          bencode_encode_exact_size(b.v.list.data[i], depth + 1);
       assert(!__builtin_add_overflow(res, item_size, &res));
     }
     break;
@@ -1336,8 +1350,10 @@ bencode_encode_max_size(BencodeValue b, usize depth) {
   return res;
 }
 
+// Sizing is a whole subtree walk, so the checks against it live in the wrapper
+// below rather than here, where they would run once per level of nesting.
 __attribute__((warn_unused_result)) static usize
-bencode_encode(BencodeValue b, Slice_u8 dst, usize depth) {
+bencode_encode_rec(BencodeValue b, Slice_u8 dst, usize depth) {
   assert(depth <= BENCODE_MAX_DEPTH);
   assert(dst.data);
   assert(dst.len >= 2);
@@ -1372,7 +1388,7 @@ bencode_encode(BencodeValue b, Slice_u8 dst, usize depth) {
 
     for (usize i = 0; i < b.v.list.len; i++) {
       const BencodeValue item = b.v.list.data[i];
-      slice_u8_advance(&dst, bencode_encode(item, dst, depth + 1));
+      slice_u8_advance(&dst, bencode_encode_rec(item, dst, depth + 1));
     }
 
     dst.data[0] = 'e';
@@ -1384,9 +1400,28 @@ bencode_encode(BencodeValue b, Slice_u8 dst, usize depth) {
   }
 
   assert(dst.data > dst_before);
-  assert(dst.data - dst_before >= 2);
 
-  return (usize)(dst.data - dst_before);
+  const usize written = (usize)(dst.data - dst_before);
+  assert(written >= 2);
+
+  return written;
+}
+
+// Encode `b` at the front of `dst` and return the number of bytes written.
+//
+// `dst` must be exactly `bencode_encode_exact_size(b, 0)` bytes, which the
+// caller has already computed in order to allocate it. Requiring exactness
+// rather than sufficiency costs nothing and buys the check below: the two
+// passes are compared without walking the tree a third time, and the
+// recursion cannot scribble into slack it was never given.
+__attribute__((warn_unused_result)) static usize
+bencode_encode(BencodeValue b, Slice_u8 dst) {
+  assert(dst.data);
+
+  const usize written = bencode_encode_rec(b, dst, 0);
+  assert(dst.len == written);
+
+  return written;
 }
 
 // ---------------------------------------------------------------------------
@@ -3026,8 +3061,13 @@ static void test_bencode_encode_once(BencodeValue b, const char *expected) {
   assert(expected);
   const usize expected_len = strlen(expected);
 
-  const usize cap = bencode_encode_max_size(b, 0);
-  assert(cap >= expected_len);
+  // The sizing pass predicts the encoding to the byte, so it is a check rather
+  // than a bound.
+  const usize size = bencode_encode_exact_size(b, 0);
+  assert(size == expected_len);
+
+  // Allocate one byte more than that, so a write past the end is visible.
+  const usize cap = size + 1;
 
   Arena arena = test_arena(64 * KiB);
   Slice_u8 dst = {.data = arena_alloc(&arena, __alignof__(u8), sizeof(u8), cap),
@@ -3035,7 +3075,7 @@ static void test_bencode_encode_once(BencodeValue b, const char *expected) {
   assert(dst.data);
   memset(dst.data, '#', cap);
 
-  const usize written = bencode_encode(b, dst, 0);
+  const usize written = bencode_encode(b, slice_u8_take(dst, size));
 
   // Comparing from the front of `dst` pins the anchoring.
   assert(expected_len == written);
@@ -3083,13 +3123,14 @@ static void test_bencode_encode_binary_string(void) {
                           .v.s = slice_u8_make(raw, sizeof(raw))};
 
   Arena arena = test_arena(64 * KiB);
-  const usize cap = bencode_encode_max_size(b, 0);
+  const usize cap = bencode_encode_exact_size(b, 0);
   Slice_u8 dst = {.data = arena_alloc(&arena, __alignof__(u8), sizeof(u8), cap),
                   .len = cap};
   assert(dst.data);
 
-  const usize written = bencode_encode(b, dst, 0);
+  const usize written = bencode_encode(b, dst);
 
+  assert(bencode_encode_exact_size(b, 0) == written);
   assert(2 + sizeof(raw) == written);
   assert(0 == memcmp(dst.data, "6:", 2));
   assert(0 == memcmp(dst.data + 2, raw, sizeof(raw)));
@@ -3154,13 +3195,14 @@ static void test_bencode_encode_wide_dict(void) {
                              .v.list.len = pairs * 2,
                              .v.list.data = entries};
 
-  const usize cap = bencode_encode_max_size(dict, 0);
+  const usize cap = bencode_encode_exact_size(dict, 0);
   Slice_u8 dst = {.data = arena_alloc(&arena, __alignof__(u8), sizeof(u8), cap),
                   .len = cap};
   assert(dst.data);
 
-  const usize written = bencode_encode(dict, dst, 0);
+  const usize written = bencode_encode(dict, dst);
 
+  assert(bencode_encode_exact_size(dict, 0) == written);
   assert(written > 2);
   assert('d' == dst.data[0]);
   assert('e' == dst.data[written - 1]);
@@ -3233,12 +3275,13 @@ static void test_bencode_encode_torrent_info(void) {
                                    slice_u8_make(file_data, file_len), name,
                                    &info, &arena));
 
-  const usize cap = bencode_encode_max_size(info, 0);
+  const usize cap = bencode_encode_exact_size(info, 0);
   Slice_u8 dst = {.data = arena_alloc(&arena, __alignof__(u8), sizeof(u8), cap),
                   .len = cap};
   assert(dst.data);
 
-  const Slice_u8 got = slice_u8_take(dst, bencode_encode(info, dst, 0));
+  const Slice_u8 got = slice_u8_take(dst, bencode_encode(info, dst));
+  assert(bencode_encode_exact_size(info, 0) == got.len);
 
   // The digest is raw bytes, so build the expectation around it rather than
   // embedding it in a string literal.
@@ -3385,7 +3428,7 @@ int main(i32 argc, char *argv[]) {
     bencode_print(info_dict, 0);
     puts("");
 
-    const usize encode_cap = bencode_encode_max_size(info_dict, 0);
+    const usize encode_cap = bencode_encode_exact_size(info_dict, 0);
     assert(encode_cap > 0);
 
     Slice_u8 encoded = {
@@ -3393,7 +3436,7 @@ int main(i32 argc, char *argv[]) {
         .len = encode_cap};
     assert(encoded.data);
 
-    const usize encoded_len = bencode_encode(info_dict, encoded, 0);
+    const usize encoded_len = bencode_encode(info_dict, encoded);
     encoded = slice_u8_take(encoded, encoded_len);
     printf("info dict encoded: %.*s\n", (i32)encoded.len, encoded.data);
   } else {

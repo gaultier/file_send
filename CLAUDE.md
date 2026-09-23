@@ -1,0 +1,2 @@
+- `-DNDEBUG` is never used as a build option, plain `asserts` are valid even with side effects.
+- Benchmark with these build options: `-O2 -march=native -flto=full`
