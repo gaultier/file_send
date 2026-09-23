@@ -1246,12 +1246,27 @@ torrent_make_info_dict_v2(Slice_u8 name, usize piece_length, Slice_u8 file_data,
   return true;
 }
 
+__attribute__((warn_unused_result)) static usize usize_digits_base_10(usize n) {
+  usize digits = 1;
+  while (n >= 10) {
+    n /= 10;
+    digits += 1;
+  }
+
+  return digits;
+}
+
+// The digits are written at the *front* of `dst`, so a caller can encode
+// straight into its own output buffer instead of copying out of a scratch one.
+// Base 10 yields the least significant digit first, hence the up front width.
 __attribute__((warn_unused_result)) static Slice_u8
 encode_usize_base_10(usize n, Slice_u8 dst) {
   assert(dst.data);
-  assert(dst.len >= 20);
 
-  u8 *end = dst.data + dst.len;
+  const usize digits = usize_digits_base_10(n);
+  assert(dst.len >= digits);
+
+  u8 *end = dst.data + digits;
 
   do {
     assert(end > dst.data);
@@ -1262,7 +1277,36 @@ encode_usize_base_10(usize n, Slice_u8 dst) {
     n /= 10;
   } while (n > 0);
 
-  return (Slice_u8){.data = end, .len = (usize)(dst.data + dst.len - end)};
+  // The width matched the digits actually written.
+  assert(end == dst.data);
+
+  return (Slice_u8){.data = dst.data, .len = digits};
+}
+
+__attribute__((warn_unused_result)) static Slice_u8
+encode_isize_base_10(isize n, Slice_u8 dst) {
+  assert(dst.data);
+
+  const bool negative = n < 0;
+
+  // `-ISIZE_MIN` is not representable as an `isize`, so the magnitude is taken
+  // in `usize`, where it always is. Conversion of a negative value to an
+  // unsigned type is modular, so subtracting it from zero yields exactly the
+  // magnitude, `ISIZE_MIN` included.
+  const usize magnitude = negative ? (usize)0 - (usize)n : (usize)n;
+
+  if (!negative) {
+    return encode_usize_base_10(magnitude, dst);
+  }
+
+  assert(dst.len >= 1);
+  dst.data[0] = '-';
+
+  const Slice_u8 digits =
+      encode_usize_base_10(magnitude, slice_u8_make(dst.data + 1, dst.len - 1));
+  assert(digits.data == dst.data + 1);
+
+  return (Slice_u8){.data = dst.data, .len = 1 + digits.len};
 }
 
 #if 0
@@ -2697,9 +2741,30 @@ static void test_torrent_merkle_oom(void) {
 // encode_usize_base_10
 // ---------------------------------------------------------------------------
 
-// The digits are written right aligned into `dst`, so every case checks three
-// things: the text, that the returned slice really is the tail of `dst`, and
-// that nothing outside that slice was touched.
+// The digits are written at the front of `dst`, so every case checks three
+// things: the text, that the returned slice really does start at `dst.data`,
+// and that nothing outside that slice was touched.
+static void test_usize_digits_base_10(void) {
+  assert(1 == usize_digits_base_10(0));
+  assert(1 == usize_digits_base_10(9));
+  assert(2 == usize_digits_base_10(10));
+  assert(2 == usize_digits_base_10(99));
+  assert(3 == usize_digits_base_10(100));
+
+  // Every power of ten and the value one below it: the two values that
+  // straddle each digit count boundary.
+  usize power = 1;
+  for (usize digits = 1; digits <= 19; digits++) {
+    assert(digits == usize_digits_base_10(power));
+    assert(digits == usize_digits_base_10(power * 10 - 1));
+    power *= 10;
+  }
+
+  // 10^19 and `SIZE_MAX` are both 20 digits, the widest a `usize` gets.
+  assert(20 == usize_digits_base_10(power));
+  assert(20 == usize_digits_base_10(SIZE_MAX));
+}
+
 static void test_encode_usize_once(usize n, const char *expected) {
   assert(expected);
 
@@ -2713,14 +2778,12 @@ static void test_encode_usize_once(usize n, const char *expected) {
   assert(strlen(expected) == got.len);
   assert(0 == memcmp(got.data, expected, got.len));
 
-  // Right aligned: the last digit lands on the last byte of `dst`.
-  assert(got.data + got.len == buf + dst_len);
+  // Front anchored: the digits begin at the start of `dst`, which is what
+  // lets a caller encode straight into its own output buffer.
+  assert(got.data == buf);
 
-  // The slack in front of the digits, and everything past `dst`, is untouched.
-  for (usize i = 0; i < dst_len - got.len; i++) {
-    assert('#' == buf[i]);
-  }
-  for (usize i = dst_len; i < sizeof(buf); i++) {
+  // Everything after the digits, inside `dst` and past it, is untouched.
+  for (usize i = got.len; i < sizeof(buf); i++) {
     assert('#' == buf[i]);
   }
 }
@@ -2752,18 +2815,31 @@ static void test_encode_usize_base_10(void) {
   test_encode_usize_once(SIZE_MAX, "18446744073709551615");
 }
 
-// The 20 byte minimum `dst` the function asserts on really is enough for the
-// widest `usize`, with nothing written before the start of the buffer.
-static void test_encode_usize_base_10_min_dst(void) {
-  u8 buf[20];
+// There is no fixed minimum `dst`: a buffer of exactly the needed width works,
+// which is what lets a caller size its output exactly instead of padding for
+// the widest possible number.
+static void test_encode_usize_base_10_exact_fit(void) {
+  u8 buf[24];
+
   memset(buf, '#', sizeof(buf));
+  const Slice_u8 widest = encode_usize_base_10(SIZE_MAX, slice_u8_make(buf, 20));
+  assert(20 == widest.len);
+  assert(buf == widest.data);
+  assert(0 == memcmp(widest.data, "18446744073709551615", 20));
 
-  const Slice_u8 got =
-      encode_usize_base_10(SIZE_MAX, slice_u8_make(buf, sizeof(buf)));
+  memset(buf, '#', sizeof(buf));
+  const Slice_u8 one = encode_usize_base_10(7, slice_u8_make(buf, 1));
+  assert(1 == one.len);
+  assert(buf == one.data);
+  assert('7' == buf[0]);
+  assert('#' == buf[1]);
 
-  assert(sizeof(buf) == got.len);
-  assert(buf == got.data);
-  assert(0 == memcmp(got.data, "18446744073709551615", sizeof(buf)));
+  memset(buf, '#', sizeof(buf));
+  const Slice_u8 three = encode_usize_base_10(123, slice_u8_make(buf, 3));
+  assert(3 == three.len);
+  assert(buf == three.data);
+  assert(0 == memcmp(three.data, "123", 3));
+  assert('#' == buf[3]);
 }
 
 // Cross check against the platform formatter, and read the result back with
@@ -2804,6 +2880,7 @@ static void test_encode_usize_base_10_round_trip(void) {
     memset(buf, '#', sizeof(buf));
     const Slice_u8 got =
         encode_usize_base_10(n, slice_u8_make(buf, sizeof(buf)));
+    assert(buf == got.data);
 
     char expected[32] = {0};
     const i32 written = snprintf(expected, sizeof(expected), "%zu", n);
@@ -2820,6 +2897,115 @@ static void test_encode_usize_base_10_round_trip(void) {
     usize parsed = 0;
     assert(ascii_num_parse(&to_parse, &parsed));
     assert(n == parsed);
+  }
+}
+
+static void test_encode_isize_once(isize n, const char *expected) {
+  assert(expected);
+
+  const usize dst_len = 24;
+  u8 buf[64];
+  assert(dst_len < sizeof(buf));
+  memset(buf, '#', sizeof(buf));
+
+  const Slice_u8 got = encode_isize_base_10(n, slice_u8_make(buf, dst_len));
+
+  assert(strlen(expected) == got.len);
+  assert(0 == memcmp(got.data, expected, got.len));
+
+  // Front anchored: the digits begin at the start of `dst`, which is what
+  // lets a caller encode straight into its own output buffer.
+  assert(got.data == buf);
+
+  // Everything after the digits, inside `dst` and past it, is untouched.
+  for (usize i = got.len; i < sizeof(buf); i++) {
+    assert('#' == buf[i]);
+  }
+}
+
+static void test_encode_isize_base_10(void) {
+  // Zero is not negative: no `-0`.
+  test_encode_isize_once(0, "0");
+
+  test_encode_isize_once(1, "1");
+  test_encode_isize_once(-1, "-1");
+  test_encode_isize_once(9, "9");
+  test_encode_isize_once(-9, "-9");
+
+  // Either side of every digit count boundary, both signs.
+  test_encode_isize_once(10, "10");
+  test_encode_isize_once(-10, "-10");
+  test_encode_isize_once(99, "99");
+  test_encode_isize_once(-99, "-99");
+  test_encode_isize_once(100, "100");
+  test_encode_isize_once(-100, "-100");
+  test_encode_isize_once(123456789, "123456789");
+  test_encode_isize_once(-123456789, "-123456789");
+
+  // The asymmetric boundary: `|ISIZE_MIN|` is one greater than `ISIZE_MAX`, so
+  // negating it in the signed domain would overflow.
+  test_encode_isize_once(INT64_MAX, "9223372036854775807");
+  test_encode_isize_once(INT64_MIN + 1, "-9223372036854775807");
+  test_encode_isize_once(INT64_MIN, "-9223372036854775808");
+}
+
+// Exact fit again, this time including the sign: the widest `isize` is the
+// negative one, 19 digits plus a sign.
+static void test_encode_isize_base_10_exact_fit(void) {
+  u8 buf[24];
+
+  memset(buf, '#', sizeof(buf));
+  const Slice_u8 widest =
+      encode_isize_base_10(INT64_MIN, slice_u8_make(buf, 20));
+  assert(20 == widest.len);
+  assert(buf == widest.data);
+  assert(0 == memcmp(widest.data, "-9223372036854775808", 20));
+
+  memset(buf, '#', sizeof(buf));
+  const Slice_u8 two = encode_isize_base_10(-7, slice_u8_make(buf, 2));
+  assert(2 == two.len);
+  assert(buf == two.data);
+  assert(0 == memcmp(two.data, "-7", 2));
+  assert('#' == buf[2]);
+}
+
+// Cross check against the platform formatter, then frame the digits as a
+// bencode integer and read them back with this project's own parser.
+static void test_encode_isize_base_10_round_trip(void) {
+  const isize values[] = {
+      0,        1,         -1,        2,          -2,
+      9,        -9,        10,        -10,        99,
+      -99,      100,       -100,      255,        -256,
+      65535,    -65536,    1000000,   -1000000,   4294967296,
+      -4294967296, INT64_MAX, INT64_MIN, INT64_MIN + 1,
+  };
+
+  for (usize i = 0; i < sizeof(values) / sizeof(values[0]); i++) {
+    const isize n = values[i];
+
+    u8 buf[24];
+    memset(buf, '#', sizeof(buf));
+    const Slice_u8 got =
+        encode_isize_base_10(n, slice_u8_make(buf, sizeof(buf)));
+    assert(buf == got.data);
+
+    char expected[32] = {0};
+    const i32 written = snprintf(expected, sizeof(expected), "%zd", n);
+    assert(written > 0);
+    assert((usize)written == got.len);
+    assert(0 == memcmp(got.data, expected, got.len));
+
+    // `i<n>e`, the way a bencode integer is framed.
+    u8 framed[32] = {0};
+    framed[0] = 'i';
+    memcpy(framed + 1, got.data, got.len);
+    framed[1 + got.len] = 'e';
+
+    Slice_u8 to_parse = slice_u8_make(framed, got.len + 2);
+    BencodeValue parsed = {0};
+    assert(bencode_parse_num(&to_parse, &parsed));
+    assert(BencodeKindInteger == parsed.kind);
+    assert(n == parsed.v.num);
   }
 }
 
@@ -2851,9 +3037,13 @@ static void test(const char *filter) {
       {"torrent_merkle_padding", test_torrent_merkle_padding},
       {"torrent_merkle_empty", test_torrent_merkle_empty},
       {"torrent_merkle_oom", test_torrent_merkle_oom},
+      {"usize_digits_base_10", test_usize_digits_base_10},
       {"encode_usize_base_10", test_encode_usize_base_10},
-      {"encode_usize_base_10_min_dst", test_encode_usize_base_10_min_dst},
+      {"encode_usize_base_10_exact_fit", test_encode_usize_base_10_exact_fit},
       {"encode_usize_base_10_round_trip", test_encode_usize_base_10_round_trip},
+      {"encode_isize_base_10", test_encode_isize_base_10},
+      {"encode_isize_base_10_exact_fit", test_encode_isize_base_10_exact_fit},
+      {"encode_isize_base_10_round_trip", test_encode_isize_base_10_round_trip},
   };
 
   usize run = 0;
