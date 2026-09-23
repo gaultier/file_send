@@ -1041,7 +1041,9 @@ torrent_build_merkle_tree(Slice_u8 data, MerkleNode **nodes, usize *nodes_count,
       // Clamp at 0.
       data.len =
           data.len > TORRENT_BLOCK_SIZE ? data.len - TORRENT_BLOCK_SIZE : 0;
-    } // Otherwise leave the block as zero, per spec.
+    } else { // Otherwise set the block to zero, per spec.
+      bzero(node->digest, sizeof(node->digest));
+    }
 
     printf("h=0 w=%zu: ", i);
     sha256_print_hex(node->digest);
