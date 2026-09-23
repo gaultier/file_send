@@ -1105,113 +1105,138 @@ torrent_make_info_dict_v2(Slice_u8 name, usize piece_length, Slice_u8 file_data,
     return false;
   }
 
-  // k1
-  BencodeValue *it = info->v.list.data;
-  it->kind = BencodeKindString;
-  it->v.s.len = sizeof("name") - 1;
-  it->v.s.data = (u8 *)"name";
+  // `info["name"] = name`
+  {
+    BencodeValue *const key = &info->v.list.data[4];
+    key->kind = BencodeKindString;
+    key->v.s.len = sizeof("name") - 1;
+    key->v.s.data = (u8 *)"name";
 
-  // v1
-  it++;
-  it->kind = BencodeKindString;
-  it->v.s = name;
-
-  // k2
-  it++;
-  it->kind = BencodeKindString;
-  it->v.s.len = sizeof("piece length") - 1;
-  it->v.s.data = (u8 *)"piece length";
-
-  // v2
-  it++;
-  it->kind = BencodeKindInteger;
-  if (!isize_from_usize(piece_length, false, &it->v.num)) {
-    return false;
+    BencodeValue *const value = &info->v.list.data[5];
+    value->kind = BencodeKindString;
+    value->v.s = name;
   }
 
-  // k3
-  it++;
-  it->kind = BencodeKindString;
-  it->v.s.len = sizeof("meta version") - 1;
-  it->v.s.data = (u8 *)"meta version";
+  // `info["piece length"] = piece_length`
+  {
+    BencodeValue *const key = &info->v.list.data[6];
+    key->kind = BencodeKindString;
+    key->v.s.len = sizeof("piece length") - 1;
+    key->v.s.data = (u8 *)"piece length";
 
-  // v3
-  it++;
-  it->kind = BencodeKindInteger;
-  it->v.num = 2;
-
-  // k4
-  it++;
-  it->kind = BencodeKindString;
-  it->v.s.len = sizeof("file tree") - 1;
-  it->v.s.data = (u8 *)"file tree";
-
-  MerkleNode *nodes = NULL;
-  usize nodes_count = 0;
-  if (!torrent_build_merkle_tree(file_data, &nodes, &nodes_count, arena)) {
-    return false;
-  }
-  assert(nodes_count > 0);
-  const MerkleNode *const root = &nodes[nodes_count - 1];
-  printf("root=");
-  sha256_print_hex(root->digest);
-
-  // v4
-  it++;
-  it->kind = BencodeKindDict;
-  it->v.list.len = 2;
-  it->v.list.data = arena_alloc(arena, __alignof__(BencodeValue),
-                                sizeof(BencodeValue), it->v.list.len);
-  if (NULL == it->v.list.data) {
-    return false;
+    BencodeValue *const value = &info->v.list.data[7];
+    value->kind = BencodeKindInteger;
+    if (!isize_from_usize(piece_length, false, &value->v.num)) {
+      return false;
+    }
   }
 
-  it = it->v.list.data;
+  // `info["meta version"] = 2`
+  {
 
-  // file tree k1
-  it->kind = BencodeKindString;
-  it->v.s = file_name;
+    BencodeValue *const key = &info->v.list.data[2];
+    key->kind = BencodeKindString;
+    key->v.s.len = sizeof("meta version") - 1;
+    key->v.s.data = (u8 *)"meta version";
 
-  // file tree v1
-  it++;
-  it->kind = BencodeKindDict;
-  it->v.list.len = 2 * 2;
-  it->v.list.data = arena_alloc(arena, __alignof__(BencodeValue),
-                                sizeof(BencodeValue), it->v.list.len);
-  if (NULL == it->v.list.data) {
-    return false;
+    BencodeValue *const value = &info->v.list.data[3];
+    value->kind = BencodeKindInteger;
+    value->v.num = 2;
   }
 
-  it = it->v.list.data;
+  // `info["file tree"] = ...`
+  {
+    BencodeValue *const file_tree_key = &info->v.list.data[0];
+    file_tree_key->kind = BencodeKindString;
+    file_tree_key->v.s.len = sizeof("file tree") - 1;
+    file_tree_key->v.s.data = (u8 *)"file tree";
 
-  // file tree first entry k1
-  it->kind = BencodeKindString;
-  it->v.s.len = sizeof("length") - 1;
-  it->v.s.data = (u8 *)"length";
+    MerkleNode *nodes = NULL;
+    usize nodes_count = 0;
+    if (!torrent_build_merkle_tree(file_data, &nodes, &nodes_count, arena)) {
+      return false;
+    }
+    assert(nodes_count > 0);
+    const MerkleNode *const root = &nodes[nodes_count - 1];
+    printf("root=");
+    sha256_print_hex(root->digest);
 
-  // file tree first entry v1
-  it++;
-  it->kind = BencodeKindInteger;
-  if (!isize_from_usize(file_data.len, false, &it->v.num)) {
-    return false;
+    BencodeValue *const file_tree_dict = &info->v.list.data[1];
+    file_tree_dict->kind = BencodeKindDict;
+    file_tree_dict->v.list.len = 2;
+    file_tree_dict->v.list.data =
+        arena_alloc(arena, __alignof__(BencodeValue), sizeof(BencodeValue),
+                    file_tree_dict->v.list.len);
+    if (NULL == file_tree_dict->v.list.data) {
+      return false;
+    }
+
+    // `info["file tree"][file_name] = {}`
+    {
+      BencodeValue *const file_name_key = &file_tree_dict->v.list.data[0];
+      file_name_key->kind = BencodeKindString;
+      file_name_key->v.s = file_name;
+
+      BencodeValue *const file_name_dict = &file_tree_dict->v.list.data[1];
+      file_name_dict->kind = BencodeKindDict;
+      file_name_dict->v.list.len = 2;
+      file_name_dict->v.list.data =
+          arena_alloc(arena, __alignof__(BencodeValue), sizeof(BencodeValue),
+                      file_name_dict->v.list.len);
+      if (NULL == file_name_dict->v.list.data) {
+        return false;
+      }
+
+      // `info["file tree"][file_name][""] = {}`
+      {
+        BencodeValue *const empty_key = &file_name_dict->v.list.data[0];
+        empty_key->kind = BencodeKindString;
+        empty_key->v.s = (Slice_u8){0};
+
+        BencodeValue *const empty_dict = &file_name_dict->v.list.data[1];
+        empty_dict->kind = BencodeKindDict;
+        empty_dict->v.list.len = 2 * 2;
+        empty_dict->v.list.data =
+            arena_alloc(arena, __alignof__(BencodeValue), sizeof(BencodeValue),
+                        empty_dict->v.list.len);
+        if (NULL == empty_dict->v.list.data) {
+          return false;
+        }
+
+        // `info["file tree"][file_name][""]["length"] = file_data.length`
+        {
+          BencodeValue *const length_key = &empty_dict->v.list.data[0];
+          length_key->kind = BencodeKindString;
+          length_key->v.s = slice_u8_make((u8 *)"length", 5);
+
+          BencodeValue *const length_value = &empty_dict->v.list.data[1];
+          length_value->kind = BencodeKindInteger;
+          if (!isize_from_usize(file_data.len, false, &length_value->v.num)) {
+            return false;
+          }
+        }
+
+        // `info["file tree"][file_name][""]["pieces root"] = root.digest`
+        {
+          BencodeValue *const pieces_root_key = &empty_dict->v.list.data[1];
+          pieces_root_key->kind = BencodeKindString;
+          pieces_root_key->v.s =
+              slice_u8_make((u8 *)"pieces root", sizeof("pieces root") - 1);
+
+          BencodeValue *const pieces_root_value = &empty_dict->v.list.data[2];
+          pieces_root_value->kind = BencodeKindString;
+          pieces_root_value->v.s.len = SHA256_DIGEST_LENGTH;
+          pieces_root_value->v.s.data = arena_alloc(
+              arena, __alignof__(u8), sizeof(u8), SHA256_DIGEST_LENGTH);
+          if (NULL == pieces_root_value->v.s.data) {
+            return false;
+          }
+          memcpy(pieces_root_value->v.s.data, root->digest,
+                 SHA256_DIGEST_LENGTH);
+        }
+      }
+    }
   }
-
-  // file tree first entry k2
-  it++;
-  it->kind = BencodeKindString;
-  it->v.s.len = sizeof("pieces root") - 1;
-  it->v.s.data = (u8 *)"pieces root";
-
-  // file tree first entry v2
-  it++;
-  it->kind = BencodeKindString;
-  it->v.s.len = SHA256_DIGEST_LENGTH;
-  it->v.s.data =
-      arena_alloc(arena, __alignof__(u8), sizeof(u8), SHA256_DIGEST_LENGTH);
-  if (NULL == it->v.s.data) {
-    return false;
-  }
-  memcpy(it->v.s.data, root->digest, SHA256_DIGEST_LENGTH);
 
   return true;
 }
