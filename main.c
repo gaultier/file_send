@@ -1259,7 +1259,7 @@ __attribute__((warn_unused_result)) static usize usize_digits_base_10(usize n) {
 // The digits are written at the *front* of `dst`, so a caller can encode
 // straight into its own output buffer instead of copying out of a scratch one.
 // Base 10 yields the least significant digit first, hence the up front width.
-__attribute__((warn_unused_result)) static Slice_u8
+__attribute__((warn_unused_result)) static usize
 encode_usize_base_10(usize n, Slice_u8 dst) {
   assert(dst.data);
 
@@ -1277,13 +1277,13 @@ encode_usize_base_10(usize n, Slice_u8 dst) {
     n /= 10;
   } while (n > 0);
 
-  // The width matched the digits actually written.
+  // The width matched the digits actually written, at the front of `dst`.
   assert(end == dst.data);
 
-  return (Slice_u8){.data = dst.data, .len = digits};
+  return digits;
 }
 
-__attribute__((warn_unused_result)) static Slice_u8
+__attribute__((warn_unused_result)) static usize
 encode_isize_base_10(isize n, Slice_u8 dst) {
   assert(dst.data);
 
@@ -1302,11 +1302,10 @@ encode_isize_base_10(isize n, Slice_u8 dst) {
   assert(dst.len >= 1);
   dst.data[0] = '-';
 
-  const Slice_u8 digits =
+  const usize digits =
       encode_usize_base_10(magnitude, slice_u8_make(dst.data + 1, dst.len - 1));
-  assert(digits.data == dst.data + 1);
 
-  return (Slice_u8){.data = dst.data, .len = 1 + digits.len};
+  return 1 + digits;
 }
 
 __attribute__((warn_unused_result)) static usize
@@ -1337,7 +1336,7 @@ bencode_encode_max_size(BencodeValue b, usize depth) {
   return res;
 }
 
-__attribute__((warn_unused_result)) static Slice_u8
+__attribute__((warn_unused_result)) static usize
 bencode_encode(BencodeValue b, Slice_u8 dst, usize depth) {
   assert(depth <= BENCODE_MAX_DEPTH);
   assert(dst.data);
@@ -1349,16 +1348,14 @@ bencode_encode(BencodeValue b, Slice_u8 dst, usize depth) {
     dst.data[0] = 'i';
     slice_u8_advance(&dst, 1);
 
-    const usize written = encode_isize_base_10(b.v.num, dst).len;
-    slice_u8_advance(&dst, written);
+    slice_u8_advance(&dst, encode_isize_base_10(b.v.num, dst));
 
     dst.data[0] = 'e';
     slice_u8_advance(&dst, 1);
 
   } break;
   case BencodeKindString: {
-    const usize written = encode_usize_base_10(b.v.s.len, dst).len;
-    slice_u8_advance(&dst, written);
+    slice_u8_advance(&dst, encode_usize_base_10(b.v.s.len, dst));
 
     dst.data[0] = ':';
     slice_u8_advance(&dst, 1);
@@ -1374,9 +1371,8 @@ bencode_encode(BencodeValue b, Slice_u8 dst, usize depth) {
     slice_u8_advance(&dst, 1);
 
     for (usize i = 0; i < b.v.list.len; i++) {
-      BencodeValue item = b.v.list.data[i];
-      const usize written = bencode_encode(item, dst, depth + 1).len;
-      slice_u8_advance(&dst, written);
+      const BencodeValue item = b.v.list.data[i];
+      slice_u8_advance(&dst, bencode_encode(item, dst, depth + 1));
     }
 
     dst.data[0] = 'e';
@@ -1390,7 +1386,7 @@ bencode_encode(BencodeValue b, Slice_u8 dst, usize depth) {
   assert(dst.data > dst_before);
   assert(dst.data - dst_before >= 2);
 
-  return (Slice_u8){.data = dst_before, .len = dst.data - dst_before};
+  return (usize)(dst.data - dst_before);
 }
 
 // ---------------------------------------------------------------------------
@@ -2796,17 +2792,16 @@ static void test_encode_usize_once(usize n, const char *expected) {
   assert(dst_len < sizeof(buf));
   memset(buf, '#', sizeof(buf));
 
-  const Slice_u8 got = encode_usize_base_10(n, slice_u8_make(buf, dst_len));
+  const usize written = encode_usize_base_10(n, slice_u8_make(buf, dst_len));
 
-  assert(strlen(expected) == got.len);
-  assert(0 == memcmp(got.data, expected, got.len));
-
-  // Front anchored: the digits begin at the start of `dst`, which is what
-  // lets a caller encode straight into its own output buffer.
-  assert(got.data == buf);
+  // Comparing from the front of the buffer is what pins the anchoring now that
+  // there is no returned pointer: the digits begin at `dst.data`, which is
+  // what lets a caller encode straight into its own output buffer.
+  assert(strlen(expected) == written);
+  assert(0 == memcmp(buf, expected, written));
 
   // Everything after the digits, inside `dst` and past it, is untouched.
-  for (usize i = got.len; i < sizeof(buf); i++) {
+  for (usize i = written; i < sizeof(buf); i++) {
     assert('#' == buf[i]);
   }
 }
@@ -2845,24 +2840,20 @@ static void test_encode_usize_base_10_exact_fit(void) {
   u8 buf[24];
 
   memset(buf, '#', sizeof(buf));
-  const Slice_u8 widest =
-      encode_usize_base_10(SIZE_MAX, slice_u8_make(buf, 20));
-  assert(20 == widest.len);
-  assert(buf == widest.data);
-  assert(0 == memcmp(widest.data, "18446744073709551615", 20));
+  const usize widest = encode_usize_base_10(SIZE_MAX, slice_u8_make(buf, 20));
+  assert(20 == widest);
+  assert(0 == memcmp(buf, "18446744073709551615", 20));
 
   memset(buf, '#', sizeof(buf));
-  const Slice_u8 one = encode_usize_base_10(7, slice_u8_make(buf, 1));
-  assert(1 == one.len);
-  assert(buf == one.data);
+  const usize one = encode_usize_base_10(7, slice_u8_make(buf, 1));
+  assert(1 == one);
   assert('7' == buf[0]);
   assert('#' == buf[1]);
 
   memset(buf, '#', sizeof(buf));
-  const Slice_u8 three = encode_usize_base_10(123, slice_u8_make(buf, 3));
-  assert(3 == three.len);
-  assert(buf == three.data);
-  assert(0 == memcmp(three.data, "123", 3));
+  const usize three = encode_usize_base_10(123, slice_u8_make(buf, 3));
+  assert(3 == three);
+  assert(0 == memcmp(buf, "123", 3));
   assert('#' == buf[3]);
 }
 
@@ -2902,23 +2893,21 @@ static void test_encode_usize_base_10_round_trip(void) {
 
     u8 buf[24];
     memset(buf, '#', sizeof(buf));
-    const Slice_u8 got =
-        encode_usize_base_10(n, slice_u8_make(buf, sizeof(buf)));
-    assert(buf == got.data);
+    const usize got = encode_usize_base_10(n, slice_u8_make(buf, sizeof(buf)));
 
     char expected[32] = {0};
     const i32 written = snprintf(expected, sizeof(expected), "%zu", n);
     assert(written > 0);
-    assert((usize)written == got.len);
-    assert(0 == memcmp(got.data, expected, got.len));
+    assert((usize)written == got);
+    assert(0 == memcmp(buf, expected, got));
 
     // `ascii_num_parse` wants a non-digit terminator, the way `i123e` has
     // one.
     u8 terminated[32] = {0};
-    memcpy(terminated, got.data, got.len);
-    terminated[got.len] = 'e';
+    memcpy(terminated, buf, got);
+    terminated[got] = 'e';
 
-    Slice_u8 to_parse = slice_u8_make(terminated, got.len + 1);
+    Slice_u8 to_parse = slice_u8_make(terminated, got + 1);
     usize parsed = 0;
     assert(ascii_num_parse(&to_parse, &parsed));
     assert(n == parsed);
@@ -2933,17 +2922,16 @@ static void test_encode_isize_once(isize n, const char *expected) {
   assert(dst_len < sizeof(buf));
   memset(buf, '#', sizeof(buf));
 
-  const Slice_u8 got = encode_isize_base_10(n, slice_u8_make(buf, dst_len));
+  const usize written = encode_isize_base_10(n, slice_u8_make(buf, dst_len));
 
-  assert(strlen(expected) == got.len);
-  assert(0 == memcmp(got.data, expected, got.len));
-
-  // Front anchored: the digits begin at the start of `dst`, which is what
-  // lets a caller encode straight into its own output buffer.
-  assert(got.data == buf);
+  // Comparing from the front of the buffer is what pins the anchoring now that
+  // there is no returned pointer: the digits begin at `dst.data`, which is
+  // what lets a caller encode straight into its own output buffer.
+  assert(strlen(expected) == written);
+  assert(0 == memcmp(buf, expected, written));
 
   // Everything after the digits, inside `dst` and past it, is untouched.
-  for (usize i = got.len; i < sizeof(buf); i++) {
+  for (usize i = written; i < sizeof(buf); i++) {
     assert('#' == buf[i]);
   }
 }
@@ -2980,17 +2968,14 @@ static void test_encode_isize_base_10_exact_fit(void) {
   u8 buf[24];
 
   memset(buf, '#', sizeof(buf));
-  const Slice_u8 widest =
-      encode_isize_base_10(INT64_MIN, slice_u8_make(buf, 20));
-  assert(20 == widest.len);
-  assert(buf == widest.data);
-  assert(0 == memcmp(widest.data, "-9223372036854775808", 20));
+  const usize widest = encode_isize_base_10(INT64_MIN, slice_u8_make(buf, 20));
+  assert(20 == widest);
+  assert(0 == memcmp(buf, "-9223372036854775808", 20));
 
   memset(buf, '#', sizeof(buf));
-  const Slice_u8 two = encode_isize_base_10(-7, slice_u8_make(buf, 2));
-  assert(2 == two.len);
-  assert(buf == two.data);
-  assert(0 == memcmp(two.data, "-7", 2));
+  const usize two = encode_isize_base_10(-7, slice_u8_make(buf, 2));
+  assert(2 == two);
+  assert(0 == memcmp(buf, "-7", 2));
   assert('#' == buf[2]);
 }
 
@@ -3009,23 +2994,21 @@ static void test_encode_isize_base_10_round_trip(void) {
 
     u8 buf[24];
     memset(buf, '#', sizeof(buf));
-    const Slice_u8 got =
-        encode_isize_base_10(n, slice_u8_make(buf, sizeof(buf)));
-    assert(buf == got.data);
+    const usize got = encode_isize_base_10(n, slice_u8_make(buf, sizeof(buf)));
 
     char expected[32] = {0};
     const i32 written = snprintf(expected, sizeof(expected), "%zd", n);
     assert(written > 0);
-    assert((usize)written == got.len);
-    assert(0 == memcmp(got.data, expected, got.len));
+    assert((usize)written == got);
+    assert(0 == memcmp(buf, expected, got));
 
     // `i<n>e`, the way a bencode integer is framed.
     u8 framed[32] = {0};
     framed[0] = 'i';
-    memcpy(framed + 1, got.data, got.len);
-    framed[1 + got.len] = 'e';
+    memcpy(framed + 1, buf, got);
+    framed[1 + got] = 'e';
 
-    Slice_u8 to_parse = slice_u8_make(framed, got.len + 2);
+    Slice_u8 to_parse = slice_u8_make(framed, got + 2);
     BencodeValue parsed = {0};
     assert(bencode_parse_num(&to_parse, &parsed));
     assert(BencodeKindInteger == parsed.kind);
@@ -3052,14 +3035,14 @@ static void test_bencode_encode_once(BencodeValue b, const char *expected) {
   assert(dst.data);
   memset(dst.data, '#', cap);
 
-  const Slice_u8 got = bencode_encode(b, dst, 0);
+  const usize written = bencode_encode(b, dst, 0);
 
-  assert(expected_len == got.len);
-  assert(0 == memcmp(got.data, expected, got.len));
+  // Comparing from the front of `dst` pins the anchoring.
+  assert(expected_len == written);
+  assert(0 == memcmp(dst.data, expected, written));
 
-  // The encoder writes at the front and never past what it reports.
-  assert(dst.data == got.data);
-  for (usize i = got.len; i < cap; i++) {
+  // Nothing past what it reports was touched.
+  for (usize i = written; i < cap; i++) {
     assert('#' == dst.data[i]);
   }
 }
@@ -3105,11 +3088,11 @@ static void test_bencode_encode_binary_string(void) {
                   .len = cap};
   assert(dst.data);
 
-  const Slice_u8 got = bencode_encode(b, dst, 0);
+  const usize written = bencode_encode(b, dst, 0);
 
-  assert(2 + sizeof(raw) == got.len);
-  assert(0 == memcmp(got.data, "6:", 2));
-  assert(0 == memcmp(got.data + 2, raw, sizeof(raw)));
+  assert(2 + sizeof(raw) == written);
+  assert(0 == memcmp(dst.data, "6:", 2));
+  assert(0 == memcmp(dst.data + 2, raw, sizeof(raw)));
 }
 
 static void test_bencode_encode_containers(void) {
@@ -3176,17 +3159,17 @@ static void test_bencode_encode_wide_dict(void) {
                   .len = cap};
   assert(dst.data);
 
-  const Slice_u8 got = bencode_encode(dict, dst, 0);
+  const usize written = bencode_encode(dict, dst, 0);
 
-  assert(got.len > 2);
-  assert('d' == got.data[0]);
-  assert('e' == got.data[got.len - 1]);
-  assert(0 == memcmp(got.data + 1, "4:k000i0e", 9));
+  assert(written > 2);
+  assert('d' == dst.data[0]);
+  assert('e' == dst.data[written - 1]);
+  assert(0 == memcmp(dst.data + 1, "4:k000i0e", 9));
 
   // It is real bencode, with every pair still there.
   Arena parse_arena = test_arena(1 * MiB);
   Arena scratch = test_arena(1 * MiB);
-  Slice_u8 to_parse = got;
+  Slice_u8 to_parse = slice_u8_take(dst, written);
   BencodeValue parsed = {0};
   assert(bencode_parse(&to_parse, &parse_arena, scratch, &parsed));
   assert(BencodeKindDict == parsed.kind);
@@ -3255,7 +3238,7 @@ static void test_bencode_encode_torrent_info(void) {
                   .len = cap};
   assert(dst.data);
 
-  const Slice_u8 got = bencode_encode(info, dst, 0);
+  const Slice_u8 got = slice_u8_take(dst, bencode_encode(info, dst, 0));
 
   // The digest is raw bytes, so build the expectation around it rather than
   // embedding it in a string literal.
@@ -3410,7 +3393,8 @@ int main(i32 argc, char *argv[]) {
         .len = encode_cap};
     assert(encoded.data);
 
-    encoded = bencode_encode(info_dict, encoded, 0);
+    const usize encoded_len = bencode_encode(info_dict, encoded, 0);
+    encoded = slice_u8_take(encoded, encoded_len);
     printf("info dict encoded: %.*s\n", (i32)encoded.len, encoded.data);
   } else {
     fprintf(stderr, "unknown command\n");
