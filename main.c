@@ -980,7 +980,7 @@ static void sha256_print_hex(const u8 digest[SHA256_DIGEST_LENGTH]) {
 
   for (usize i = 0; i < SHA256_DIGEST_LENGTH; i++) {
     const u8 byte = digest[i];
-    const u8 c1 = lut[byte & 16];
+    const u8 c1 = lut[byte & 15];
     const u8 c2 = lut[byte >> 4];
     printf("%c%c", c2, c1);
   }
@@ -990,8 +990,8 @@ static const usize TORRENT_BLOCK_SIZE = 16 * KiB;
 // static const usize TORRENT_PIECES_PER_BLOCK = 16;
 
 __attribute((warn_unused_result)) static bool
-torrent_compute_merkle_tree(Slice_u8 data, MerkleNode **nodes,
-                            usize *nodes_count, Arena *arena) {
+torrent_build_merkle_tree(Slice_u8 data, MerkleNode **nodes, usize *nodes_count,
+                          Arena *arena) {
   assert(nodes);
   assert(arena);
   assert(arena->start);
@@ -1048,11 +1048,17 @@ torrent_compute_merkle_tree(Slice_u8 data, MerkleNode **nodes,
     puts("");
   }
 
-  usize width = *nodes_count;
+  usize width = leaves_count;
   usize offset = 0;
   for (; width > 1;) {
+    assert(width <= leaves_count);
+    assert(offset < *nodes_count);
+
     const usize next_width = width / 2;
     const usize next_offset = offset + width;
+
+    assert(next_width <= leaves_count);
+    assert(next_offset < *nodes_count);
 
     for (usize w = 0; w < next_width; w++) {
       const MerkleNode *const left = &((*nodes)[offset + 2 * w]);
@@ -2279,7 +2285,7 @@ int main(i32 argc, char *argv[]) {
 
     MerkleNode *nodes = NULL;
     usize nodes_count = 0;
-    assert(torrent_compute_merkle_tree(input, &nodes, &nodes_count, &arena));
+    assert(torrent_build_merkle_tree(input, &nodes, &nodes_count, &arena));
 
     const MerkleNode *const root = &nodes[nodes_count - 1];
     printf("root=");
