@@ -1311,9 +1311,7 @@ encode_isize_base_10(isize n, Slice_u8 dst) {
 
 __attribute__((warn_unused_result)) static usize
 bencode_encode_max_size(BencodeValue b, usize depth) {
-  if (depth > BENCODE_MAX_DEPTH) {
-    return 0;
-  }
+  assert(depth <= BENCODE_MAX_DEPTH);
 
   usize res = 0;
 
@@ -1326,8 +1324,6 @@ bencode_encode_max_size(BencodeValue b, usize depth) {
     break;
   case BencodeKindList:
   case BencodeKindDict:
-    assert(b.v.list.len <= BENCODE_MAX_DEPTH);
-
     assert(!__builtin_add_overflow(res, 2, &res));
 
     for (usize i = 0; i < b.v.list.len; i++) {
@@ -1343,9 +1339,7 @@ bencode_encode_max_size(BencodeValue b, usize depth) {
 
 __attribute__((warn_unused_result)) static Slice_u8
 bencode_encode(BencodeValue b, Slice_u8 dst, usize depth) {
-  if (depth > BENCODE_MAX_DEPTH) {
-    return (Slice_u8){0};
-  }
+  assert(depth <= BENCODE_MAX_DEPTH);
   assert(dst.data);
   assert(dst.len >= 2);
   u8 *const dst_before = dst.data;
@@ -1369,8 +1363,10 @@ bencode_encode(BencodeValue b, Slice_u8 dst, usize depth) {
     dst.data[0] = ':';
     slice_u8_advance(&dst, 1);
 
-    memcpy(dst.data, b.v.s.data, b.v.s.len);
-    slice_u8_advance(&dst, b.v.s.len);
+    if (b.v.s.len > 0) {
+      memcpy(dst.data, b.v.s.data, b.v.s.len);
+      slice_u8_advance(&dst, b.v.s.len);
+    }
   } break;
   case BencodeKindList:
   case BencodeKindDict: {
@@ -3037,6 +3033,262 @@ static void test_encode_isize_base_10_round_trip(void) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// bencode_encode
+// ---------------------------------------------------------------------------
+
+// Encode into a poisoned buffer one byte wider than needed, so a write past
+// the end is visible, and compare against the exact expected bytes.
+static void test_bencode_encode_once(BencodeValue b, const char *expected) {
+  assert(expected);
+  const usize expected_len = strlen(expected);
+
+  const usize cap = bencode_encode_max_size(b, 0);
+  assert(cap >= expected_len);
+
+  Arena arena = test_arena(64 * KiB);
+  Slice_u8 dst = {.data = arena_alloc(&arena, __alignof__(u8), sizeof(u8), cap),
+                  .len = cap};
+  assert(dst.data);
+  memset(dst.data, '#', cap);
+
+  const Slice_u8 got = bencode_encode(b, dst, 0);
+
+  assert(expected_len == got.len);
+  assert(0 == memcmp(got.data, expected, got.len));
+
+  // The encoder writes at the front and never past what it reports.
+  assert(dst.data == got.data);
+  for (usize i = got.len; i < cap; i++) {
+    assert('#' == dst.data[i]);
+  }
+}
+
+static BencodeValue test_bencode_int(isize n) {
+  return (BencodeValue){.kind = BencodeKindInteger, .v.num = n};
+}
+
+static BencodeValue test_bencode_str(const char *s) {
+  return (BencodeValue){.kind = BencodeKindString, .v.s = test_slice(s)};
+}
+
+static void test_bencode_encode_leaves(void) {
+  test_bencode_encode_once(test_bencode_int(0), "i0e");
+  test_bencode_encode_once(test_bencode_int(1), "i1e");
+  test_bencode_encode_once(test_bencode_int(-1), "i-1e");
+  test_bencode_encode_once(test_bencode_int(42), "i42e");
+  test_bencode_encode_once(test_bencode_int(-42), "i-42e");
+  test_bencode_encode_once(test_bencode_int(INT64_MAX), "i9223372036854775807e");
+  test_bencode_encode_once(test_bencode_int(INT64_MIN), "i-9223372036854775808e");
+
+  test_bencode_encode_once(test_bencode_str(""), "0:");
+  test_bencode_encode_once(test_bencode_str("a"), "1:a");
+  test_bencode_encode_once(test_bencode_str("spam"), "4:spam");
+  test_bencode_encode_once(test_bencode_str("piece length"), "12:piece length");
+
+  // A string whose `data` is null, which is how the `""` key of a v2 file tree
+  // is built. `memcpy` wants valid pointers even for a zero byte copy.
+  const BencodeValue null_str = {.kind = BencodeKindString, .v.s = {0}};
+  test_bencode_encode_once(null_str, "0:");
+}
+
+// Strings are byte strings: NULs and high bytes pass through untouched, and the
+// length prefix counts bytes rather than stopping at a terminator.
+static void test_bencode_encode_binary_string(void) {
+  u8 raw[6] = {0x00, 0xff, 'a', 0x00, 0x80, '\n'};
+  const BencodeValue b = {.kind = BencodeKindString,
+                          .v.s = slice_u8_make(raw, sizeof(raw))};
+
+  Arena arena = test_arena(64 * KiB);
+  const usize cap = bencode_encode_max_size(b, 0);
+  Slice_u8 dst = {.data = arena_alloc(&arena, __alignof__(u8), sizeof(u8), cap),
+                  .len = cap};
+  assert(dst.data);
+
+  const Slice_u8 got = bencode_encode(b, dst, 0);
+
+  assert(2 + sizeof(raw) == got.len);
+  assert(0 == memcmp(got.data, "6:", 2));
+  assert(0 == memcmp(got.data + 2, raw, sizeof(raw)));
+}
+
+static void test_bencode_encode_containers(void) {
+  Arena arena = test_arena(64 * KiB);
+
+  // Empty containers still carry their framing.
+  const BencodeValue empty_list = {.kind = BencodeKindList, .v.list = {0}};
+  const BencodeValue empty_dict = {.kind = BencodeKindDict, .v.list = {0}};
+  test_bencode_encode_once(empty_list, "le");
+  test_bencode_encode_once(empty_dict, "de");
+
+  // `l4:spami42ee`
+  BencodeValue *items = arena_alloc(&arena, __alignof__(BencodeValue),
+                                    sizeof(BencodeValue), 2);
+  assert(items);
+  items[0] = test_bencode_str("spam");
+  items[1] = test_bencode_int(42);
+  const BencodeValue list = {
+      .kind = BencodeKindList, .v.list.len = 2, .v.list.data = items};
+  test_bencode_encode_once(list, "l4:spami42ee");
+
+  // `d3:keyl4:spami42eee`: a container nested inside a dict.
+  BencodeValue *pair = arena_alloc(&arena, __alignof__(BencodeValue),
+                                   sizeof(BencodeValue), 2);
+  assert(pair);
+  pair[0] = test_bencode_str("key");
+  pair[1] = list;
+  const BencodeValue dict = {
+      .kind = BencodeKindDict, .v.list.len = 2, .v.list.data = pair};
+  test_bencode_encode_once(dict, "d3:keyl4:spami42eee");
+}
+
+// Breadth is not depth: a dict with more keys than `BENCODE_MAX_DEPTH` is
+// ordinary bencode and must encode.
+static void test_bencode_encode_wide_dict(void) {
+  const usize pairs = BENCODE_MAX_DEPTH + 1;
+
+  Arena arena = test_arena(1 * MiB);
+  BencodeValue *entries = arena_alloc(&arena, __alignof__(BencodeValue),
+                                      sizeof(BencodeValue), pairs * 2);
+  assert(entries);
+  u8 *keys = arena_alloc(&arena, __alignof__(u8), sizeof(u8), pairs * 4);
+  assert(keys);
+
+  for (usize i = 0; i < pairs; i++) {
+    // `k000`, `k001`, ... : fixed width, so they are already sorted.
+    u8 *const key = keys + i * 4;
+    key[0] = 'k';
+    key[1] = (u8)('0' + (i / 100) % 10);
+    key[2] = (u8)('0' + (i / 10) % 10);
+    key[3] = (u8)('0' + i % 10);
+
+    entries[2 * i] = (BencodeValue){.kind = BencodeKindString,
+                                    .v.s = slice_u8_make(key, 4)};
+    entries[2 * i + 1] = test_bencode_int((isize)i);
+  }
+
+  const BencodeValue dict = {.kind = BencodeKindDict,
+                             .v.list.len = pairs * 2,
+                             .v.list.data = entries};
+
+  const usize cap = bencode_encode_max_size(dict, 0);
+  Slice_u8 dst = {.data = arena_alloc(&arena, __alignof__(u8), sizeof(u8), cap),
+                  .len = cap};
+  assert(dst.data);
+
+  const Slice_u8 got = bencode_encode(dict, dst, 0);
+
+  assert(got.len > 2);
+  assert('d' == got.data[0]);
+  assert('e' == got.data[got.len - 1]);
+  assert(0 == memcmp(got.data + 1, "4:k000i0e", 9));
+
+  // It is real bencode, with every pair still there.
+  Arena parse_arena = test_arena(1 * MiB);
+  Arena scratch = test_arena(1 * MiB);
+  Slice_u8 to_parse = got;
+  BencodeValue parsed = {0};
+  assert(bencode_parse(&to_parse, &parse_arena, scratch, &parsed));
+  assert(BencodeKindDict == parsed.kind);
+  assert(pairs * 2 == parsed.v.list.len);
+}
+
+// Encoding is the inverse of parsing: parse a document, encode it back, and the
+// bytes must be identical. Bencode has exactly one representation per value, so
+// any deviation is a bug in one of the two.
+static void test_bencode_encode_round_trip(void) {
+  const char *documents[] = {
+      "i0e",
+      "i-1e",
+      "i9223372036854775807e",
+      "i-9223372036854775808e",
+      "0:",
+      "4:spam",
+      "le",
+      "de",
+      "l4:spam4:eggse",
+      "li0ei1ei2ee",
+      "d3:cow3:moo4:spam4:eggse",
+      "d4:spaml1:a1:bee",
+      "d9:publisher3:bob18:publisher.location4:homee",
+      "lli1ei2eeli3ei4eee",
+      "d1:ad1:bd1:cd1:d0:eeee",
+  };
+
+  for (usize i = 0; i < sizeof(documents) / sizeof(documents[0]); i++) {
+    Arena arena = test_arena(64 * KiB);
+    Arena scratch = test_arena(64 * KiB);
+
+    Slice_u8 input = test_slice(documents[i]);
+    const Slice_u8 original = input;
+
+    BencodeValue parsed = {0};
+    assert(bencode_parse(&input, &arena, scratch, &parsed));
+
+    test_bencode_encode_once(parsed, documents[i]);
+
+    // And the encoding really is the whole input, not a prefix of it.
+    assert(strlen(documents[i]) == original.len);
+  }
+}
+
+// The v2 info dict, byte for byte against what libtorrent 2.1.1 produces for
+// the same file. This pins the encoder, the dict construction and the merkle
+// root together: any one of them drifting changes the infohash.
+static void test_bencode_encode_torrent_info(void) {
+  const usize file_len = 40960;
+
+  Arena arena = test_arena(4 * MiB);
+  u8 *const file_data =
+      arena_alloc(&arena, __alignof__(u8), sizeof(u8), file_len);
+  assert(file_data);
+  memset(file_data, 'x', file_len);
+
+  const Slice_u8 name = test_slice("f.bin");
+  BencodeValue info = {0};
+  assert(torrent_make_info_dict_v2(name, 16 * TORRENT_BLOCK_SIZE,
+                                   slice_u8_make(file_data, file_len), name,
+                                   &info, &arena));
+
+  const usize cap = bencode_encode_max_size(info, 0);
+  Slice_u8 dst = {.data = arena_alloc(&arena, __alignof__(u8), sizeof(u8), cap),
+                  .len = cap};
+  assert(dst.data);
+
+  const Slice_u8 got = bencode_encode(info, dst, 0);
+
+  // The digest is raw bytes, so build the expectation around it rather than
+  // embedding it in a string literal.
+  const char *const prefix =
+      "d9:file treed5:f.bind0:d6:lengthi40960e11:pieces root32:";
+  const char *const suffix =
+      "eee12:meta versioni2e4:name5:f.bin12:piece lengthi262144ee";
+
+  u8 pieces_root[SHA256_DIGEST_LENGTH] = {0};
+  test_digest_from_hex(
+      "8431e3abfbd82a618e0b0c4113dff17b644df6bd102fd127df5bd7a531014b3a",
+      pieces_root);
+
+  const usize prefix_len = strlen(prefix);
+  const usize suffix_len = strlen(suffix);
+  assert(prefix_len + SHA256_DIGEST_LENGTH + suffix_len == got.len);
+
+  assert(0 == memcmp(got.data, prefix, prefix_len));
+  assert(0 == memcmp(got.data + prefix_len, pieces_root, SHA256_DIGEST_LENGTH));
+  assert(0 == memcmp(got.data + prefix_len + SHA256_DIGEST_LENGTH, suffix,
+                     suffix_len));
+
+  // The v2 infohash is the digest of exactly these bytes.
+  u8 infohash[SHA256_DIGEST_LENGTH] = {0};
+  sha256_digest(got, infohash);
+
+  u8 expected_infohash[SHA256_DIGEST_LENGTH] = {0};
+  test_digest_from_hex(
+      "e556ed46dace469f8f24053de5ad85478349c13544a4710b6d624454b85e1256",
+      expected_infohash);
+  assert(0 == memcmp(infohash, expected_infohash, sizeof(infohash)));
+}
+
 static void test(const char *filter) {
   const struct {
     const char *name;
@@ -3072,6 +3324,12 @@ static void test(const char *filter) {
       {"encode_isize_base_10", test_encode_isize_base_10},
       {"encode_isize_base_10_exact_fit", test_encode_isize_base_10_exact_fit},
       {"encode_isize_base_10_round_trip", test_encode_isize_base_10_round_trip},
+      {"bencode_encode_leaves", test_bencode_encode_leaves},
+      {"bencode_encode_binary_string", test_bencode_encode_binary_string},
+      {"bencode_encode_containers", test_bencode_encode_containers},
+      {"bencode_encode_wide_dict", test_bencode_encode_wide_dict},
+      {"bencode_encode_round_trip", test_bencode_encode_round_trip},
+      {"bencode_encode_torrent_info", test_bencode_encode_torrent_info},
   };
 
   usize run = 0;
