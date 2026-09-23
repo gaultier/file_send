@@ -1008,7 +1008,7 @@ torrent_build_merkle_tree(Slice_u8 data, MerkleNode **nodes, usize *nodes_count,
       data.len / TORRENT_BLOCK_SIZE + (data.len % TORRENT_BLOCK_SIZE != 0));
   assert(leaves_count > 0);
 
-  // Nodes count = leaves_count * (leaves_count-1).
+  // Nodes count = 2* leaves_count - 1.
   assert(!__builtin_mul_overflow(leaves_count, 2, nodes_count));
   assert(*nodes_count > 0);
   *nodes_count -= 1;
