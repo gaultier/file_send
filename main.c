@@ -994,20 +994,20 @@ torrent_compute_merkle_tree(Slice_u8 data, MerkleNode **nodes,
   assert(arena->start);
 
   *nodes_count = next_power_of_two(data.len);
-  nodes = arena_alloc(arena, __alignof__(MerkleNode), sizeof(MerkleNode),
-                      *nodes_count);
-  if (!nodes) {
+  *nodes = arena_alloc(arena, __alignof__(MerkleNode), sizeof(MerkleNode),
+                       *nodes_count);
+  if (!*nodes) {
     return false;
   }
 
   usize i = 0;
-  assert(nodes);
+  assert(*nodes);
   for (i = 0; i < data.len / TORRENT_BLOCK_SIZE; i++) {
     const Slice_u8 block_data = {.data = &data.data[i * TORRENT_BLOCK_SIZE],
                                  .len = TORRENT_BLOCK_SIZE};
 
     assert(i < *nodes_count);
-    MerkleNode *const node = nodes[i];
+    MerkleNode *const node = &((*nodes)[i]);
 
     Sha256Ctx sha = {0};
     sha256_init(&sha);
@@ -1025,7 +1025,7 @@ torrent_compute_merkle_tree(Slice_u8 data, MerkleNode **nodes,
                                  .len = data.len - i * TORRENT_BLOCK_SIZE};
 
     assert(i < *nodes_count);
-    MerkleNode *node = nodes[i];
+    MerkleNode *const node = &((*nodes)[i]);
 
     Sha256Ctx sha = {0};
     sha256_init(&sha);
