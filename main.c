@@ -2046,16 +2046,21 @@ static void test_sha256_once(Slice_u8 data, u8 res[SHA256_DIGEST_LENGTH]) {
 
 // Expected digests are given as hex, the way every SHA-256 test vector in the
 // wild is published, so that a vector can be pasted in unmodified.
-static void test_sha256_expect_hex(Slice_u8 data, const char *expected_hex) {
-  assert(expected_hex);
-  assert(2 * SHA256_DIGEST_LENGTH == strlen(expected_hex));
+static void test_digest_from_hex(const char *hex,
+                                 u8 res[SHA256_DIGEST_LENGTH]) {
+  assert(hex);
+  assert(2 * SHA256_DIGEST_LENGTH == strlen(hex));
 
-  u8 expected[SHA256_DIGEST_LENGTH] = {0};
   for (usize i = 0; i < SHA256_DIGEST_LENGTH; i++) {
     u32 byte = 0;
-    assert(1 == sscanf(expected_hex + 2 * i, "%2x", &byte));
-    expected[i] = (u8)byte;
+    assert(1 == sscanf(hex + 2 * i, "%2x", &byte));
+    res[i] = (u8)byte;
   }
+}
+
+static void test_sha256_expect_hex(Slice_u8 data, const char *expected_hex) {
+  u8 expected[SHA256_DIGEST_LENGTH] = {0};
+  test_digest_from_hex(expected_hex, expected);
 
   u8 actual[SHA256_DIGEST_LENGTH] = {0};
   test_sha256_once(data, actual);
@@ -2199,6 +2204,252 @@ static void test_sha256_reuse(void) {
   assert(0 == memcmp(actual, expected, sizeof(actual)));
 }
 
+// ---------------------------------------------------------------------------
+// BEP 52 merkle tree
+// ---------------------------------------------------------------------------
+
+// The largest file any merkle test builds a tree for: 13 blocks, which pads to
+// 16 leaves and so exercises a subtree that is entirely padding.
+#define TEST_MERKLE_MAX_LEN (208 * KiB)
+
+// A constant fill would not notice two leaves being swapped, so give every
+// block distinct content. The expected roots below come from libtorrent 2.1.1
+// fed the exact same bytes, checked at both a 16KiB and a 256KiB piece size
+// since `pieces root` must not depend on the piece size.
+static Slice_u8 test_merkle_data(Arena *arena) {
+  u8 *const buf = arena_alloc(arena, 1, 1, TEST_MERKLE_MAX_LEN);
+  assert(buf);
+
+  u32 x = 0x12345678;
+  for (usize i = 0; i < TEST_MERKLE_MAX_LEN; i++) {
+    // Numerical Recipes LCG. Only the top byte is used, the low bits of an LCG
+    // being far too regular to tell two blocks apart.
+    x = x * 1664525u + 1013904223u;
+    buf[i] = (u8)(x >> 24);
+  }
+
+  return slice_u8_make(buf, TEST_MERKLE_MAX_LEN);
+}
+
+// Known answer tests. Sizes bracket every boundary the tree construction has:
+// shorter than a block, exactly a block, one byte past a block, an exact power
+// of two number of blocks, and block counts needing one or several padding
+// leaves.
+static void test_torrent_merkle_vectors(void) {
+  Arena data_arena = arena_valloc(TEST_MERKLE_MAX_LEN + 4 * KiB);
+  assert(data_arena.start);
+  const Slice_u8 data = test_merkle_data(&data_arena);
+
+  const struct {
+    usize len;
+    usize nodes_count;
+    const char *root;
+  } vectors[] = {
+      {1, 1,
+       "0bfe935e70c321c7ca3afc75ce0d0ca2f98b5422e008bb31c00c6d7f1f1c0ad6"},
+      {16383, 1,
+       "3dd5a06f7768acc49864c34e60083ab8af5d90cb4fad8388c0391eedbb4ef37b"},
+      {16384, 1,
+       "6c2151ba392602898475e8faea682c1923ca241d0cee54d984b520286e005f0d"},
+      {16385, 3,
+       "26d66f8578c6efa252c8b8deb3810b923392392618bcfea7ce34e1ca0ccf9211"},
+      {32768, 3,
+       "e1bdca49b140c3391bb85e630b7cf05a73534b40d4fe2db5e60bfacd45be473a"},
+      {40960, 7,
+       "809301c68152c8413d38cb646268c1f5caa2dc5bf359d7148eaa9ea3aa0399a7"},
+      {81920, 15,
+       "4e1b3e51bf462b7d9863084f4c139a2106c729c0e0293b8abf692905ea57eee6"},
+      {131072, 15,
+       "d4e69a223d5f61c604c613be46f12a017e134baec50d7cc960a25ba3dfcf5fc3"},
+      {212992, 31,
+       "4c3bf66a99395bf30f382494b6e96fd9976df5ef489ae1a2173af1c1dc841f46"},
+  };
+
+  for (usize i = 0; i < sizeof(vectors) / sizeof(vectors[0]); i++) {
+    assert(vectors[i].len <= data.len);
+
+    // Poisoned, so that a node the implementation never writes cannot pass
+    // itself off as a zeroed padding hash.
+    Arena arena = test_arena(64 * KiB);
+
+    MerkleNode *nodes = NULL;
+    usize nodes_count = 0;
+    assert(torrent_build_merkle_tree(slice_u8_make(data.data, vectors[i].len),
+                                     &nodes, &nodes_count, &arena));
+    assert(nodes);
+    assert(vectors[i].nodes_count == nodes_count);
+
+    u8 expected[SHA256_DIGEST_LENGTH] = {0};
+    test_digest_from_hex(vectors[i].root, expected);
+
+    // The root is the last node, which is what every caller relies on.
+    assert(0 ==
+           memcmp(nodes[nodes_count - 1].digest, expected, sizeof(expected)));
+  }
+}
+
+// Check the whole array, not just the root: a tree can hash to the right value
+// while laying its layers out somewhere a caller cannot find them.
+static void test_torrent_merkle_structure(void) {
+  Arena data_arena = arena_valloc(TEST_MERKLE_MAX_LEN + 4 * KiB);
+  assert(data_arena.start);
+  const Slice_u8 data = test_merkle_data(&data_arena);
+
+  const usize lens[] = {1, 16384, 16385, 40960, 81920, 131072, 212992};
+
+  for (usize i = 0; i < sizeof(lens) / sizeof(lens[0]); i++) {
+    const usize len = lens[i];
+    assert(len <= data.len);
+
+    Arena arena = test_arena(64 * KiB);
+
+    MerkleNode *nodes = NULL;
+    usize nodes_count = 0;
+    assert(torrent_build_merkle_tree(slice_u8_make(data.data, len), &nodes,
+                                     &nodes_count, &arena));
+
+    const usize blocks =
+        len / TORRENT_BLOCK_SIZE + (len % TORRENT_BLOCK_SIZE != 0);
+    const usize leaves = next_power_of_two(blocks);
+    assert(2 * leaves - 1 == nodes_count);
+
+    // Leaf layer: the first `blocks` leaves cover the file, the rest are
+    // padding.
+    for (usize l = 0; l < leaves; l++) {
+      u8 expected[SHA256_DIGEST_LENGTH] = {0};
+
+      if (l < blocks) {
+        const usize offset = l * TORRENT_BLOCK_SIZE;
+        const usize block_len = len - offset < TORRENT_BLOCK_SIZE
+                                    ? len - offset
+                                    : TORRENT_BLOCK_SIZE;
+        sha256_digest(slice_u8_make(data.data + offset, block_len), expected);
+      } // Padding leaves stay zero, per BEP 52.
+
+      assert(0 == memcmp(nodes[l].digest, expected, sizeof(expected)));
+    }
+
+    // Interior layers, each appended after the one below it.
+    usize width = leaves;
+    usize offset = 0;
+    while (width > 1) {
+      const usize next_offset = offset + width;
+
+      for (usize w = 0; w < width / 2; w++) {
+        Sha256Ctx ctx = {0};
+        sha256_init(&ctx);
+        sha256_update(&ctx, slice_u8_make(nodes[offset + 2 * w].digest,
+                                          SHA256_DIGEST_LENGTH));
+        sha256_update(&ctx, slice_u8_make(nodes[offset + 2 * w + 1].digest,
+                                          SHA256_DIGEST_LENGTH));
+
+        u8 expected[SHA256_DIGEST_LENGTH] = {0};
+        sha256_final(&ctx, expected);
+
+        assert(0 == memcmp(nodes[next_offset + w].digest, expected,
+                           sizeof(expected)));
+      }
+
+      offset = next_offset;
+      width /= 2;
+    }
+
+    // The walk ends on the root, and the root is the last node.
+    assert(nodes_count - 1 == offset);
+  }
+}
+
+// The padding rule, which is the part of BEP 52 that is easiest to get wrong:
+// leaves past the end of the file are 32 zero bytes, and only the leaf layer
+// is zeroed. Everything above it is hashed normally, so a node covering
+// nothing but padding is emphatically not zero.
+static void test_torrent_merkle_padding(void) {
+  Arena data_arena = arena_valloc(64 * KiB);
+  assert(data_arena.start);
+
+  // Three blocks, so the tree pads to four leaves and the last leaf covers no
+  // file data at all. The tail block is one byte long.
+  const usize len = 2 * TORRENT_BLOCK_SIZE + 1;
+  u8 *const buf = arena_alloc(&data_arena, 1, 1, len);
+  assert(buf);
+  memset(buf, 'a', len);
+
+  Arena arena = test_arena(64 * KiB);
+
+  MerkleNode *nodes = NULL;
+  usize nodes_count = 0;
+  assert(torrent_build_merkle_tree(slice_u8_make(buf, len), &nodes,
+                                   &nodes_count, &arena));
+  assert(7 == nodes_count);
+
+  const u8 zero[SHA256_DIGEST_LENGTH] = {0};
+
+  // The padding leaf is zero, and is not the hash of anything.
+  assert(0 == memcmp(nodes[3].digest, zero, sizeof(zero)));
+
+  // In particular it is not the hash of a zero filled block, the other
+  // plausible reading of "set to zero".
+  u8 *const zero_block = arena_alloc(&data_arena, 1, 1, TORRENT_BLOCK_SIZE);
+  assert(zero_block);
+  memset(zero_block, 0, TORRENT_BLOCK_SIZE);
+
+  u8 zero_block_hash[SHA256_DIGEST_LENGTH] = {0};
+  sha256_digest(slice_u8_make(zero_block, TORRENT_BLOCK_SIZE), zero_block_hash);
+  assert(0 != memcmp(nodes[3].digest, zero_block_hash, sizeof(zero_block_hash)));
+
+  // The short tail block is hashed at its real length, not zero extended to a
+  // full block.
+  u8 tail[SHA256_DIGEST_LENGTH] = {0};
+  sha256_digest(slice_u8_make(buf + 2 * TORRENT_BLOCK_SIZE, 1), tail);
+  assert(0 == memcmp(nodes[2].digest, tail, sizeof(tail)));
+
+  // The parent of the padding leaf is a real hash, not more zeroes.
+  assert(0 != memcmp(nodes[5].digest, zero, sizeof(zero)));
+}
+
+// BEP 52: an empty file has no pieces root at all.
+static void test_torrent_merkle_empty(void) {
+  Arena arena = test_arena(64 * KiB);
+
+  // Preset to garbage: both out parameters must be cleared, since a caller has
+  // no other way to tell that no tree was built.
+  MerkleNode *nodes = (MerkleNode *)(usize)0xdeadbeef;
+  usize nodes_count = 123;
+
+  assert(torrent_build_merkle_tree((Slice_u8){0}, &nodes, &nodes_count,
+                                   &arena));
+  assert(NULL == nodes);
+  assert(0 == nodes_count);
+}
+
+// The one failure path: an arena too small for the tree is reported, not
+// asserted, and leaves nothing half built behind.
+static void test_torrent_merkle_oom(void) {
+  Arena data_arena = arena_valloc(64 * KiB);
+  assert(data_arena.start);
+
+  // Two blocks, so the tree needs three nodes.
+  const usize len = TORRENT_BLOCK_SIZE + 1;
+  u8 *const buf = arena_alloc(&data_arena, 1, 1, len);
+  assert(buf);
+  memset(buf, 'a', len);
+
+  Arena arena = test_arena(4 * KiB);
+
+  // Leave room for fewer nodes than the tree needs.
+  const usize free_bytes = (usize)(arena.end - arena.start);
+  assert(free_bytes > 2 * sizeof(MerkleNode));
+  u8 *const hog =
+      arena_alloc(&arena, 1, 1, free_bytes - 2 * sizeof(MerkleNode));
+  assert(hog);
+
+  MerkleNode *nodes = NULL;
+  usize nodes_count = 0;
+  assert(!torrent_build_merkle_tree(slice_u8_make(buf, len), &nodes,
+                                    &nodes_count, &arena));
+  assert(NULL == nodes);
+}
+
 static void test(const char *filter) {
   const struct {
     const char *name;
@@ -2222,6 +2473,11 @@ static void test(const char *filter) {
       {"sha256_incremental", test_sha256_incremental},
       {"sha256_lengths", test_sha256_lengths},
       {"sha256_reuse", test_sha256_reuse},
+      {"torrent_merkle_vectors", test_torrent_merkle_vectors},
+      {"torrent_merkle_structure", test_torrent_merkle_structure},
+      {"torrent_merkle_padding", test_torrent_merkle_padding},
+      {"torrent_merkle_empty", test_torrent_merkle_empty},
+      {"torrent_merkle_oom", test_torrent_merkle_oom},
   };
 
   usize run = 0;
