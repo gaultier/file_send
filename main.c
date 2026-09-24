@@ -1468,8 +1468,9 @@ torrent_build_merkle_tree(Slice_u8 data, usize piece_length_in_bytes,
 }
 
 __attribute__((warn_unused_result)) static bool torrent_make_metainfo_dict_v2(
-    Slice_u8 announce_url, BencodeList info_dict, PieceHash *const piece_hashes,
-    usize piece_hashes_count, BencodeValue *dst, Arena *arena) {
+    Slice_u8 file_name, Slice_u8 announce_url, BencodeList info_dict,
+    PieceHash *const piece_hashes, usize piece_hashes_count, BencodeValue *dst,
+    Arena *arena) {
   assert(!slice_u8_is_empty(announce_url));
   assert(info_dict.len > 0);
   assert(dst);
@@ -1529,9 +1530,22 @@ __attribute__((warn_unused_result)) static bool torrent_make_metainfo_dict_v2(
 
     // `metainfo["pieces layer"][file_name] = pices_hashes`
     {
-    }
+      BencodeValue *const file_name_key = &pieces_value->v.list.data[0];
+      file_name_key->kind = BencodeKindString;
+      file_name_key->v.s = file_name;
 
-    // TODO: copy
+      BencodeValue *const file_name_value = &pieces_value->v.list.data[1];
+      file_name_value->kind = BencodeKindString;
+      file_name_value->v.s.len = piece_hashes_count * SHA256_DIGEST_LENGTH;
+      file_name_value->v.s.data =
+          arena_alloc(arena, __alignof__(BencodeValue), sizeof(BencodeValue),
+                      file_name_value->v.s.len);
+      if (!file_name_value->v.s.data) {
+        return false;
+      }
+
+      memcpy(file_name_value->v.s.data, piece_hashes, file_name_value->v.s.len);
+    }
   }
 
   return true;
@@ -4209,9 +4223,9 @@ int main(i32 argc, char *argv[]) {
     const char *const announce_url_cstr = "http://localhost:12345";
     Slice_u8 announce_url =
         slice_u8_make((u8 *)announce_url_cstr, strlen(announce_url_cstr));
-    assert(torrent_make_metainfo_dict_v2(announce_url, info_dict.v.list,
-                                         piece_hashes, piece_hashes_count,
-                                         &metainfo_dict, &arena));
+    assert(torrent_make_metainfo_dict_v2(
+        file_name, announce_url, info_dict.v.list, piece_hashes,
+        piece_hashes_count, &metainfo_dict, &arena));
     bencode_print(metainfo_dict, 0);
     puts("");
 
