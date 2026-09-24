@@ -1506,10 +1506,11 @@ __attribute__((warn_unused_result)) static bool torrent_make_metainfo_dict_v2(
     dst->v.list.data[3].v.list = info_dict;
   }
 
-  // `metainfo["pieces layer"] = piece_hashes`
+  // `metainfo["pieces layer"] = {}`
   if (piece_hashes_count > 0) {
     assert(piece_hashes);
-    assert(6 == kv_count);
+    assert(3 == kv_count);
+    assert(dst->v.list.len == 2 * kv_count);
 
     BencodeValue *const pieces_key = &dst->v.list.data[4];
     pieces_key->kind = BencodeKindString;
@@ -1517,13 +1518,17 @@ __attribute__((warn_unused_result)) static bool torrent_make_metainfo_dict_v2(
         slice_u8_make((u8 *)"piece layers", sizeof("piece layers") - 1);
 
     BencodeValue *const pieces_value = &dst->v.list.data[5];
-    pieces_value->kind = BencodeKindString;
-    pieces_value->v.s.len = SHA256_DIGEST_LENGTH;
-    pieces_value->v.s.data =
+    pieces_value->kind = BencodeKindDict;
+    pieces_value->v.list.len = 2;
+    pieces_value->v.list.data =
         arena_alloc(arena, __alignof__(BencodeValue), sizeof(BencodeValue),
-                    pieces_value->v.s.len);
-    if (!pieces_value->v.s.data) {
+                    pieces_value->v.list.len);
+    if (!pieces_value->v.list.data) {
       return false;
+    }
+
+    // `metainfo["pieces layer"][file_name] = pices_hashes`
+    {
     }
 
     // TODO: copy
