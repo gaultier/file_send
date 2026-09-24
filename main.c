@@ -402,8 +402,12 @@ __attribute__((warn_unused_result)) static usize ceil_usize(usize numerator,
   return numerator / denominator + (numerator % denominator != 0);
 }
 
-__attribute__((warn_unused_result)) static Arena
-arena_valloc(usize bytes_count) {
+// On success `*res` is the arena; on failure it is left alone and the reason
+// `mmap` gave is passed through.
+__attribute__((warn_unused_result)) static Error arena_valloc(usize bytes_count,
+                                                              Arena *res) {
+  assert(res);
+
   const usize page_size = unix_get_page_size();
   assert(page_size > 0);
 
@@ -412,11 +416,12 @@ arena_valloc(usize bytes_count) {
   // Guard page.
   assert(!__builtin_add_overflow(usable_bytes, page_size, &os_alloc_size));
 
-  const Arena res = {0};
-
   u8 *arena_memory = NULL;
-  if (ErrNone != unix_virtual_mem_alloc(os_alloc_size, &arena_memory)) {
-    return res;
+  {
+    const Error err = unix_virtual_mem_alloc(os_alloc_size, &arena_memory);
+    if (ErrNone != err) {
+      return err;
+    }
   }
   assert(arena_memory);
 
@@ -432,8 +437,9 @@ arena_valloc(usize bytes_count) {
   assert(start >= (usize)arena_memory);
   assert(0 == start % max_align);
 
-  return arena_from_mem((u8 *)start,
-                        (usize)arena_memory + usable_bytes - start);
+  *res =
+      arena_from_mem((u8 *)start, (usize)arena_memory + usable_bytes - start);
+  return ErrNone;
 }
 
 // Parse a run of ASCII digits from the front of `*data`, consuming them.
@@ -2014,7 +2020,8 @@ bencode_encode(BencodeValue b, Slice_u8 *dst, Arena *arena) {
 // struct. Poison it so such a read shows up as an obviously bogus value
 // instead.
 __attribute__((warn_unused_result)) static Arena test_arena(usize bytes_count) {
-  Arena arena = arena_valloc(bytes_count);
+  Arena arena = {0};
+  assert(ErrNone == arena_valloc(bytes_count, &arena));
   assert(arena.start);
   assert(arena.end);
   assert((usize)arena.end - (usize)arena.start >= bytes_count);
@@ -2204,8 +2211,12 @@ static void test_arena_alloc(void) {
 
 static void test_arena_valloc(void) {
   // A request the kernel cannot satisfy. `mmap` reports `MAP_FAILED`, not
-  // NULL, so this also pins down that conversion.
-  const Arena arena = arena_valloc((usize)1 << 62);
+  // NULL, so this also pins down that conversion, and that the `ENOMEM` it
+  // sets comes back as `ErrOOM` rather than a bare failure.
+  Arena arena = {0};
+  assert(ErrOOM == arena_valloc((usize)1 << 62, &arena));
+
+  // A failed call leaves the caller's arena alone.
   assert(NULL == arena.start);
   assert(NULL == arena.end);
 }
@@ -3259,7 +3270,8 @@ test_merkle_data(Arena *arena) {
 // power of two number of blocks, and block counts needing one or several
 // padding leaves.
 static void test_torrent_merkle_vectors(void) {
-  Arena data_arena = arena_valloc(TEST_MERKLE_MAX_LEN + 4 * KiB);
+  Arena data_arena = {0};
+  assert(ErrNone == arena_valloc(TEST_MERKLE_MAX_LEN + 4 * KiB, &data_arena));
   assert(data_arena.start);
   const Slice_u8 data = test_merkle_data(&data_arena);
 
@@ -3321,7 +3333,8 @@ static void test_torrent_merkle_vectors(void) {
 // info dictionary. Checked against an independently built tree rather than
 // against the implementation's own intermediate state.
 static void test_torrent_merkle_piece_layer(void) {
-  Arena data_arena = arena_valloc(TEST_MERKLE_MAX_LEN + 4 * KiB);
+  Arena data_arena = {0};
+  assert(ErrNone == arena_valloc(TEST_MERKLE_MAX_LEN + 4 * KiB, &data_arena));
   assert(data_arena.start);
   const Slice_u8 data = test_merkle_data(&data_arena);
 
@@ -3410,7 +3423,8 @@ static void test_torrent_merkle_piece_layer(void) {
 // is zeroed. Everything above it is hashed normally, so a node covering
 // nothing but padding is emphatically not zero.
 static void test_torrent_merkle_padding(void) {
-  Arena data_arena = arena_valloc(64 * KiB);
+  Arena data_arena = {0};
+  assert(ErrNone == arena_valloc(64 * KiB, &data_arena));
   assert(data_arena.start);
 
   // Three blocks, so the tree pads to four leaves and the last leaf covers no
@@ -3506,7 +3520,8 @@ static void test_torrent_merkle_empty(void) {
 // The one failure path: an arena too small for the tree is reported, not
 // asserted, and leaves nothing half built behind.
 static void test_torrent_merkle_oom(void) {
-  Arena data_arena = arena_valloc(64 * KiB);
+  Arena data_arena = {0};
+  assert(ErrNone == arena_valloc(64 * KiB, &data_arena));
   assert(data_arena.start);
 
   // Two blocks, so at one block per piece the layer needs two hashes.
@@ -4471,7 +4486,8 @@ int main(i32 argc, char *argv[]) {
 
   const char *const cmd = argv[1];
   const usize arena_cap = 32 * MiB;
-  Arena arena = arena_valloc(arena_cap);
+  Arena arena = {0};
+  assert(ErrNone == arena_valloc(arena_cap, &arena));
 
   if (0 == strcmp(cmd, "test")) {
     test(argc > 2 ? argv[2] : NULL);
@@ -4490,7 +4506,8 @@ int main(i32 argc, char *argv[]) {
     assert((void *)-1 != bencode_data);
 
     Slice_u8 input = slice_u8_make((u8 *)bencode_data, (usize)st.st_size);
-    const Arena scratch = arena_valloc(32 * MiB);
+    Arena scratch = {0};
+    assert(ErrNone == arena_valloc(32 * MiB, &scratch));
 
     BencodeValue bencode = {0};
     assert(ErrNone == bencode_parse(&input, &arena, scratch, &bencode));
