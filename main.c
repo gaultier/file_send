@@ -578,10 +578,10 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
   if (!values) {
     return false;
   }
-  usize values_len = 0;
+  usize values_count = 0;
 
   BencodeContainer containers[BENCODE_MAX_DEPTH] = {0};
-  usize containers_len = 0;
+  usize containers_count = 0;
 
   const usize MAX_LEN = remaining.len;
 
@@ -594,29 +594,29 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
     switch (current) {
     case 'i':
       // Parsed straight into its final slot: no intermediate copy.
-      assert(values_len < values_cap);
-      if (!bencode_parse_num(&remaining, &values[values_len])) {
+      assert(values_count < values_cap);
+      if (!bencode_parse_num(&remaining, &values[values_count])) {
         return false;
       }
-      values_len++;
+      values_count++;
       break;
 
     case 'l':
     case 'd':
-      if (containers_len >= BENCODE_MAX_DEPTH) {
+      if (containers_count >= BENCODE_MAX_DEPTH) {
         return false;
       }
       slice_u8_advance(&remaining, 1);
 
-      containers[containers_len].is_list = current == 'l';
-      containers[containers_len].children_start = values_len;
-      containers_len++;
+      containers[containers_count].is_list = current == 'l';
+      containers[containers_count].children_start = values_count;
+      containers_count++;
 
       // The next loop iteration will parse the items.
       continue;
 
     case 'e': {
-      if (0 == containers_len) {
+      if (0 == containers_count) {
         // Stray `e`, reject.
         return false;
       }
@@ -624,11 +624,11 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
       slice_u8_advance(&remaining, 1);
 
       // Time to pop `containers`.
-      const BencodeContainer container = containers[containers_len - 1];
-      containers[containers_len - 1] = (BencodeContainer){0};
-      containers_len--;
+      const BencodeContainer container = containers[containers_count - 1];
+      containers[containers_count - 1] = (BencodeContainer){0};
+      containers_count--;
 
-      const usize children_len = values_len - container.children_start;
+      const usize children_len = values_count - container.children_start;
 
       // Should always be key-value pairs.
       if (!container.is_list && children_len % 2 != 0) {
@@ -664,11 +664,11 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
       // scrubbed so that a stale child cannot be mistaken for a live value.
       memset(values + container.children_start, 0,
              children_len * sizeof(BencodeValue));
-      values_len = container.children_start;
-      assert(values_len < values_cap);
+      values_count = container.children_start;
+      assert(values_count < values_cap);
 
       // Do not forget to record this new bencode value!
-      values[values_len++] = value;
+      values[values_count++] = value;
     } break;
 
     case '0':
@@ -682,11 +682,11 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
     case '8':
     case '9':
       // Parsed straight into its final slot: no intermediate copy.
-      assert(values_len < values_cap);
-      if (!bencode_parse_string(&remaining, &values[values_len])) {
+      assert(values_count < values_cap);
+      if (!bencode_parse_string(&remaining, &values[values_count])) {
         return false;
       }
-      values_len++;
+      values_count++;
       break;
 
       // Unknown character.
@@ -695,13 +695,13 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
     }
 
     // We just finished to correctly parse a value.
-    assert(values_len <= values_cap);
+    assert(values_count <= values_cap);
 
     // No containers meaning: nothing is currently open.
     // So, we are at the root, which we need to return to the caller,
     // because `root != values[0]` in the general case.
-    if (0 == containers_len) {
-      assert(1 == values_len);
+    if (0 == containers_count) {
+      assert(1 == values_count);
 
       // The single success exit: everything is committed here, at once.
       *input = remaining;
@@ -1448,8 +1448,7 @@ torrent_make_info_dict_v2(Slice_u8 name, usize piece_length_in_bytes,
           if (NULL == pieces_root_value->v.s.data) {
             return false;
           }
-          memcpy(pieces_root_value->v.s.data, root,
-                 SHA256_DIGEST_LENGTH);
+          memcpy(pieces_root_value->v.s.data, root, SHA256_DIGEST_LENGTH);
         }
       }
     }
