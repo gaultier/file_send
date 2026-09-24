@@ -443,7 +443,10 @@ slice_u8_eq_cstr(Slice_u8 s, const char *cstr) {
   return 0 == memcmp(s.data, cstr, s.len);
 }
 
-// Inspired by https://pkg.go.dev/path/filepath#Base
+// Matches https://pkg.go.dev/path/filepath#Base.
+//
+// The result may be "/", "." or "..": it is the last path element, not a
+// validated file name, so callers that need one must check it themselves.
 __attribute__((warn_unused_result)) static Slice_u8
 unix_path_last_component(Slice_u8 path) {
   //  If the path is empty, Base returns ".".
@@ -460,25 +463,26 @@ unix_path_last_component(Slice_u8 path) {
     }
   }
 
-  //  If the path is empty, Base returns ".".
+  //  If the path consists entirely of separators, Base returns a single
+  //  separator.
   if (slice_u8_is_empty(path)) {
-    return (Slice_u8){.data = (u8 *)".", .len = 1};
+    return (Slice_u8){.data = (u8 *)"/", .len = 1};
   }
 
   for (isize i = path.len - 1; i >= 0; i--) {
     u8 c = path.data[i];
     if ('/' == c) {
       const Slice_u8 res = {.data = path.data + i + 1, .len = path.len - i - 1};
+      // The trailing separators are gone, so there is at least one byte left
+      // after the last one.
+      assert(!slice_u8_is_empty(res));
       assert(!slice_u8_contains_byte(res, '/'));
-
-      if (slice_u8_eq_cstr(res, "..")) {
-        return (Slice_u8){0};
-      }
 
       return res;
     }
   }
 
+  assert(!slice_u8_contains_byte(path, '/'));
   return path;
 }
 
@@ -2045,17 +2049,18 @@ static void test_slice_u8(void) {
 }
 
 static void test_unix_path_last_component(void) {
+  // Expectations generated with Go's `path/filepath.Base`.
   const struct {
     const char *input;
-    // The expected component, or `NULL` when the path is rejected and the
-    // function returns the empty slice.
     const char *expected;
   } cases[] = {
-      // An empty path, and paths that shrink to nothing once the trailing
-      // separators are removed.
+      // An empty path is the only input that yields ".".
       {"", "."},
-      {"/", "."},
-      {"///", "."},
+
+      // A path of nothing but separators yields a single separator.
+      {"/", "/"},
+      {"//", "/"},
+      {"///", "/"},
 
       // No separator at all: the whole path is the component.
       {"a", "a"},
@@ -2073,38 +2078,33 @@ static void test_unix_path_last_component(void) {
       {"/a/b/", "b"},
       {"a/b///", "b"},
 
-      // A component made of dots is only special when it is exactly "..".
-      {".", "."},
-      {"a/.", "."},
-      {"...", "..."},
-      {"a/..b", "..b"},
-      {"a/b..", "b.."},
-
-      // "..": rejected, but only when a separator precedes it. See the
-      // comment below.
-      {"a/..", NULL},
-      {"/..", NULL},
-      {"a/../", NULL},
-      {"..", ".."},
-      {"../", ".."},
-
-      // Consecutive separators yield an empty component rather than
-      // skipping over them.
+      // Repeated separators inside the path are not collapsed, but they
+      // cannot produce an empty component either: the last one is always
+      // followed by at least one byte.
       {"a//b", "b"},
       {"a//", "a"},
+
+      // Dot components are returned as-is; this function resolves nothing.
+      {".", "."},
+      {"a/.", "."},
+      {"/.", "."},
+      {"/./", "."},
+      {"..", ".."},
+      {"../", ".."},
+      {"a/..", ".."},
+      {"/..", ".."},
+      {"a/../", ".."},
+      {"...", "..."},
+      {"....", "...."},
+      {"a/..b", "..b"},
+      {"a/b..", "b.."},
   };
 
   for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
     const Slice_u8 got = unix_path_last_component(test_slice(cases[i].input));
 
-    if (!cases[i].expected) {
-      assert(slice_u8_is_empty(got));
-      continue;
-    }
-
+    assert(!slice_u8_is_empty(got));
     assert(slice_u8_eq_cstr(got, cases[i].expected));
-    // A component never contains a separator.
-    assert(!slice_u8_contains_byte(got, '/'));
   }
 
   // A null slice is the same as an empty one.
