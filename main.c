@@ -910,58 +910,76 @@ static void sha256_compress(u32 h[8], const u8 block[SHA256_CBLOCK]) {
 // leaves `__ARM_FEATURE_SHA2` undefined and the intrinsics below refuse to
 // compile without it.
 __attribute__((target("+crypto"))) static void
-sha256_compress_neon(u32 h[8], const u8 block[SHA256_CBLOCK]) {
+sha256_compress_blocks_neon(u32 h[8], const u8 *blocks, usize blocks_count) {
   assert(h);
-  assert(block);
+  assert(blocks || 0 == blocks_count);
 
   // Unlike the x86 extension, the ARM one keeps the working variables in their
   // natural order, so the state needs no shuffling on the way in or out.
   uint32x4_t state0 = vld1q_u32(&h[0]); // a b c d
   uint32x4_t state1 = vld1q_u32(&h[4]); // e f g h
 
-  const uint32x4_t state0_in = state0;
-  const uint32x4_t state1_in = state1;
+  // The chaining state stays in registers for the whole run, so a multi block
+  // hash reads and writes `h` once instead of once per block.
+  for (usize b = 0; b < blocks_count; b++) {
+    const u8 *const block = blocks + b * SHA256_CBLOCK;
 
-  // The message is big endian, the vector unit little endian.
-  uint32x4_t msg[4] = {0};
-  for (usize i = 0; i < 4; i++) {
-    msg[i] = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(block + i * 16)));
+    const uint32x4_t state0_in = state0;
+    const uint32x4_t state1_in = state1;
+
+    // The message is big endian, the vector unit little endian.
+    uint32x4_t msg[4] = {0};
+    for (usize i = 0; i < 4; i++) {
+      msg[i] = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(block + i * 16)));
+    }
+
+    // Each instruction pair consumes four rounds at once, so 64 rounds are 16
+    // iterations rather than the scalar version's 64.
+    uint32x4_t wk = vaddq_u32(msg[0], vld1q_u32(&sha256_k[0]));
+
+    // Unrolled by four, which measured fastest. The win is front end, not
+    // register pressure: the subscripts stay runtime values and `msg` still
+    // round trips through the stack, but that traffic is off the critical path
+    // and hides in the shadow of the `sha256h` chain. Both ways of removing it
+    // -- unrolling all sixteen groups, and hand writing them against four
+    // named vector variables the way OpenSSL's asm does -- measured slower
+    // here, because the larger footprint costs more than the traffic did.
+#pragma clang loop unroll_count(4)
+    for (usize i = 0; i < 16; i++) {
+      const usize j = i & 3;
+
+      // The next group's `w + k` reads a message word that this group's
+      // schedule is about to overwrite, so compute it first.
+      uint32x4_t wk_next = wk;
+      if (i < 15) {
+        wk_next =
+            vaddq_u32(msg[(j + 1) & 3], vld1q_u32(&sha256_k[4 * (i + 1)]));
+      }
+
+      // The last four groups consume the schedule without extending it: there
+      // is no `w[64]`.
+      if (i < 12) {
+        msg[j] = vsha256su0q_u32(msg[j], msg[(j + 1) & 3]);
+      }
+
+      // `SHA256H` needs the old `a b c d`, which `SHA256H` itself overwrites.
+      const uint32x4_t abcd = state0;
+      state0 = vsha256hq_u32(state0, state1, wk);
+      state1 = vsha256h2q_u32(state1, abcd, wk);
+
+      if (i < 12) {
+        msg[j] = vsha256su1q_u32(msg[j], msg[(j + 2) & 3], msg[(j + 3) & 3]);
+      }
+
+      wk = wk_next;
+    }
+
+    state0 = vaddq_u32(state0, state0_in);
+    state1 = vaddq_u32(state1, state1_in);
   }
 
-  // Each instruction pair consumes four rounds at once, so 64 rounds are 16
-  // iterations rather than the scalar version's 64.
-  uint32x4_t wk = vaddq_u32(msg[0], vld1q_u32(&sha256_k[0]));
-
-  for (usize i = 0; i < 16; i++) {
-    const usize j = i & 3;
-
-    // The next group's `w + k` reads a message word that this group's schedule
-    // is about to overwrite, so compute it first.
-    uint32x4_t wk_next = wk;
-    if (i < 15) {
-      wk_next = vaddq_u32(msg[(j + 1) & 3], vld1q_u32(&sha256_k[4 * (i + 1)]));
-    }
-
-    // The last four groups consume the schedule without extending it: there is
-    // no `w[64]`.
-    if (i < 12) {
-      msg[j] = vsha256su0q_u32(msg[j], msg[(j + 1) & 3]);
-    }
-
-    // `SHA256H` needs the old `a b c d`, which `SHA256H` itself overwrites.
-    const uint32x4_t abcd = state0;
-    state0 = vsha256hq_u32(state0, state1, wk);
-    state1 = vsha256h2q_u32(state1, abcd, wk);
-
-    if (i < 12) {
-      msg[j] = vsha256su1q_u32(msg[j], msg[(j + 2) & 3], msg[(j + 3) & 3]);
-    }
-
-    wk = wk_next;
-  }
-
-  vst1q_u32(&h[0], vaddq_u32(state0, state0_in));
-  vst1q_u32(&h[4], vaddq_u32(state1, state1_in));
+  vst1q_u32(&h[0], state0);
+  vst1q_u32(&h[4], state1);
 }
 
 // The extension is optional even on AArch64, so ask rather than assume.
@@ -992,9 +1010,7 @@ static void sha256_compress_blocks(u32 h[8], const u8 *blocks,
 
 #if SHA256_HAS_NEON
   if (sha256_neon_supported()) {
-    for (usize i = 0; i < blocks_count; i++) {
-      sha256_compress_neon(h, blocks + i * SHA256_CBLOCK);
-    }
+    sha256_compress_blocks_neon(h, blocks, blocks_count);
     return;
   }
 #endif
@@ -3452,7 +3468,7 @@ static void test_sha256_neon_matches_scalar(void) {
     memcpy(neon, scalar, sizeof(neon));
 
     sha256_compress(scalar, block);
-    sha256_compress_neon(neon, block);
+    sha256_compress_blocks_neon(neon, block, 1);
     assert(0 == memcmp(scalar, neon, sizeof(scalar)));
   }
 
@@ -3475,7 +3491,37 @@ static void test_sha256_neon_matches_scalar(void) {
     }
 
     sha256_compress(scalar, block);
-    sha256_compress_neon(neon, block);
+    sha256_compress_blocks_neon(neon, block, 1);
+    assert(0 == memcmp(scalar, neon, sizeof(scalar)));
+  }
+
+  // Finally a run of consecutive blocks in one call. The vector version keeps
+  // the chaining state in registers across the run, so this is the only thing
+  // that exercises the hand off from one block to the next.
+  {
+    const usize blocks_count = 7;
+    u8 blocks[7 * SHA256_CBLOCK];
+    for (usize i = 0; i < sizeof(blocks); i++) {
+      x = x * 1664525u + 1013904223u;
+      blocks[i] = (u8)(x >> 24);
+    }
+
+    u32 scalar[8] = {0};
+    u32 neon[8] = {0};
+    for (usize i = 0; i < 8; i++) {
+      x = x * 1664525u + 1013904223u;
+      scalar[i] = x;
+      neon[i] = x;
+    }
+
+    for (usize i = 0; i < blocks_count; i++) {
+      sha256_compress(scalar, blocks + i * SHA256_CBLOCK);
+    }
+    sha256_compress_blocks_neon(neon, blocks, blocks_count);
+    assert(0 == memcmp(scalar, neon, sizeof(scalar)));
+
+    // A zero length run must leave the state alone.
+    sha256_compress_blocks_neon(neon, blocks, 0);
     assert(0 == memcmp(scalar, neon, sizeof(scalar)));
   }
 #endif
