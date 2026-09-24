@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <inttypes.h>
 #include <limits.h>
+#include <netinet/in.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -27,6 +28,7 @@
 #endif
 
 typedef uint8_t u8;
+typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
 typedef int32_t i32;
@@ -489,12 +491,47 @@ unix_open(void *ctx, char *path, FileOpenOptions options, i32 *fd) {
   return ErrNone;
 }
 
+typedef struct {
+  u32 ip;
+  u16 port;
+} Ipv4Addr;
+
+__attribute__((warn_unused_result)) static Error
+unix_accept(void *ctx, i32 listen_socket, i32 *dst_accept_socket,
+            Ipv4Addr *dst_accept_addr) {
+
+  (void)ctx;
+
+  assert(dst_accept_socket);
+  assert(dst_accept_addr);
+
+  struct sockaddr_in sock_addr_in = {0};
+  socklen_t sock_addr_in_len = sizeof(sock_addr_in);
+
+  i32 ret = 0;
+  do {
+    ret = accept(listen_socket, (struct sockaddr *)&sock_addr_in,
+                 &sock_addr_in_len);
+  } while (-1 == ret && EINTR == errno);
+
+  if (-1 == ret) {
+    return unix_error_from_errno(errno);
+  }
+
+  *dst_accept_socket = ret;
+  dst_accept_addr->port = ntohs(sock_addr_in.sin_port);
+  dst_accept_addr->ip = ntohl(sock_addr_in.sin_addr.s_addr);
+
+  return ErrNone;
+}
 // ---------- IO ----------
 
 typedef struct {
   Error (*socket)(void *ctx, SocketDomain domain, SocketType type, i32 *fd);
   Error (*listen)(void *ctx, i32 fd, i32 backlog);
   Error (*open)(void *ctx, char *path, FileOpenOptions options, i32 *fd);
+  Error (*accept)(void *ctx, i32 listen_socket, i32 *dst_accept_socket,
+                  Ipv4Addr *dst_accept_addr);
 } IO;
 
 __attribute__((warn_unused_result)) static IO io_unix_make(void) {
@@ -502,6 +539,7 @@ __attribute__((warn_unused_result)) static IO io_unix_make(void) {
       .socket = unix_socket,
       .listen = unix_listen,
       .open = unix_open,
+      .accept = unix_accept,
   };
 }
 
@@ -784,13 +822,13 @@ bencode_parse_string(Slice_u8 *input, BencodeValue *res) {
   return ErrNone;
 }
 
-// Compare two byte strings lexicographically: the first differing byte decides,
-// and when one is a prefix of the other, the shorter one sorts first.
-// Returns <0, 0, or >0, like `memcmp`.
+// Compare two byte strings lexicographically: the first differing byte
+// decides, and when one is a prefix of the other, the shorter one sorts
+// first. Returns <0, 0, or >0, like `memcmp`.
 //
-// Bytes are compared as unsigned values, so `0x80` sorts after `0x7f`. This is
-// a total order over arbitrary bytes, embedded zeroes included, and it is the
-// ordering bencode requires of dict keys.
+// Bytes are compared as unsigned values, so `0x80` sorts after `0x7f`. This
+// is a total order over arbitrary bytes, embedded zeroes included, and it is
+// the ordering bencode requires of dict keys.
 __attribute__((warn_unused_result)) static i32
 bytes_cmp(const u8 *a, usize a_len, const u8 *b, usize b_len) {
   if (0 != a_len) {
@@ -852,8 +890,8 @@ bencode_validate_dict(BencodeList list) {
 // Parse one complete bencode value, with all of its children, into `*res`.
 //
 // `*input` and `*arena` are only advanced when the parse succeeds: rolling
-// back a bump allocator is just restoring its start pointer, so a failed parse
-// leaves the caller with neither consumed input nor consumed memory.
+// back a bump allocator is just restoring its start pointer, so a failed
+// parse leaves the caller with neither consumed input nor consumed memory.
 //
 // `scratch` is taken by value and is not consumed by the call.
 __attribute__((warn_unused_result)) static Error
@@ -946,8 +984,8 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
       // Now record the value for this container.
       BencodeValue value = {.kind = container.is_list ? BencodeKindList
                                                       : BencodeKindDict};
-      // If there are any children, we need to allocate (right-sized) space for
-      // them.
+      // If there are any children, we need to allocate (right-sized) space
+      // for them.
       if (children_len > 0) {
         BencodeValue *children =
             arena_alloc(&arena_local, __alignof__(BencodeValue),
@@ -1037,9 +1075,9 @@ static void bencode_print_indent(usize indent) {
 // Print `v` in a JSON-ish form.
 //
 // The caller owns the cursor: it has already written whatever precedes the
-// value on the current line (the leading indentation, or a `key: ` prefix), so
-// this never indents the value itself. `indent` is the column the *line* the
-// value starts on begins at, which is what the children and the closing
+// value on the current line (the leading indentation, or a `key: ` prefix),
+// so this never indents the value itself. `indent` is the column the *line*
+// the value starts on begins at, which is what the children and the closing
 // bracket are aligned against. Nothing is written after the value either: a
 // trailing newline is the caller's to add.
 static void bencode_print(BencodeValue v, usize indent) {
@@ -1072,9 +1110,9 @@ static void bencode_print(BencodeValue v, usize indent) {
       bencode_print_indent(indent + 2);
       bencode_print(v.v.list.data[i], indent + 2);
       printf(": ");
-      // The value is indented against the start of the key's line, not against
-      // the column it happens to start at, so a nested container closes
-      // underneath its key.
+      // The value is indented against the start of the key's line, not
+      // against the column it happens to start at, so a nested container
+      // closes underneath its key.
       bencode_print(v.v.list.data[i + 1], indent + 2);
     }
     printf("\n");
@@ -1243,8 +1281,9 @@ sha256_compress_blocks_neon(u32 h[8], const u8 *blocks, usize blocks_count) {
     assert(blocks);
   }
 
-  // Unlike the x86 extension, the ARM one keeps the working variables in their
-  // natural order, so the state needs no shuffling on the way in or out.
+  // Unlike the x86 extension, the ARM one keeps the working variables in
+  // their natural order, so the state needs no shuffling on the way in or
+  // out.
   uint32x4_t state0 = vld1q_u32(&h[0]); // a b c d
   uint32x4_t state1 = vld1q_u32(&h[4]); // e f g h
 
@@ -1268,8 +1307,9 @@ sha256_compress_blocks_neon(u32 h[8], const u8 *blocks, usize blocks_count) {
 
     // Unrolled by four, which measured fastest. The win is front end, not
     // register pressure: the subscripts stay runtime values and `msg` still
-    // round trips through the stack, but that traffic is off the critical path
-    // and hides in the shadow of the `sha256h` chain. Both ways of removing it
+    // round trips through the stack, but that traffic is off the critical
+    // path and hides in the shadow of the `sha256h` chain. Both ways of
+    // removing it
     // -- unrolling all sixteen groups, and hand writing them against four
     // named vector variables the way OpenSSL's asm does -- measured slower
     // here, because the larger footprint costs more than the traffic did.
@@ -1312,8 +1352,9 @@ sha256_compress_blocks_neon(u32 h[8], const u8 *blocks, usize blocks_count) {
 }
 
 // The extension is optional even on AArch64, so ask rather than assume.
-// Cached because this sits on the hot path of every hash and `sysctlbyname` is
-// a syscall. Racing callers compute the same answer, so the race is benign.
+// Cached because this sits on the hot path of every hash and `sysctlbyname`
+// is a syscall. Racing callers compute the same answer, so the race is
+// benign.
 __attribute__((warn_unused_result)) static bool sha256_neon_supported(void) {
   static i32 cached = -1;
 
@@ -1330,8 +1371,8 @@ __attribute__((warn_unused_result)) static bool sha256_neon_supported(void) {
 
 #endif
 
-// Compress `blocks_count` consecutive blocks. The implementation is chosen once
-// here rather than per block, so the check stays out of the inner loop.
+// Compress `blocks_count` consecutive blocks. The implementation is chosen
+// once here rather than per block, so the check stays out of the inner loop.
 static void sha256_compress_blocks(u32 h[8], const u8 *blocks,
                                    usize blocks_count) {
   assert(h);
@@ -1479,8 +1520,8 @@ typedef struct {
 
 // Everything about a file's merkle tree that does not vary from node to node.
 // Built once by `torrent_build_merkle_tree` and passed down by pointer: the
-// recursion cannot then disagree with itself about where the piece layer sits,
-// and the divisions and `ctz`s happen once rather than once per node.
+// recursion cannot then disagree with itself about where the piece layer
+// sits, and the divisions and `ctz`s happen once rather than once per node.
 typedef struct {
   const Slice_u8 data;
   // Depth of the leaf layer, counting down from `0` at the root. Equivalently
@@ -1494,7 +1535,8 @@ typedef struct {
   const usize pieces_count;
   // BEP 52 gives no piece layer to a file that fits inside a single piece.
   const bool has_piece_layer;
-  // Capacity `pieces_count`, filled in as the recursion crosses `piece_depth`.
+  // Capacity `pieces_count`, filled in as the recursion crosses
+  // `piece_depth`.
   PieceHash *const piece_hashes;
 } MerkleTree;
 
@@ -1568,10 +1610,10 @@ torrent_merkle_tree_make(Slice_u8 data, usize piece_length_in_bytes,
   return tree;
 }
 
-// Hash the subtree rooted at (`depth`, `tree_width_idx`) into `dst`, recording
-// piece hashes into `tree->piece_hashes` on the way past `tree->piece_depth`.
-// `tree_width_idx` is the index within its own level, so at `max_depth` it is
-// the block index.
+// Hash the subtree rooted at (`depth`, `tree_width_idx`) into `dst`,
+// recording piece hashes into `tree->piece_hashes` on the way past
+// `tree->piece_depth`. `tree_width_idx` is the index within its own level, so
+// at `max_depth` it is the block index.
 static void torrent_build_merkle_sub_tree(const MerkleTree *tree,
                                           usize tree_width_idx, usize depth,
                                           u8 dst[SHA256_DIGEST_LENGTH]) {
@@ -1621,8 +1663,8 @@ static void torrent_build_merkle_sub_tree(const MerkleTree *tree,
 
   // Both branches fall through to here on purpose: with a 16KiB piece length
   // the piece layer is the leaf layer, so recording cannot sit in the inner
-  // node case alone. An index at or past `pieces_count` is a subtree made only
-  // of padding, which BEP 52 leaves out of the piece layer.
+  // node case alone. An index at or past `pieces_count` is a subtree made
+  // only of padding, which BEP 52 leaves out of the piece layer.
   if (tree->has_piece_layer && tree->piece_depth == depth &&
       tree_width_idx < tree->pieces_count) {
     memcpy(tree->piece_hashes[tree_width_idx].digest, dst,
@@ -1987,8 +2029,9 @@ __attribute__((warn_unused_result)) static usize isize_digits_base_10(isize n) {
 }
 
 // The digits are written at the *front* of `dst`, so a caller can encode
-// straight into its own output buffer instead of copying out of a scratch one.
-// Base 10 yields the least significant digit first, hence the up front width.
+// straight into its own output buffer instead of copying out of a scratch
+// one. Base 10 yields the least significant digit first, hence the up front
+// width.
 __attribute__((warn_unused_result)) static usize
 encode_usize_base_10(usize n, Slice_u8 dst) {
   assert(dst.data);
@@ -2067,8 +2110,9 @@ bencode_encode_exact_size(BencodeValue b, usize depth) {
   return res;
 }
 
-// Sizing is a whole subtree walk, so the checks against it live in the wrapper
-// below rather than here, where they would run once per level of nesting.
+// Sizing is a whole subtree walk, so the checks against it live in the
+// wrapper below rather than here, where they would run once per level of
+// nesting.
 __attribute__((warn_unused_result)) static usize
 bencode_encode_rec(BencodeValue b, Slice_u8 dst, usize depth) {
   assert(depth <= BENCODE_MAX_DEPTH);
@@ -3585,7 +3629,8 @@ static void test_torrent_merkle_piece_layer(void) {
       }
 
       // Build the whole tree the slow, obvious way and read the answers off
-      // it. `TEST_MERKLE_MAX_LEN` is 13 blocks, so 16 leaves covers every case.
+      // it. `TEST_MERKLE_MAX_LEN` is 13 blocks, so 16 leaves covers every
+      // case.
       const usize blocks = ceil_usize(len, TORRENT_BLOCK_SIZE);
       const usize leaves = next_power_of_two(blocks);
       assert(leaves <= 16);
@@ -3800,9 +3845,9 @@ static void test_encode_usize_once(usize n, const char *expected) {
 
   const usize written = encode_usize_base_10(n, slice_u8_make(buf, dst_len));
 
-  // Comparing from the front of the buffer is what pins the anchoring now that
-  // there is no returned pointer: the digits begin at `dst.data`, which is
-  // what lets a caller encode straight into its own output buffer.
+  // Comparing from the front of the buffer is what pins the anchoring now
+  // that there is no returned pointer: the digits begin at `dst.data`, which
+  // is what lets a caller encode straight into its own output buffer.
   assert(strlen(expected) == written);
   assert(0 == memcmp(buf, expected, written));
 
@@ -3930,9 +3975,9 @@ static void test_encode_isize_once(isize n, const char *expected) {
 
   const usize written = encode_isize_base_10(n, slice_u8_make(buf, dst_len));
 
-  // Comparing from the front of the buffer is what pins the anchoring now that
-  // there is no returned pointer: the digits begin at `dst.data`, which is
-  // what lets a caller encode straight into its own output buffer.
+  // Comparing from the front of the buffer is what pins the anchoring now
+  // that there is no returned pointer: the digits begin at `dst.data`, which
+  // is what lets a caller encode straight into its own output buffer.
   assert(strlen(expected) == written);
   assert(0 == memcmp(buf, expected, written));
 
@@ -4032,8 +4077,8 @@ static void test_bencode_encode_once(BencodeValue b, const char *expected) {
   assert(expected);
   const usize expected_len = strlen(expected);
 
-  // The sizing pass predicts the encoding to the byte, so it is a check rather
-  // than a bound.
+  // The sizing pass predicts the encoding to the byte, so it is a check
+  // rather than a bound.
   const usize size = bencode_encode_exact_size(b, 0);
   assert(size == expected_len);
 
@@ -4084,14 +4129,14 @@ static void test_bencode_encode_leaves(void) {
   test_bencode_encode_once(test_bencode_str("spam"), "4:spam");
   test_bencode_encode_once(test_bencode_str("piece length"), "12:piece length");
 
-  // A string whose `data` is null, which is how the `""` key of a v2 file tree
-  // is built. `memcpy` wants valid pointers even for a zero byte copy.
+  // A string whose `data` is null, which is how the `""` key of a v2 file
+  // tree is built. `memcpy` wants valid pointers even for a zero byte copy.
   const BencodeValue null_str = {.kind = BencodeKindString, .v.s = {0}};
   test_bencode_encode_once(null_str, "0:");
 }
 
-// Strings are byte strings: NULs and high bytes pass through untouched, and the
-// length prefix counts bytes rather than stopping at a terminator.
+// Strings are byte strings: NULs and high bytes pass through untouched, and
+// the length prefix counts bytes rather than stopping at a terminator.
 static void test_bencode_encode_binary_string(void) {
   u8 raw[6] = {0x00, 0xff, 'a', 0x00, 0x80, '\n'};
   const BencodeValue b = {.kind = BencodeKindString,
@@ -4192,9 +4237,9 @@ static void test_bencode_encode_wide_dict(void) {
   assert(pairs * 2 == parsed.v.list.len);
 }
 
-// Encoding is the inverse of parsing: parse a document, encode it back, and the
-// bytes must be identical. Bencode has exactly one representation per value, so
-// any deviation is a bug in one of the two.
+// Encoding is the inverse of parsing: parse a document, encode it back, and
+// the bytes must be identical. Bencode has exactly one representation per
+// value, so any deviation is a bug in one of the two.
 static void test_bencode_encode_round_trip(void) {
   const char *documents[] = {
       "i0e",
@@ -4296,9 +4341,9 @@ static void test_bencode_encode_torrent_info(void) {
 
 // The vector block function must be indistinguishable from the scalar one, so
 // compare them directly rather than only through the public digest: a
-// Decode a run of concatenated hex digests, the form `piece layers` values are
-// published in. `test_digest_from_hex` takes exactly one digest, so feed it
-// one 64 character window at a time.
+// Decode a run of concatenated hex digests, the form `piece layers` values
+// are published in. `test_digest_from_hex` takes exactly one digest, so feed
+// it one 64 character window at a time.
 static void test_digests_from_hex(const char *hex, Slice_u8 dst) {
   assert(hex);
   assert(0 == dst.len % SHA256_DIGEST_LENGTH);
@@ -4375,7 +4420,8 @@ static void test_torrent_metainfo_once(usize file_len,
                         pieces_root, announce, info.v.list, piece_hashes,
                         piece_hashes_count, &metainfo, &arena));
 
-  // Three keys, in the order bencode requires: announce < info < piece layers.
+  // Three keys, in the order bencode requires: announce < info < piece
+  // layers.
   assert(BencodeKindDict == metainfo.kind);
   assert(2 * 3 == metainfo.v.list.len);
   assert(test_bencode_is_string(metainfo.v.list.data[0], "announce"));
@@ -4472,10 +4518,10 @@ static void test_torrent_metainfo_once(usize file_len,
 }
 
 static void test_torrent_metainfo_v2(void) {
-  // Two full pieces plus a short one. Three pieces is deliberately not a power
-  // of two: the tree pads its piece layer out to four, and BEP 52 publishes
-  // only the three that cover real data, so a layer handed over at the padded
-  // width fails here and nowhere else.
+  // Two full pieces plus a short one. Three pieces is deliberately not a
+  // power of two: the tree pads its piece layer out to four, and BEP 52
+  // publishes only the three that cover real data, so a layer handed over at
+  // the padded width fails here and nowhere else.
   test_torrent_metainfo_once(
       2 * 16 * TORRENT_BLOCK_SIZE + 7,
       "fab5fcffb2780746dc0870e6e1a4c850e5e6fc3e86a3081e3aceba534803482d",
@@ -4501,7 +4547,8 @@ static void test_torrent_metainfo_v2(void) {
       "e556ed46dace469f8f24053de5ad85478349c13544a4710b6d624454b85e1256", "");
 }
 
-// disagreement on one block is otherwise easy to miss behind a passing vector.
+// disagreement on one block is otherwise easy to miss behind a passing
+// vector.
 static void test_sha256_neon_matches_scalar(void) {
 #if !SHA256_HAS_NEON
   return;
@@ -4528,7 +4575,8 @@ static void test_sha256_neon_matches_scalar(void) {
   }
 
   // Then a deterministic sweep over both inputs. The chaining state is varied
-  // too, not just the block: the two differ in how they carry state in and out.
+  // too, not just the block: the two differ in how they carry state in and
+  // out.
   u32 x = 0x00c0ffee;
   for (usize iter = 0; iter < 20000; iter++) {
     u8 block[SHA256_CBLOCK];
@@ -4582,9 +4630,9 @@ static void test_sha256_neon_matches_scalar(void) {
 #endif
 }
 
-// Every message length that changes how blocks are cut up: empty, short, exact
-// multiples, and one byte either side of each. Hashed through the dispatcher,
-// which is what callers actually reach.
+// Every message length that changes how blocks are cut up: empty, short,
+// exact multiples, and one byte either side of each. Hashed through the
+// dispatcher, which is what callers actually reach.
 static void test_sha256_neon_lengths(void) {
 #if !SHA256_HAS_NEON
   return;
@@ -4796,18 +4844,30 @@ int main(i32 argc, char *argv[]) {
                                                stdout));
     puts("");
 
-    i32 socket_fd = 0;
+    i32 listen_socket = 0;
     {
       Error err_socket =
-          io.socket(NULL, SocketDomainIpv4, SocketTypeTcp, &socket_fd);
+          io.socket(NULL, SocketDomainIpv4, SocketTypeTcp, &listen_socket);
       assert(ErrNone == err_socket);
       puts("opened socket");
     }
 
     {
-      Error err_listen = io.listen(NULL, socket_fd, 1024);
+      Error err_listen = io.listen(NULL, listen_socket, 1024);
       assert(ErrNone == err_listen);
       puts("socket listening");
+    }
+
+    {
+      i32 accept_socket = 0;
+      Ipv4Addr accept_addr = {0};
+
+      Error err_accept =
+          io.accept(NULL, listen_socket, &accept_socket, &accept_addr);
+      assert(ErrNone == err_accept);
+      printf("accepted: %u.%u.%u.%u:%hu\n", accept_addr.ip >> 24 & 0xff,
+             accept_addr.ip >> 16 & 0xff, accept_addr.ip >> 8 & 0xff,
+             accept_addr.ip >> 0 & 0xff, accept_addr.port);
     }
 
     const usize unused_bytes = (usize)arena.end - (usize)arena.start;
