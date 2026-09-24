@@ -442,6 +442,20 @@ unix_socket(SocketDomain domain, SocketType type, i32 *fd) {
   return ErrNone;
 }
 
+__attribute__((warn_unused_result)) static Error unix_listen(i32 fd,
+                                                             i32 backlog) {
+  i32 ret = 0;
+  do {
+    ret = listen(fd, backlog);
+  } while (-1 == ret && EINTR == errno);
+
+  if (-1 == ret) {
+    return unix_error_from_errno(errno);
+  }
+
+  return ErrNone;
+}
+
 // ---------- Misc ----------
 __attribute__((warn_unused_result)) static bool is_power_of_two(usize value) {
   return (value != 0) && ((value & (value - 1)) == 0);
@@ -4732,9 +4746,18 @@ int main(i32 argc, char *argv[]) {
     puts("");
 
     i32 socket_fd = 0;
-    Error err_socket = unix_socket(SocketDomainIpv4, SocketTypeTcp, &socket_fd);
-    assert(ErrNone == err_socket);
-    puts("opened socket");
+    {
+      Error err_socket =
+          unix_socket(SocketDomainIpv4, SocketTypeTcp, &socket_fd);
+      assert(ErrNone == err_socket);
+      puts("opened socket");
+    }
+
+    {
+      Error err_listen = unix_listen(socket_fd, 1024);
+      assert(ErrNone == err_listen);
+      puts("socket listening");
+    }
 
     const usize unused_bytes = (usize)arena.end - (usize)arena.start;
     const usize used_bytes = arena_cap - unused_bytes;
