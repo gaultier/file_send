@@ -280,9 +280,6 @@ slice_u8_consume(Slice_u8 *slice, u8 expected) {
 // of zero, an unsupported protection, a socket option that does not apply.
 __attribute__((warn_unused_result)) static Error unix_error_from_errno(i32 e) {
   switch (e) {
-  case 0:
-    return ErrNone;
-
   case EACCES:
   case EPERM:
     return ErrOSPermission;
@@ -594,10 +591,7 @@ unix_enable_socket_reuse(void *ctx, i32 fd) {
   (void)ctx;
 
   int val = 1;
-  int ret = 0;
-  do {
-    ret = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val));
-  } while (-1 == ret && EINTR == errno);
+  const int ret = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val));
 
   if (-1 == ret) {
     return unix_error_from_errno(errno);
