@@ -211,7 +211,8 @@ __attribute((warn_unused_result)) static usize next_power_of_two(usize val) {
   val |= val >> 32;
   val += 1;
 
-  assert(0 != val && 0 == (val & (val - 1)) && "not a power of two");
+  assert(0 != val);
+  assert(is_power_of_two(val));
 
   return val;
 }
@@ -314,7 +315,9 @@ __attribute((warn_unused_result)) static Slice_u8 slice_u8_take(Slice_u8 input,
 
 __attribute((warn_unused_result)) static Slice_u8 slice_u8_make(u8 *data,
                                                                 usize len) {
-  assert(data || 0 == len);
+  if (0 != len) {
+    assert(data);
+  }
 
   return (Slice_u8){.data = data, .len = len};
 }
@@ -484,7 +487,9 @@ bencode_parse_string(Slice_u8 *input, BencodeValue *res) {
   *res = (BencodeValue){.kind = BencodeKindString, .v.s = s};
 
   assert(res->v.s.len == len);
-  assert(res->v.s.data || 0 == res->v.s.len);
+  if (0 != res->v.s.len) {
+    assert(res->v.s.data);
+  }
   return true;
 }
 
@@ -497,8 +502,12 @@ bencode_parse_string(Slice_u8 *input, BencodeValue *res) {
 // ordering bencode requires of dict keys.
 __attribute((warn_unused_result)) static i32 bytes_cmp(u8 *a, usize a_len,
                                                        u8 *b, usize b_len) {
-  assert(a || 0 == a_len);
-  assert(b || 0 == b_len);
+  if (0 != a_len) {
+    assert(a);
+  }
+  if (0 != b_len) {
+    assert(b);
+  }
 
   // Not `memcmp`: it is undefined to hand it a NULL pointer even for a length
   // of zero, and an empty byte string is legal here.
@@ -517,7 +526,9 @@ __attribute((warn_unused_result)) static i32 bytes_cmp(u8 *a, usize a_len,
 }
 
 static bool bencode_validate_dict(BencodeList list) {
-  assert(NULL != list.data || 0 == list.len);
+  if (0 != list.len) {
+    assert(NULL != list.data);
+  }
 
   // Mismatched key-value pairs?
   if (list.len % 2 != 0) {
@@ -558,7 +569,9 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
   assert(input);
   assert(arena);
   assert(arena->start <= arena->end);
-  assert(input->data || 0 == input->len);
+  if (0 != input->len) {
+    assert(input->data);
+  }
   assert(res);
 
   // Nothing to do?
@@ -919,7 +932,9 @@ static void sha256_compress(u32 h[8], const u8 block[SHA256_CBLOCK]) {
 __attribute__((target("+crypto"))) static void
 sha256_compress_blocks_neon(u32 h[8], const u8 *blocks, usize blocks_count) {
   assert(h);
-  assert(blocks || 0 == blocks_count);
+  if (0 != blocks_count) {
+    assert(blocks);
+  }
 
   // Unlike the x86 extension, the ARM one keeps the working variables in their
   // natural order, so the state needs no shuffling on the way in or out.
@@ -1013,7 +1028,9 @@ __attribute((warn_unused_result)) static bool sha256_neon_supported(void) {
 static void sha256_compress_blocks(u32 h[8], const u8 *blocks,
                                    usize blocks_count) {
   assert(h);
-  assert(blocks || 0 == blocks_count);
+  if (0 != blocks_count) {
+    assert(blocks);
+  }
 
 #if SHA256_HAS_NEON
   if (sha256_neon_supported()) {
@@ -1038,7 +1055,9 @@ static void sha256_init(Sha256Ctx *ctx) {
 
 static void sha256_update(Sha256Ctx *ctx, u8 *data, usize len) {
   assert(ctx);
-  assert(data || 0 == len);
+  if (0 != len) {
+    assert(data);
+  }
   assert(ctx->partial_len < SHA256_CBLOCK);
 
   const u8 *remaining = data;
@@ -1727,18 +1746,24 @@ static void test_isize_from_usize(void) {
   isize res = 0;
 
   // Positive.
-  assert(isize_from_usize(0, false, &res) && 0 == res);
-  assert(isize_from_usize(123, false, &res) && 123 == res);
-  assert(isize_from_usize((usize)SSIZE_MAX, false, &res) && SSIZE_MAX == res);
+  assert(isize_from_usize(0, false, &res));
+  assert(0 == res);
+  assert(isize_from_usize(123, false, &res));
+  assert(123 == res);
+  assert(isize_from_usize((usize)SSIZE_MAX, false, &res));
+  assert(SSIZE_MAX == res);
   assert(!isize_from_usize((usize)SSIZE_MAX + 1, false, &res));
   assert(!isize_from_usize(SIZE_MAX, false, &res));
 
   // Negative. `|ISIZE_MIN|` is one greater than `ISIZE_MAX`.
-  assert(isize_from_usize(0, true, &res) && 0 == res);
-  assert(isize_from_usize(123, true, &res) && -123 == res);
-  assert(isize_from_usize((usize)SSIZE_MAX, true, &res) && -SSIZE_MAX == res);
-  assert(isize_from_usize((usize)SSIZE_MAX + 1, true, &res) &&
-         (-SSIZE_MAX - 1) == res);
+  assert(isize_from_usize(0, true, &res));
+  assert(0 == res);
+  assert(isize_from_usize(123, true, &res));
+  assert(-123 == res);
+  assert(isize_from_usize((usize)SSIZE_MAX, true, &res));
+  assert(-SSIZE_MAX == res);
+  assert(isize_from_usize((usize)SSIZE_MAX + 1, true, &res));
+  assert((-SSIZE_MAX - 1) == res);
   assert(!isize_from_usize((usize)SSIZE_MAX + 2, true, &res));
   assert(!isize_from_usize(SIZE_MAX, true, &res));
 }
@@ -1819,7 +1844,9 @@ static void test_next_power_of_two(void) {
 
     assert(res >= n);
     assert(0 == (res & (res - 1)));
-    assert(1 == res || res / 2 < n);
+    if (1 != res) {
+      assert(res / 2 < n);
+    }
     assert(res == next_power_of_two(res));
   }
 }
@@ -2121,7 +2148,9 @@ static bool test_bencode_is_string(BencodeValue value, const char *expected) {
 }
 
 static BencodeValue test_bencode_make_string(const char *data, usize len) {
-  assert(data || 0 == len);
+  if (0 != len) {
+    assert(data);
+  }
 
   return (BencodeValue){.kind = BencodeKindString,
                         .v.s = slice_u8_make((u8 *)data, len)};
@@ -2220,7 +2249,9 @@ static void test_bencode_parse(void) {
     if (BencodeKindList == value.kind || BencodeKindDict == value.kind) {
       assert(cases[i].children_len == value.v.list.len);
       // An empty container owns no allocation at all.
-      assert(value.v.list.data || 0 == value.v.list.len);
+      if (0 != value.v.list.len) {
+        assert(value.v.list.data);
+      }
     }
   }
 

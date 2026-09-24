@@ -1,2 +1,4 @@
 - `-DNDEBUG` is never used as a build option, plain `asserts` are valid even with side effects.
 - Benchmark with these build options: `-O2 -march=native -flto=full`
+- Follow the coding style https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE.md
+- Always use braces in loops and conditionals
