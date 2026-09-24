@@ -1139,33 +1139,37 @@ static const usize TORRENT_BLOCK_SIZE = 16 * KiB;
 // static const usize TORRENT_PIECES_PER_BLOCK = 16;
 
 // `data`: file data to be hashed.
-// `first_leaf`:
+// `tree_width_idx`: index in the tree, bounded by the tree width.
 // `blocks_count`: total block count, constant (per file).
 // `height`: Current height in the tree.
 // `height == 0`: root.
 // `height == max_height`: leaf.
 // `out`: resulting SHA256 hash for the subtree.
-static void torrent_build_merkle_sub_tree(Slice_u8 data, usize first_leaf,
+static void torrent_build_merkle_sub_tree(Slice_u8 data, usize tree_width_idx,
                                           usize blocks_count, usize height,
                                           u8 out[SHA256_DIGEST_LENGTH]) {
-  assert(out);
+  // TODO: assert(tree_width_idx < ...);
+
   assert(blocks_count > 0);
   assert(is_power_of_two(blocks_count));
+
   const usize max_height = (usize)__builtin_ctzll(blocks_count);
   assert(height <= max_height);
+
+  assert(out);
 
   const bool is_leaf = max_height == height;
 
   if (is_leaf) {
     // Need to hash the file data?
-    if (first_leaf < blocks_count) {
-      assert(first_leaf * TORRENT_BLOCK_SIZE < data.len);
+    if (tree_width_idx < blocks_count) {
+      assert(tree_width_idx * TORRENT_BLOCK_SIZE < data.len);
 
       const Slice_u8 block_data = {
-          .data = data.data + first_leaf * TORRENT_BLOCK_SIZE,
-          .len = first_leaf * TORRENT_BLOCK_SIZE
+          .data = data.data + tree_width_idx * TORRENT_BLOCK_SIZE,
+          .len = tree_width_idx * TORRENT_BLOCK_SIZE
                      ? TORRENT_BLOCK_SIZE
-                     : data.len - first_leaf * TORRENT_BLOCK_SIZE,
+                     : data.len - tree_width_idx * TORRENT_BLOCK_SIZE,
       };
       sha256_digest(block_data, out);
       return;
@@ -1181,13 +1185,14 @@ static void torrent_build_merkle_sub_tree(Slice_u8 data, usize first_leaf,
   assert(new_height <= max_height);
 
   u8 left[SHA256_DIGEST_LENGTH] = {0};
-  torrent_build_merkle_sub_tree(data, 2 * first_leaf /* FIXME: check formula */,
+  torrent_build_merkle_sub_tree(data,
+                                2 * tree_width_idx /* FIXME: check formula */,
                                 blocks_count, new_height, left);
 
   u8 right[SHA256_DIGEST_LENGTH] = {0};
-  torrent_build_merkle_sub_tree(data,
-                                2 * first_leaf + 1 /* FIXME: check formula */,
-                                blocks_count, new_height, right);
+  torrent_build_merkle_sub_tree(
+      data, 2 * tree_width_idx + 1 /* FIXME: check formula */, blocks_count,
+      new_height, right);
 
   sha256_digest_pair(left, right, out);
 }
