@@ -497,6 +497,30 @@ typedef struct {
 } Ipv4Addr;
 
 __attribute__((warn_unused_result)) static Error
+unix_tcp_bind_ipv4(void *ctx, i32 listen_socket, Ipv4Addr addr) {
+
+  (void)ctx;
+
+  struct sockaddr_in sock_addr_in = {
+      .sin_family = AF_INET,
+      .sin_port = htons(addr.port),
+      .sin_addr.s_addr = htonl(addr.ip),
+  };
+
+  i32 ret = 0;
+  do {
+    ret = bind(listen_socket, (struct sockaddr *)&sock_addr_in,
+               sizeof(sock_addr_in));
+  } while (-1 == ret && EINTR == errno);
+
+  if (-1 == ret) {
+    return unix_error_from_errno(errno);
+  }
+
+  return ErrNone;
+}
+
+__attribute__((warn_unused_result)) static Error
 unix_accept(void *ctx, i32 listen_socket, i32 *dst_accept_socket,
             Ipv4Addr *dst_accept_addr) {
 
@@ -524,12 +548,14 @@ unix_accept(void *ctx, i32 listen_socket, i32 *dst_accept_socket,
 
   return ErrNone;
 }
+
 // ---------- IO ----------
 
 typedef struct {
   Error (*socket)(void *ctx, SocketDomain domain, SocketType type, i32 *fd);
   Error (*listen)(void *ctx, i32 fd, i32 backlog);
   Error (*open)(void *ctx, char *path, FileOpenOptions options, i32 *fd);
+  Error (*tcp_bind_ipv4)(void *ctx, i32 listen_socket, Ipv4Addr addr);
   Error (*accept)(void *ctx, i32 listen_socket, i32 *dst_accept_socket,
                   Ipv4Addr *dst_accept_addr);
 } IO;
@@ -539,6 +565,7 @@ __attribute__((warn_unused_result)) static IO io_unix_make(void) {
       .socket = unix_socket,
       .listen = unix_listen,
       .open = unix_open,
+      .tcp_bind_ipv4 = unix_tcp_bind_ipv4,
       .accept = unix_accept,
   };
 }
@@ -4850,6 +4877,13 @@ int main(i32 argc, char *argv[]) {
           io.socket(NULL, SocketDomainIpv4, SocketTypeTcp, &listen_socket);
       assert(ErrNone == err_socket);
       puts("opened socket");
+    }
+
+    {
+      const Ipv4Addr addr = {.port = 12345, .ip = 0};
+      Error err_bind = io.tcp_bind_ipv4(NULL, listen_socket, addr);
+      assert(ErrNone == err_bind);
+      puts("socket bound");
     }
 
     {
