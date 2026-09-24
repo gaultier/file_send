@@ -1036,13 +1036,12 @@ static void sha256_init(Sha256Ctx *ctx) {
   };
 }
 
-static void sha256_update(Sha256Ctx *ctx, Slice_u8 data) {
+static void sha256_update(Sha256Ctx *ctx, u8 *data, usize len) {
   assert(ctx);
   assert(data.data || 0 == data.len);
   assert(ctx->partial_len < SHA256_CBLOCK);
 
-  const u8 *remaining = data.data;
-  usize len = data.len;
+  const u8 *remaining = data;
   ctx->len += len;
 
   // Top up a partial block from a previous call first. It is only compressed
@@ -1092,13 +1091,13 @@ static void sha256_final(Sha256Ctx *ctx, u8 res[SHA256_DIGEST_LENGTH]) {
       len_mod < 56 ? 56 - len_mod : 56 + SHA256_CBLOCK - len_mod;
 
   u8 padding[SHA256_CBLOCK] = {0x80};
-  sha256_update(ctx, slice_u8_make(padding, padding_len));
+  sha256_update(ctx, padding_len);
 
   u8 len_bytes[8] = {0};
   for (usize i = 0; i < 8; i++) {
     len_bytes[i] = (u8)(len_bits >> (56 - 8 * i));
   }
-  sha256_update(ctx, slice_u8_make(len_bytes, sizeof(len_bytes)));
+  sha256_update(ctx, len_bytes, sizeof(len_bytes));
   assert(0 == ctx->partial_len);
 
   for (usize i = 0; i < 8; i++) {
@@ -1108,11 +1107,11 @@ static void sha256_final(Sha256Ctx *ctx, u8 res[SHA256_DIGEST_LENGTH]) {
   *ctx = (Sha256Ctx){0};
 }
 
-static void sha256_digest(Slice_u8 data, u8 res[SHA256_DIGEST_LENGTH]) {
+static void sha256_digest(Slice_u8 data, u8 dst[SHA256_DIGEST_LENGTH]) {
   Sha256Ctx sha = {0};
   sha256_init(&sha);
-  sha256_update(&sha, data);
-  sha256_final(&sha, res);
+  sha256_update(&sha, data.data, data.len);
+  sha256_final(&sha, dst);
 }
 
 static void sha256_print_hex(const u8 digest[SHA256_DIGEST_LENGTH]) {
@@ -1126,8 +1125,21 @@ static void sha256_print_hex(const u8 digest[SHA256_DIGEST_LENGTH]) {
   }
 }
 
+static void sha256_digest_pair(u8 left[SHA256_DIGEST_LENGTH],
+                               u8 right[SHA256_DIGEST_LENGTH],
+                               u8 dst[SHA256_DIGEST_LENGTH]) {
+  Sha256Ctx sha = {0};
+  sha256_init(&sha);
+  sha256_update(&sha, left, sizeof(SHA256_DIGEST_LENGTH));
+  sha256_update(&sha, right, sizeof(SHA256_DIGEST_LENGTH));
+  sha256_final(&sha, dst);
+}
+
 static const usize TORRENT_BLOCK_SIZE = 16 * KiB;
 // static const usize TORRENT_PIECES_PER_BLOCK = 16;
+
+__attribute((warn_unused_result)) static bool
+torrent_build_merkle_sub_tree(Slice_u8 data, u8 out[SHA256_DIGEST_LENGTH]) {}
 
 __attribute((warn_unused_result)) static bool
 torrent_build_merkle_tree(Slice_u8 data, PieceHash **piece_hashes,
