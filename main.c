@@ -37,10 +37,6 @@ static const usize MiB = 1024 * KiB;
 
 #define SHA256_DIGEST_LENGTH 32
 
-typedef struct {
-  u8 digest[SHA256_DIGEST_LENGTH];
-} PieceHash;
-
 __attribute__((warn_unused_result)) static bool char_is_digit_ascii(u8 c) {
   return '0' <= c && c <= '9';
 }
@@ -1256,6 +1252,10 @@ static const usize TORRENT_BLOCK_SIZE = 16 * KiB;
 // Arbitrary, only needs to be a byte pattern the tree cannot produce on
 // its own. See the post condition in `torrent_build_merkle_tree`.
 #define MERKLE_PIECE_POISON 0xAA
+
+typedef struct {
+  u8 digest[SHA256_DIGEST_LENGTH];
+} PieceHash;
 
 // Everything about a file's merkle tree that does not vary from node to node.
 // Built once by `torrent_build_merkle_tree` and passed down by pointer: the
