@@ -408,6 +408,80 @@ __attribute((warn_unused_result)) static bool ascii_num_parse(Slice_u8 *data,
   assert(0 && "unreachable");
 }
 
+__attribute__((warn_unused_result)) static bool slice_u8_is_empty(Slice_u8 s) {
+  return NULL == s.data || 0 == s.len;
+}
+
+__attribute__((warn_unused_result)) static bool
+slice_u8_contains_byte(Slice_u8 s, u8 byte) {
+  if (slice_u8_is_empty(s)) {
+    return false;
+  }
+
+  assert(s.data);
+
+  return NULL != memchr(s.data, byte, s.len);
+}
+
+__attribute__((warn_unused_result)) static bool slice_u8_eq_cstr(Slice_u8 s,
+                                                                 char *cstr) {
+  if (!cstr) {
+    return slice_u8_is_empty(s);
+  }
+
+  const usize cstr_len = strlen(cstr);
+
+  if (cstr_len != s.len) {
+    return false;
+  }
+
+  assert(s.data);
+  assert(s.len > 0);
+  assert(cstr_len > 0);
+  assert(cstr_len == s.len);
+
+  return 0 == memcmp(s.data, cstr, s.len);
+}
+
+// Inspired by https://pkg.go.dev/path/filepath#Base
+__attribute__((warn_unused_result)) static Slice_u8
+unix_path_last_component(Slice_u8 path) {
+  //  If the path is empty, Base returns ".".
+  if (slice_u8_is_empty(path)) {
+    return (Slice_u8){.data = (u8 *)".", .len = 1};
+  }
+
+  //  Trailing path separators are removed before extracting the last element.
+  while (!slice_u8_is_empty(path)) {
+    if ('/' == path.data[path.len - 1]) {
+      path.len -= 1;
+    } else {
+      break;
+    }
+  }
+
+  //  If the path is empty, Base returns ".".
+  if (slice_u8_is_empty(path)) {
+    return (Slice_u8){.data = (u8 *)".", .len = 1};
+  }
+
+  for (isize i = path.len - 1; i >= 0; i--) {
+    u8 c = path.data[i];
+    if ('/' == c) {
+      const Slice_u8 res = {.data = path.data + i + 1, .len = path.len - i - 1};
+      assert(!slice_u8_contains_byte(res, '/'));
+
+      if (slice_u8_eq_cstr(res, "..")) {
+        return (Slice_u8){0};
+      }
+
+      return res;
+    }
+  }
+
+  return path;
+}
+
 // `i123e`
 // `i-123e`
 //
@@ -3905,8 +3979,9 @@ int main(i32 argc, char *argv[]) {
         mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
     assert((void *)-1 != input_data);
 
-    Slice_u8 input = slice_u8_make((u8 *)input_data, (usize)st.st_size);
-    Slice_u8 file_name = {.data = (u8 *)argv[2], .len = strlen(argv[2])};
+    const Slice_u8 input = slice_u8_make((u8 *)input_data, (usize)st.st_size);
+    const Slice_u8 file_path = {.data = (u8 *)argv[2], .len = strlen(argv[2])};
+    const Slice_u8 file_name = unix_path_last_component(file_path);
     Arena arena = arena_valloc(32 * MiB);
 
     Slice_u8 name = {.data = (u8 *)"test", .len = 4};
