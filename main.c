@@ -280,6 +280,9 @@ slice_u8_consume(Slice_u8 *slice, u8 expected) {
 // of zero, an unsupported protection, a socket option that does not apply.
 __attribute__((warn_unused_result)) static Error unix_error_from_errno(i32 e) {
   switch (e) {
+  case 0:
+    return ErrNone;
+
   case EACCES:
   case EPERM:
     return ErrOSPermission;
@@ -586,6 +589,19 @@ __attribute__((warn_unused_result)) static Error unix_close(void *ctx, i32 fd) {
   return ErrNone;
 }
 
+__attribute__((warn_unused_result)) static Error
+unix_enable_socket_reuse(void *ctx, i32 fd) {
+  (void)ctx;
+
+  int val = 1;
+  int ret = 0;
+  do {
+    ret = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val));
+  } while (-1 == ret && EINTR == errno);
+
+  return unix_error_from_errno(ret);
+}
+
 // ---------- IO ----------
 
 typedef struct {
@@ -597,6 +613,7 @@ typedef struct {
                   Ipv4Addr *dst_accept_addr);
   Error (*thread_create)(void *ctx, ThreadCallback cb);
   Error (*close)(void *ctx, i32 fd);
+  Error (*enable_socket_reuse)(void *ctx, i32 fd);
 } IO;
 
 __attribute__((warn_unused_result)) static IO io_unix_make(void) {
@@ -608,6 +625,7 @@ __attribute__((warn_unused_result)) static IO io_unix_make(void) {
       .accept = unix_accept,
       .thread_create = unix_thread_create,
       .close = unix_close,
+      .enable_socket_reuse = unix_enable_socket_reuse,
   };
 }
 
@@ -628,6 +646,13 @@ io_listen_and_serve_tcp_ipv4(const IO *io, void *ctx, Ipv4Addr listen_addr,
       return err_socket;
     }
     puts("opened socket");
+  }
+  {
+    const Error err_reuse = io->enable_socket_reuse(ctx, listen_socket);
+
+    if (ErrNone != err_reuse) {
+      return err_reuse;
+    }
   }
 
   {
