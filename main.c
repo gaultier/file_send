@@ -44,39 +44,6 @@ typedef struct {
   u8 *end;
 } Arena;
 
-typedef struct {
-  usize len;
-  u8 *data;
-} Slice_u8;
-
-typedef enum {
-  BencodeKindInteger,
-  BencodeKindString,
-  BencodeKindList,
-  BencodeKindDict,
-} BencodeKind;
-
-typedef struct BencodeValue BencodeValue;
-
-typedef struct {
-  bool is_list;
-  usize children_start;
-} BencodeContainer;
-
-typedef struct {
-  usize len;
-  BencodeValue *data;
-} BencodeList;
-
-struct BencodeValue {
-  BencodeKind kind;
-  union {
-    isize num;        // Integer
-    Slice_u8 s;       // String
-    BencodeList list; // List or Dict (stored as contiguous key-value pairs)
-  } v;
-};
-
 #define SHA256_DIGEST_LENGTH 32
 
 typedef struct {
@@ -151,6 +118,12 @@ arena_from_mem(u8 *mem, usize bytes_count) {
 }
 
 // ---------- Slice_u8 ----------
+
+typedef struct {
+  usize len;
+  u8 *data;
+} Slice_u8;
+
 __attribute__((warn_unused_result)) static bool slice_u8_is_empty(Slice_u8 s) {
   return NULL == s.data || 0 == s.len;
 }
@@ -492,6 +465,33 @@ __attribute__((warn_unused_result)) static bool ascii_num_parse(Slice_u8 *data,
 }
 
 // ---------- Bencode ----------
+typedef enum {
+  BencodeKindInteger,
+  BencodeKindString,
+  BencodeKindList,
+  BencodeKindDict,
+} BencodeKind;
+
+typedef struct BencodeValue BencodeValue;
+
+typedef struct {
+  bool is_list;
+  usize children_start;
+} BencodeContainer;
+
+typedef struct {
+  usize len;
+  BencodeValue *data;
+} BencodeList;
+
+struct BencodeValue {
+  BencodeKind kind;
+  union {
+    isize num;        // Integer
+    Slice_u8 s;       // String
+    BencodeList list; // List or Dict (stored as contiguous key-value pairs)
+  } v;
+};
 
 // `i123e`
 // `i-123e`
