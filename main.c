@@ -1138,12 +1138,19 @@ static void sha256_digest_pair(u8 left[SHA256_DIGEST_LENGTH],
 static const usize TORRENT_BLOCK_SIZE = 16 * KiB;
 // static const usize TORRENT_PIECES_PER_BLOCK = 16;
 
+// `data`: file data to be hashed.
+// `first_leaf`:
+// `blocks_count`: total block count, constant (per file).
+// `height`: Current height in the tree.
 // `height == 0`: root.
+// `height == max_height`: leaf.
+// `out`: resulting SHA256 hash for the subtree.
 static void torrent_build_merkle_sub_tree(Slice_u8 data, usize first_leaf,
                                           usize blocks_count, usize height,
                                           u8 out[SHA256_DIGEST_LENGTH]) {
   assert(out);
   assert(blocks_count > 0);
+  assert(is_power_of_two(blocks_count));
   const usize max_height = (usize)__builtin_ctzll(blocks_count);
   assert(height <= max_height);
 
