@@ -9,8 +9,10 @@ CFLAGS="-fpie -fno-omit-frame-pointer -gsplit-dwarf -march=native -std=c99 -Wall
 -Wunused-macros -Wbad-function-cast -Winit-self -Walloca
 -Wunreachable-code -Wfloat-equal"
 
-clang $CFLAGS -O0 -fsanitize=address,undefined -fno-sanitize-recover=all -o a.out.san main.c
+CC="${CC:-clang}"
+
+"$CC" $CFLAGS -O0 -fsanitize=address,undefined -fno-sanitize-recover=all -o a.out.san main.c
 time ./a.out.san "$@"
 
-clang $CFLAGS -o a.out main.c
+"$CC" $CFLAGS -o a.out main.c
 time ./a.out "$@"
