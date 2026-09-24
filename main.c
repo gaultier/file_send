@@ -830,12 +830,12 @@ static void bencode_print(BencodeValue v, usize indent) {
     break;
 
   case BencodeKindString:
-    // A negative `%.*s` precision is "as if omitted" (C99 7.19.6.1), which
-    // would print until a NUL and read straight past the slice. A string
-    // that long can only come from a >2GiB input, so refuse rather than
-    // silently truncate.
-    assert(v.v.s.len <= INT_MAX);
-    printf("\"%.*s\"", (i32)v.v.s.len, v.v.s.data);
+    // Bencode strings are arbitrary bytes, and `%s` would stop at the first
+    // NUL however large a precision it is given, so the bytes go out through
+    // `fwrite` instead.
+    printf("\"");
+    assert(v.v.s.len == fwrite(v.v.s.data, 1, v.v.s.len, stdout));
+    printf("\"");
     break;
 
   case BencodeKindDict:
@@ -1468,15 +1468,19 @@ torrent_build_merkle_tree(Slice_u8 data, usize piece_length_in_bytes,
 }
 
 __attribute__((warn_unused_result)) static bool torrent_make_metainfo_dict_v2(
-    Slice_u8 file_name, Slice_u8 announce_url, BencodeList info_dict,
-    PieceHash *const piece_hashes, usize piece_hashes_count, BencodeValue *dst,
+    Slice_u8 pieces_root, Slice_u8 announce_url, BencodeList info_dict,
+    const PieceHash *piece_hashes, usize piece_hashes_count, BencodeValue *dst,
     Arena *arena) {
   assert(!slice_u8_is_empty(announce_url));
   assert(info_dict.len > 0);
+  assert(SHA256_DIGEST_LENGTH == pieces_root.len);
   assert(dst);
   assert(arena);
 
-  const usize kv_count = piece_hashes_count > 0 ? 3 : 2;
+  // `piece layers` is always present, even with nothing in it: a file that
+  // fits in a single piece has no layer, and the key is still emitted as an
+  // empty dict.
+  const usize kv_count = 3;
 
   dst->kind = BencodeKindDict;
   dst->v.list.len = 2 * kv_count;
@@ -1507,10 +1511,8 @@ __attribute__((warn_unused_result)) static bool torrent_make_metainfo_dict_v2(
     dst->v.list.data[3].v.list = info_dict;
   }
 
-  // `metainfo["pieces layer"] = {}`
-  if (piece_hashes_count > 0) {
-    assert(piece_hashes);
-    assert(3 == kv_count);
+  // `metainfo["piece layers"] = {}`
+  {
     assert(dst->v.list.len == 2 * kv_count);
 
     BencodeValue *const pieces_key = &dst->v.list.data[4];
@@ -1520,6 +1522,15 @@ __attribute__((warn_unused_result)) static bool torrent_make_metainfo_dict_v2(
 
     BencodeValue *const pieces_value = &dst->v.list.data[5];
     pieces_value->kind = BencodeKindDict;
+
+    // A file that fits in a single piece gets no entry at all, per BEP 52,
+    // which leaves the dict empty.
+    if (0 == piece_hashes_count) {
+      pieces_value->v.list = (BencodeList){0};
+      return true;
+    }
+
+    assert(piece_hashes);
     pieces_value->v.list.len = 2;
     pieces_value->v.list.data =
         arena_alloc(arena, __alignof__(BencodeValue), sizeof(BencodeValue),
@@ -1528,23 +1539,26 @@ __attribute__((warn_unused_result)) static bool torrent_make_metainfo_dict_v2(
       return false;
     }
 
-    // `metainfo["pieces layer"][file_name] = pices_hashes`
+    // `metainfo["piece layers"][pieces_root] = piece_hashes`
+    //
+    // Keyed by the merkle root, not by the file name: that is what ties a
+    // layer back to its file across the whole torrent, and it is what every
+    // other client looks up.
     {
-      BencodeValue *const file_name_key = &pieces_value->v.list.data[0];
-      file_name_key->kind = BencodeKindString;
-      file_name_key->v.s = file_name;
+      BencodeValue *const layer_key = &pieces_value->v.list.data[0];
+      layer_key->kind = BencodeKindString;
+      layer_key->v.s = pieces_root;
 
-      BencodeValue *const file_name_value = &pieces_value->v.list.data[1];
-      file_name_value->kind = BencodeKindString;
-      file_name_value->v.s.len = piece_hashes_count * SHA256_DIGEST_LENGTH;
-      file_name_value->v.s.data =
-          arena_alloc(arena, __alignof__(BencodeValue), sizeof(BencodeValue),
-                      file_name_value->v.s.len);
-      if (!file_name_value->v.s.data) {
+      BencodeValue *const layer_value = &pieces_value->v.list.data[1];
+      layer_value->kind = BencodeKindString;
+      layer_value->v.s.len = piece_hashes_count * SHA256_DIGEST_LENGTH;
+      layer_value->v.s.data =
+          arena_alloc(arena, __alignof__(u8), sizeof(u8), layer_value->v.s.len);
+      if (!layer_value->v.s.data) {
         return false;
       }
 
-      memcpy(file_name_value->v.s.data, piece_hashes, file_name_value->v.s.len);
+      memcpy(layer_value->v.s.data, piece_hashes, layer_value->v.s.len);
     }
   }
 
@@ -1553,16 +1567,17 @@ __attribute__((warn_unused_result)) static bool torrent_make_metainfo_dict_v2(
 
 __attribute__((warn_unused_result)) static bool torrent_make_info_dict_v2(
     Slice_u8 name, usize piece_length_in_bytes, Slice_u8 file_data,
-    Slice_u8 file_name, BencodeValue *dst_info_dict,
+    Slice_u8 file_name, BencodeValue *dst_info_dict, Slice_u8 *dst_pieces_root,
     PieceHash **dst_piece_hashes, usize *dst_piece_hashes_count, Arena *arena) {
   assert(piece_length_in_bytes >= 16 * KiB);      // Per spec.
   assert(is_power_of_two(piece_length_in_bytes)); // Per spec.
   assert(dst_info_dict);
+  assert(dst_pieces_root);
   assert(dst_piece_hashes);
   assert(dst_piece_hashes_count);
-  assert(dst_info_dict);
   assert(arena);
 
+  *dst_pieces_root = (Slice_u8){0};
   *dst_piece_hashes = NULL;
   *dst_piece_hashes_count = 0;
 
@@ -1704,6 +1719,10 @@ __attribute__((warn_unused_result)) static bool torrent_make_info_dict_v2(
             return false;
           }
           memcpy(pieces_root_value->v.s.data, root, SHA256_DIGEST_LENGTH);
+
+          // `piece layers` is keyed by this exact digest, so hand it back
+          // rather than making the caller dig it out of the tree.
+          *dst_pieces_root = pieces_root_value->v.s;
         }
       }
     }
@@ -3916,9 +3935,10 @@ static void test_bencode_encode_torrent_info(void) {
   BencodeValue info = {0};
   PieceHash *piece_hashes = NULL;
   usize piece_hashes_count = 0;
+  Slice_u8 pieces_root_slice = {0};
   assert(torrent_make_info_dict_v2(
       name, 16 * TORRENT_BLOCK_SIZE, slice_u8_make(file_data, file_len), name,
-      &info, &piece_hashes, &piece_hashes_count, &arena));
+      &info, &pieces_root_slice, &piece_hashes, &piece_hashes_count, &arena));
 
   const usize cap = bencode_encode_exact_size(info, 0);
   Slice_u8 dst = {.data = arena_alloc(&arena, __alignof__(u8), sizeof(u8), cap),
@@ -3962,6 +3982,209 @@ static void test_bencode_encode_torrent_info(void) {
 
 // The vector block function must be indistinguishable from the scalar one, so
 // compare them directly rather than only through the public digest: a
+// Decode a run of concatenated hex digests, the form `piece layers` values are
+// published in. `test_digest_from_hex` takes exactly one digest, so feed it
+// one 64 character window at a time.
+static void test_digests_from_hex(const char *hex, Slice_u8 dst) {
+  assert(hex);
+  assert(0 == dst.len % SHA256_DIGEST_LENGTH);
+  assert(2 * dst.len == strlen(hex));
+
+  for (usize i = 0; i < dst.len / SHA256_DIGEST_LENGTH; i++) {
+    char one[2 * SHA256_DIGEST_LENGTH + 1] = {0};
+    memcpy(one, hex + i * 2 * SHA256_DIGEST_LENGTH, 2 * SHA256_DIGEST_LENGTH);
+    test_digest_from_hex(one, dst.data + i * SHA256_DIGEST_LENGTH);
+  }
+}
+
+// Is `needle` present in `haystack`? `memmem` is not C99, and an empty needle
+// is not a question this asks.
+__attribute__((warn_unused_result)) static bool
+test_slice_contains(Slice_u8 haystack, Slice_u8 needle) {
+  assert(!slice_u8_is_empty(needle));
+
+  if (needle.len > haystack.len) {
+    return false;
+  }
+
+  for (usize i = 0; i + needle.len <= haystack.len; i++) {
+    if (0 == memcmp(haystack.data + i, needle.data, needle.len)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+// One case of `torrent_make_metainfo_dict_v2`: build the info dict for a file
+// of `file_len` bytes of 'x', wrap it, and check the result against vectors
+// generated with libtorrent 2.1.1 from byte-identical input.
+//
+// `expected_layer_hex` is empty for a file that fits in a single piece, which
+// BEP 52 gives no piece layer at all.
+static void test_torrent_metainfo_once(usize file_len,
+                                       const char *expected_root_hex,
+                                       const char *expected_infohash_hex,
+                                       const char *expected_layer_hex) {
+  Arena arena = test_arena(16 * MiB);
+  const Arena scratch = test_arena(16 * MiB);
+
+  u8 *const file_data =
+      arena_alloc(&arena, __alignof__(u8), sizeof(u8), file_len);
+  assert(file_data);
+  memset(file_data, 'x', file_len);
+
+  const Slice_u8 name = test_slice("f.bin");
+  const Slice_u8 announce = test_slice("http://localhost:12345");
+
+  BencodeValue info = {0};
+  Slice_u8 pieces_root = {0};
+  PieceHash *piece_hashes = NULL;
+  usize piece_hashes_count = 0;
+  assert(torrent_make_info_dict_v2(
+      name, 16 * TORRENT_BLOCK_SIZE, slice_u8_make(file_data, file_len), name,
+      &info, &pieces_root, &piece_hashes, &piece_hashes_count, &arena));
+
+  // The root the info dict publishes is the one libtorrent computes.
+  u8 expected_root[SHA256_DIGEST_LENGTH] = {0};
+  test_digest_from_hex(expected_root_hex, expected_root);
+  assert(SHA256_DIGEST_LENGTH == pieces_root.len);
+  assert(0 == memcmp(pieces_root.data, expected_root, sizeof(expected_root)));
+
+  const usize expected_layer_len = strlen(expected_layer_hex) / 2;
+  assert(piece_hashes_count * SHA256_DIGEST_LENGTH == expected_layer_len);
+
+  BencodeValue metainfo = {0};
+  assert(torrent_make_metainfo_dict_v2(pieces_root, announce, info.v.list,
+                                       piece_hashes, piece_hashes_count,
+                                       &metainfo, &arena));
+
+  // Three keys, in the order bencode requires: announce < info < piece layers.
+  assert(BencodeKindDict == metainfo.kind);
+  assert(2 * 3 == metainfo.v.list.len);
+  assert(test_bencode_is_string(metainfo.v.list.data[0], "announce"));
+  assert(test_bencode_is_string(metainfo.v.list.data[2], "info"));
+  assert(test_bencode_is_string(metainfo.v.list.data[4], "piece layers"));
+
+  const BencodeValue announce_value = metainfo.v.list.data[1];
+  assert(BencodeKindString == announce_value.kind);
+  assert(announce.len == announce_value.v.s.len);
+  assert(0 == memcmp(announce_value.v.s.data, announce.data, announce.len));
+
+  // `info` is nested by value: the same tree, not a re-encoding of it.
+  const BencodeValue info_value = metainfo.v.list.data[3];
+  assert(BencodeKindDict == info_value.kind);
+  assert(info.v.list.len == info_value.v.list.len);
+  assert(info.v.list.data == info_value.v.list.data);
+
+  const BencodeValue layers = metainfo.v.list.data[5];
+  assert(BencodeKindDict == layers.kind);
+
+  if (0 == expected_layer_len) {
+    // A single piece file gets no layer, but the key is emitted regardless.
+    assert(0 == piece_hashes_count);
+    assert(0 == layers.v.list.len);
+    assert(NULL == layers.v.list.data);
+  } else {
+    assert(2 == layers.v.list.len);
+
+    // Keyed by the merkle root. Emphatically not by the file name: that is
+    // the mistake this pins down, and it is invisible in a hex dump.
+    const BencodeValue layer_key = layers.v.list.data[0];
+    assert(BencodeKindString == layer_key.kind);
+    assert(SHA256_DIGEST_LENGTH == layer_key.v.s.len);
+    assert(0 ==
+           memcmp(layer_key.v.s.data, expected_root, SHA256_DIGEST_LENGTH));
+    assert(!slice_u8_eq_cstr(layer_key.v.s, "f.bin"));
+
+    const BencodeValue layer_value = layers.v.list.data[1];
+    assert(BencodeKindString == layer_value.kind);
+    assert(expected_layer_len == layer_value.v.s.len);
+
+    Slice_u8 expected_layer = {.data =
+                                   arena_alloc(&arena, __alignof__(u8),
+                                               sizeof(u8), expected_layer_len),
+                               .len = expected_layer_len};
+    assert(expected_layer.data);
+    test_digests_from_hex(expected_layer_hex, expected_layer);
+    assert(0 == memcmp(layer_value.v.s.data, expected_layer.data,
+                       expected_layer_len));
+
+    // And it is exactly the piece hashes the merkle build handed over,
+    // concatenated, in order, with nothing inserted between them.
+    assert(0 == memcmp(layer_value.v.s.data, piece_hashes, expected_layer_len));
+  }
+
+  // The infohash is over the info dict alone, so encoding it on its own and
+  // then finding those exact bytes inside the metainfo encoding is the
+  // property everything downstream depends on: nesting must not perturb them.
+  Slice_u8 info_encoded = {0};
+  assert(bencode_encode(info, &info_encoded, &arena));
+
+  u8 infohash[SHA256_DIGEST_LENGTH] = {0};
+  sha256_digest(info_encoded, infohash);
+  u8 expected_infohash[SHA256_DIGEST_LENGTH] = {0};
+  test_digest_from_hex(expected_infohash_hex, expected_infohash);
+  assert(0 == memcmp(infohash, expected_infohash, sizeof(infohash)));
+
+  Slice_u8 metainfo_encoded = {0};
+  assert(bencode_encode(metainfo, &metainfo_encoded, &arena));
+  assert(metainfo_encoded.len > info_encoded.len);
+  assert(test_slice_contains(metainfo_encoded, info_encoded));
+
+  // The envelope is what it claims to be, and an empty layer dict really does
+  // encode as the two bytes `de` rather than vanishing.
+  const char *const prefix = "d8:announce22:http://localhost:123454:infod";
+  assert(metainfo_encoded.len > strlen(prefix));
+  assert(0 == memcmp(metainfo_encoded.data, prefix, strlen(prefix)));
+  const char *const suffix =
+      0 == expected_layer_len ? "12:piece layersdee" : "ee";
+  assert(metainfo_encoded.len > strlen(suffix));
+  assert(0 ==
+         memcmp(metainfo_encoded.data + metainfo_encoded.len - strlen(suffix),
+                suffix, strlen(suffix)));
+
+  // Re-parsing is the ordering check. `bencode_parse` validates that each
+  // dict's keys are sorted and unique as it closes, which the encoder itself
+  // never does, so a mis-ordered key only ever shows up here.
+  Slice_u8 to_parse = metainfo_encoded;
+  BencodeValue reparsed = {0};
+  assert(bencode_parse(&to_parse, &arena, scratch, &reparsed));
+  assert(0 == to_parse.len);
+  assert(BencodeKindDict == reparsed.kind);
+  assert(2 * 3 == reparsed.v.list.len);
+}
+
+static void test_torrent_metainfo_v2(void) {
+  // Two full pieces plus a short one. Three pieces is deliberately not a power
+  // of two: the tree pads its piece layer out to four, and BEP 52 publishes
+  // only the three that cover real data, so a layer handed over at the padded
+  // width fails here and nowhere else.
+  test_torrent_metainfo_once(
+      2 * 16 * TORRENT_BLOCK_SIZE + 7,
+      "fab5fcffb2780746dc0870e6e1a4c850e5e6fc3e86a3081e3aceba534803482d",
+      "5761af1f00979ade4dc7f7306ecfa185f836f1b084fdbb2e4824815aa6adfc64",
+      "4f663eeec104d7af532a0e578b229bd1a65d120d4a50d34309a853d313c2767c"
+      "4f663eeec104d7af532a0e578b229bd1a65d120d4a50d34309a853d313c2767c"
+      "76622ce611630f1e7d0d2d20adb28631d45c276e33d91adef80c4ba69353d14e");
+
+  // Three full pieces plus a short one: four pieces, exercising a layer whose
+  // width happens to match the padded tree width.
+  test_torrent_metainfo_once(
+      3 * 16 * TORRENT_BLOCK_SIZE + 7,
+      "5c82a4b29ea8a563def0471f9eb5d0d75f5c949ab78fbd27afc6b064478f80e8",
+      "fe1071f8c428a5575aace7e5ec30bd3be04cfd1fcbbf0a8c7cf0864728359ddc",
+      "4f663eeec104d7af532a0e578b229bd1a65d120d4a50d34309a853d313c2767c"
+      "4f663eeec104d7af532a0e578b229bd1a65d120d4a50d34309a853d313c2767c"
+      "4f663eeec104d7af532a0e578b229bd1a65d120d4a50d34309a853d313c2767c"
+      "76622ce611630f1e7d0d2d20adb28631d45c276e33d91adef80c4ba69353d14e");
+
+  // Smaller than one piece: no layer, but `piece layers` is still emitted.
+  test_torrent_metainfo_once(
+      40960, "8431e3abfbd82a618e0b0c4113dff17b644df6bd102fd127df5bd7a531014b3a",
+      "e556ed46dace469f8f24053de5ad85478349c13544a4710b6d624454b85e1256", "");
+}
+
 // disagreement on one block is otherwise easy to miss behind a passing vector.
 static void test_sha256_neon_matches_scalar(void) {
 #if !SHA256_HAS_NEON
@@ -4138,6 +4361,7 @@ static void test(const char *filter) {
       {"bencode_encode_wide_dict", test_bencode_encode_wide_dict},
       {"bencode_encode_round_trip", test_bencode_encode_round_trip},
       {"bencode_encode_torrent_info", test_bencode_encode_torrent_info},
+      {"torrent_metainfo_v2", test_torrent_metainfo_v2},
   };
 
   usize run = 0;
@@ -4203,39 +4427,44 @@ int main(i32 argc, char *argv[]) {
     const Slice_u8 input = slice_u8_make((u8 *)input_data, (usize)st.st_size);
     const Slice_u8 file_path = {.data = (u8 *)argv[2], .len = strlen(argv[2])};
     const Slice_u8 file_name = unix_path_last_component(file_path);
-    Arena arena = arena_valloc(32 * MiB);
 
     BencodeValue info_dict = {0};
     PieceHash *piece_hashes = NULL;
     usize piece_hashes_count = 0;
-    assert(torrent_make_info_dict_v2(file_name, TORRENT_BLOCK_SIZE * 16, input,
-                                     file_name, &info_dict, &piece_hashes,
-                                     &piece_hashes_count, &arena));
+    Slice_u8 pieces_root = {0};
+    assert(torrent_make_info_dict_v2(
+        file_name, TORRENT_BLOCK_SIZE * 16, input, file_name, &info_dict,
+        &pieces_root, &piece_hashes, &piece_hashes_count, &arena));
 
     bencode_print(info_dict, 0);
     puts("");
 
     Slice_u8 info_dict_encoded = {0};
     assert(bencode_encode(info_dict, &info_dict_encoded, &arena));
-    assert(info_dict_encoded.len <= INT_MAX);
-    printf("info dict encoded: %.*s\n", (i32)info_dict_encoded.len,
-           info_dict_encoded.data);
+    // Bencode is binary: `%s` stops at the first NUL regardless of the
+    // precision given, so the bytes go out through `fwrite`.
+    printf("info dict encoded: ");
+    assert(info_dict_encoded.len ==
+           fwrite(info_dict_encoded.data, 1, info_dict_encoded.len, stdout));
+    puts("");
 
     BencodeValue metainfo_dict = {0};
     const char *const announce_url_cstr = "http://localhost:12345";
     Slice_u8 announce_url =
         slice_u8_make((u8 *)announce_url_cstr, strlen(announce_url_cstr));
     assert(torrent_make_metainfo_dict_v2(
-        file_name, announce_url, info_dict.v.list, piece_hashes,
+        pieces_root, announce_url, info_dict.v.list, piece_hashes,
         piece_hashes_count, &metainfo_dict, &arena));
     bencode_print(metainfo_dict, 0);
     puts("");
 
     Slice_u8 metainfo_dict_encoded = {0};
     assert(bencode_encode(metainfo_dict, &metainfo_dict_encoded, &arena));
-    assert(metainfo_dict_encoded.len <= INT_MAX);
-    printf("metainfo dict encoded: %.*s\n", (i32)metainfo_dict_encoded.len,
-           metainfo_dict_encoded.data);
+    printf("metainfo dict encoded: ");
+    assert(metainfo_dict_encoded.len == fwrite(metainfo_dict_encoded.data, 1,
+                                               metainfo_dict_encoded.len,
+                                               stdout));
+    puts("");
 
     const usize unused_bytes = (usize)arena.end - (usize)arena.start;
     const usize used_bytes = arena_cap - unused_bytes;
