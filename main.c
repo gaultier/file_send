@@ -1136,65 +1136,82 @@ static void sha256_digest_pair(u8 left[SHA256_DIGEST_LENGTH],
 }
 
 static const usize TORRENT_BLOCK_SIZE = 16 * KiB;
-// static const usize TORRENT_PIECES_PER_BLOCK = 16;
 
 // `data`: file data to be hashed.
 // `tree_width_idx`: index in the tree, bounded by the tree width.
-// `blocks_count`: total block count, constant (per file).
-// `height`: Current height in the tree.
-// `height == 0`: root.
-// `height == max_height`: leaf.
-// `out`: resulting SHA256 hash for the subtree.
+// `real_blocks_count`: total (not padded) block count, constant (per file).
+// `depth`: Current height in the tree.
+// `depth == 0`: root.
+// `depth == max_depth`: leaf.
+// `piece_length`: length in bytes of a piece, picked by the user/operator.
+// `dst_piece_hashes`: resulting SHA256 hash for each piece, needed by the info
+// dictionary.
+// `dst`: resulting SHA256 hash for the subtree.
 static void torrent_build_merkle_sub_tree(Slice_u8 data, usize tree_width_idx,
-                                          usize blocks_count, usize height,
-                                          u8 out[SHA256_DIGEST_LENGTH]) {
+                                          usize real_blocks_count, usize depth,
+                                          usize piece_length,
+                                          PieceHash *dst_piece_hashes,
+                                          u8 dst[SHA256_DIGEST_LENGTH]) {
   // TODO: assert(tree_width_idx < ...);
 
-  assert(blocks_count > 0);
-  assert(is_power_of_two(blocks_count));
+  assert(real_blocks_count > 0);
+  const usize padded_blocks_count = next_power_of_two(real_blocks_count);
 
-  const usize max_height = (usize)__builtin_ctzll(blocks_count);
-  assert(height <= max_height);
+  const usize max_depth = (usize)__builtin_ctzll(padded_blocks_count);
+  assert(depth <= max_depth);
 
-  assert(out);
+  assert(piece_length >= 16 * KiB);      // Per spec.
+  assert(is_power_of_two(piece_length)); // Per spec.
 
-  const bool is_leaf = max_height == height;
+  assert(dst_piece_hashes);
+
+  assert(dst);
+
+  const bool is_leaf = max_depth == depth;
 
   if (is_leaf) {
     // Need to hash the file data?
-    if (tree_width_idx < blocks_count) {
-      assert(tree_width_idx * TORRENT_BLOCK_SIZE < data.len);
-
+    if (tree_width_idx * TORRENT_BLOCK_SIZE < data.len) {
+      const usize remaining = data.len - tree_width_idx * TORRENT_BLOCK_SIZE;
       const Slice_u8 block_data = {
           .data = data.data + tree_width_idx * TORRENT_BLOCK_SIZE,
-          .len = tree_width_idx * TORRENT_BLOCK_SIZE
-                     ? TORRENT_BLOCK_SIZE
-                     : data.len - tree_width_idx * TORRENT_BLOCK_SIZE,
+          .len =
+              remaining >= TORRENT_BLOCK_SIZE ? TORRENT_BLOCK_SIZE : remaining,
       };
-      sha256_digest(block_data, out);
+      sha256_digest(block_data, dst);
       return;
     } else { // Padding block: all zeroes.
-      bzero(out, SHA256_DIGEST_LENGTH);
+      bzero(dst, SHA256_DIGEST_LENGTH);
       return;
     }
   }
 
   assert(!is_leaf);
+  const usize piece_depth = max_depth - (__builtin_ctzll(piece_length) - 14);
 
-  const usize new_height = height + 1;
-  assert(new_height <= max_height);
+  const usize new_depth = depth + 1;
+  assert(new_depth <= max_depth);
 
   u8 left[SHA256_DIGEST_LENGTH] = {0};
-  torrent_build_merkle_sub_tree(data,
-                                2 * tree_width_idx /* FIXME: check formula */,
-                                blocks_count, new_height, left);
+  torrent_build_merkle_sub_tree(data, 2 * tree_width_idx, real_blocks_count,
+                                new_depth, piece_length, dst_piece_hashes,
+                                left);
 
   u8 right[SHA256_DIGEST_LENGTH] = {0};
-  torrent_build_merkle_sub_tree(
-      data, 2 * tree_width_idx + 1 /* FIXME: check formula */, blocks_count,
-      new_height, right);
+  torrent_build_merkle_sub_tree(data, 2 * tree_width_idx + 1, real_blocks_count,
+                                new_depth, piece_length, dst_piece_hashes,
+                                right);
 
-  sha256_digest_pair(left, right, out);
+  sha256_digest_pair(left, right, dst);
+
+  const usize pieces_count =
+      piece_length * real_blocks_count / TORRENT_BLOCK_SIZE;
+  assert(pieces_count > 0);
+
+  // Record (real, not padding) piece hash?
+  if (piece_depth == depth && tree_width_idx < pieces_count) {
+    memcpy(dst_piece_hashes[tree_width_idx].digest, dst, SHA256_DIGEST_LENGTH);
+  }
 }
 
 __attribute((warn_unused_result)) static bool
