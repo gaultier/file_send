@@ -577,7 +577,7 @@ unix_thread_create(void *ctx, ThreadCallback cb) {
 __attribute__((warn_unused_result)) static Error unix_close(void *ctx, i32 fd) {
   (void)ctx;
 
-  i32 ret = close(fd);
+  const i32 ret = close(fd);
 
   if (-1 == ret) {
     return unix_error_from_errno(errno);
