@@ -35,8 +35,6 @@ typedef ssize_t isize;
 static const usize KiB = 1024;
 static const usize MiB = 1024 * KiB;
 
-#define SHA256_DIGEST_LENGTH 32
-
 __attribute__((warn_unused_result)) static bool char_is_digit_ascii(u8 c) {
   return '0' <= c && c <= '9';
 }
@@ -1184,6 +1182,8 @@ static void sha256_update(Sha256Ctx *ctx, const u8 *data, usize len) {
   }
   ctx->partial_len = (u32)len;
 }
+
+#define SHA256_DIGEST_LENGTH 32
 
 // `*ctx` is left zeroed, so it cannot be used again without another
 // `SHA256_Init`, and the chaining state of the message does not linger.
