@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <sys/wait.h>
@@ -395,6 +396,53 @@ unix_path_last_component(Slice_u8 path) {
   return path;
 }
 
+typedef enum {
+  SocketDomainIpv4,
+  // TODO: More.
+} SocketDomain;
+
+typedef enum { SocketTypeUdp, SocketTypeTcp } SocketType;
+
+__attribute__((warn_unused_result)) static Error
+unix_socket(SocketDomain domain, SocketType type, i32 *fd) {
+  assert(fd);
+
+  i32 unix_domain = 0;
+  switch (domain) {
+  case SocketDomainIpv4:
+    unix_domain = AF_INET;
+    break;
+  default:
+    assert(0 && "todo");
+  }
+
+  i32 unix_type = 0;
+  switch (type) {
+  case SocketTypeUdp:
+    unix_type = SOCK_DGRAM;
+    break;
+  case SocketTypeTcp:
+    unix_type = SOCK_STREAM;
+    break;
+  default:
+    assert(0 && "todo");
+  }
+
+  i32 ret = 0;
+  do {
+    ret = socket(unix_domain, unix_type, 0);
+  } while (-1 == ret && EINTR == errno);
+
+  if (-1 == ret) {
+    return unix_error_from_errno(errno);
+  }
+
+  *fd = ret;
+
+  return ErrNone;
+}
+
+// ---------- Misc ----------
 __attribute__((warn_unused_result)) static bool is_power_of_two(usize value) {
   return (value != 0) && ((value & (value - 1)) == 0);
 }
@@ -4682,6 +4730,11 @@ int main(i32 argc, char *argv[]) {
                                                metainfo_dict_encoded.len,
                                                stdout));
     puts("");
+
+    i32 socket_fd = 0;
+    Error err_socket = unix_socket(SocketDomainIpv4, SocketTypeTcp, &socket_fd);
+    assert(ErrNone == err_socket);
+    puts("opened socket");
 
     const usize unused_bytes = (usize)arena.end - (usize)arena.start;
     const usize used_bytes = arena_cap - unused_bytes;
