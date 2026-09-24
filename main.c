@@ -600,6 +600,48 @@ unix_enable_socket_reuse(void *ctx, i32 fd) {
   return ErrNone;
 }
 
+__attribute__((warn_unused_result)) static Error
+unix_read(void *ctx, i32 fd, u8 *buf, usize len, usize *dst_read) {
+  (void)ctx;
+
+  assert(dst_read);
+
+  isize ret = 0;
+  do {
+    ret = read(fd, buf, len);
+  } while (-1 == ret && EINTR == errno);
+
+  if (-1 == ret) {
+    return unix_error_from_errno(errno);
+  }
+
+  assert(ret >= 0);
+  *dst_read = (usize)ret;
+
+  return ErrNone;
+}
+
+__attribute__((warn_unused_result)) static Error
+unix_write(void *ctx, i32 fd, u8 *buf, usize len, usize *dst_written) {
+  (void)ctx;
+
+  assert(dst_written);
+
+  isize ret = 0;
+  do {
+    ret = write(fd, buf, len);
+  } while (-1 == ret && EINTR == errno);
+
+  if (-1 == ret) {
+    return unix_error_from_errno(errno);
+  }
+
+  assert(ret >= 0);
+  *dst_written = (usize)ret;
+
+  return ErrNone;
+}
+
 // ---------- IO ----------
 
 typedef struct {
@@ -612,6 +654,8 @@ typedef struct {
   Error (*thread_create)(void *ctx, ThreadCallback cb);
   Error (*close)(void *ctx, i32 fd);
   Error (*enable_socket_reuse)(void *ctx, i32 fd);
+  Error (*read)(void *ctx, i32 fd, u8 *buf, usize len, usize *dst_read);
+  Error (*write)(void *ctx, i32 fd, u8 *buf, usize len, usize *dst_written);
 } IO;
 
 __attribute__((warn_unused_result)) static IO io_unix_make(void) {
@@ -624,6 +668,8 @@ __attribute__((warn_unused_result)) static IO io_unix_make(void) {
       .thread_create = unix_thread_create,
       .close = unix_close,
       .enable_socket_reuse = unix_enable_socket_reuse,
+      .read = unix_read,
+      .write = unix_write,
   };
 }
 
@@ -4914,12 +4960,22 @@ static void *torrent_client_handle(void *vctx) {
   assert(vctx);
 
   TorrentClientHandleCtx *const ctx = vctx;
+  assert(ctx->io);
 
   printf("torrent_client_handle");
   const u32 ip = ctx->addr.ip;
   printf("accepted: %u.%u.%u.%u:%hu\n", ip >> 24 & 0xff, ip >> 16 & 0xff,
          ip >> 8 & 0xff, ip >> 0 & 0xff, ctx->addr.port);
 
+  const char msg[] = "hello, world!";
+  usize written = 0;
+  Error err_write = ctx->io->write(ctx->ctx, ctx->socket, (u8 *)msg,
+                                   sizeof(msg) - 1, &written);
+  if (ErrNone == err_write) {
+    goto end;
+  }
+
+end:
   (void)ctx->io->close(ctx->ctx, ctx->socket);
 
   puts("torrent_client_handle end");
