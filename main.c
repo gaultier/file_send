@@ -1503,14 +1503,21 @@ __attribute__((warn_unused_result)) static bool torrent_make_metainfo_dict_v2(
   return true;
 }
 
-__attribute__((warn_unused_result)) static bool
-torrent_make_info_dict_v2(Slice_u8 name, usize piece_length_in_bytes,
-                          Slice_u8 file_data, Slice_u8 file_name,
-                          BencodeValue *dst_info_dict, Arena *arena) {
+__attribute__((warn_unused_result)) static bool torrent_make_info_dict_v2(
+    Slice_u8 name, usize piece_length_in_bytes, Slice_u8 file_data,
+    Slice_u8 file_name, BencodeValue *dst_info_dict,
+    PieceHash **dst_piece_hashes, usize *dst_piece_hashes_count, Arena *arena) {
   assert(piece_length_in_bytes >= 16 * KiB);      // Per spec.
   assert(is_power_of_two(piece_length_in_bytes)); // Per spec.
   assert(dst_info_dict);
+  assert(dst_piece_hashes);
+  assert(dst_piece_hashes_count);
+  assert(dst_info_dict);
   assert(arena);
+
+  *dst_piece_hashes = NULL;
+  *dst_piece_hashes_count = 0;
+
   const usize dict_items_count = 4;
   *dst_info_dict = (BencodeValue){
       .kind = BencodeKindDict,
@@ -1521,9 +1528,6 @@ torrent_make_info_dict_v2(Slice_u8 name, usize piece_length_in_bytes,
   if (NULL == dst_info_dict->v.list.data) {
     return false;
   }
-
-  PieceHash *piece_hashes = NULL;
-  usize piece_hashes_count = 0;
 
   // `info["name"] = name`
   {
@@ -1570,15 +1574,15 @@ torrent_make_info_dict_v2(Slice_u8 name, usize piece_length_in_bytes,
 
     u8 root[SHA256_DIGEST_LENGTH] = {0};
     if (!torrent_build_merkle_tree(file_data, piece_length_in_bytes,
-                                   &piece_hashes, &piece_hashes_count, root,
-                                   arena)) {
+                                   dst_piece_hashes, dst_piece_hashes_count,
+                                   root, arena)) {
       return false;
     }
     // If the file data does not fit within one piece, then the piece layer is
     // required (per spec).
     if (file_data.len > piece_length_in_bytes) {
-      assert(piece_hashes);
-      assert(piece_hashes_count > 0);
+      assert(*dst_piece_hashes);
+      assert(*dst_piece_hashes_count > 0);
     }
 
     BencodeValue *const file_tree_dict = &dst_info_dict->v.list.data[1];
@@ -1657,14 +1661,6 @@ torrent_make_info_dict_v2(Slice_u8 name, usize piece_length_in_bytes,
     }
   }
 
-  // FIXME: Hardcoded values.
-  BencodeValue metainfo_dict = {0};
-  const char *const announce_url_cstr = "http://localhost:12345";
-  Slice_u8 announce_url =
-      slice_u8_make((u8 *)announce_url_cstr, strlen(announce_url_cstr));
-  assert(torrent_make_metainfo_dict_v2(announce_url, dst_info_dict->v.list,
-                                       piece_hashes, piece_hashes_count,
-                                       &metainfo_dict, arena));
   return true;
 }
 
@@ -1836,14 +1832,35 @@ bencode_encode_rec(BencodeValue b, Slice_u8 dst, usize depth) {
 // rather than sufficiency costs nothing and buys the check below: the two
 // passes are compared without walking the tree a third time, and the
 // recursion cannot scribble into slack it was never given.
-__attribute__((warn_unused_result)) static usize bencode_encode(BencodeValue b,
-                                                                Slice_u8 dst) {
+__attribute__((warn_unused_result)) static usize
+bencode_encode_in_place(BencodeValue b, Slice_u8 dst) {
   assert(dst.data);
 
   const usize written = bencode_encode_rec(b, dst, 0);
   assert(dst.len == written);
 
   return written;
+}
+
+__attribute__((warn_unused_result)) static usize
+bencode_encode(BencodeValue b, Slice_u8 *dst, Arena *arena) {
+  assert(dst);
+  assert(arena);
+
+  const usize size = bencode_encode_exact_size(b, 0);
+
+  *dst =
+      (Slice_u8){.data = arena_alloc(arena, __alignof__(u8), sizeof(u8), size),
+                 .len = size};
+  if (!dst->data) {
+    return false;
+  }
+
+  const usize written = bencode_encode_in_place(b, *dst);
+  assert(written == size);
+  assert(written == dst->len);
+
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -3650,7 +3667,7 @@ static void test_bencode_encode_once(BencodeValue b, const char *expected) {
   assert(dst.data);
   memset(dst.data, '#', cap);
 
-  const usize written = bencode_encode(b, slice_u8_take(dst, size));
+  const usize written = bencode_encode_in_place(b, slice_u8_take(dst, size));
 
   // Comparing from the front of `dst` pins the anchoring.
   assert(expected_len == written);
@@ -3707,7 +3724,7 @@ static void test_bencode_encode_binary_string(void) {
                   .len = cap};
   assert(dst.data);
 
-  const usize written = bencode_encode(b, dst);
+  const usize written = bencode_encode_in_place(b, dst);
 
   assert(bencode_encode_exact_size(b, 0) == written);
   assert(2 + sizeof(raw) == written);
@@ -3778,7 +3795,7 @@ static void test_bencode_encode_wide_dict(void) {
                   .len = cap};
   assert(dst.data);
 
-  const usize written = bencode_encode(dict, dst);
+  const usize written = bencode_encode_in_place(dict, dst);
 
   assert(bencode_encode_exact_size(dict, 0) == written);
   assert(written > 2);
@@ -3849,16 +3866,18 @@ static void test_bencode_encode_torrent_info(void) {
 
   const Slice_u8 name = test_slice("f.bin");
   BencodeValue info = {0};
-  assert(torrent_make_info_dict_v2(name, 16 * TORRENT_BLOCK_SIZE,
-                                   slice_u8_make(file_data, file_len), name,
-                                   &info, &arena));
+  PieceHash *piece_hashes = NULL;
+  usize piece_hashes_count = 0;
+  assert(torrent_make_info_dict_v2(
+      name, 16 * TORRENT_BLOCK_SIZE, slice_u8_make(file_data, file_len), name,
+      &info, &piece_hashes, &piece_hashes_count, &arena));
 
   const usize cap = bencode_encode_exact_size(info, 0);
   Slice_u8 dst = {.data = arena_alloc(&arena, __alignof__(u8), sizeof(u8), cap),
                   .len = cap};
   assert(dst.data);
 
-  const Slice_u8 got = slice_u8_take(dst, bencode_encode(info, dst));
+  const Slice_u8 got = slice_u8_take(dst, bencode_encode_in_place(info, dst));
   assert(bencode_encode_exact_size(info, 0) == got.len);
 
   // The digest is raw bytes, so build the expectation around it rather than
@@ -4137,24 +4156,36 @@ int main(i32 argc, char *argv[]) {
     Arena arena = arena_valloc(32 * MiB);
 
     BencodeValue info_dict = {0};
+    PieceHash *piece_hashes = NULL;
+    usize piece_hashes_count = 0;
     assert(torrent_make_info_dict_v2(file_name, TORRENT_BLOCK_SIZE * 16, input,
-                                     file_name, &info_dict, &arena));
+                                     file_name, &info_dict, &piece_hashes,
+                                     &piece_hashes_count, &arena));
 
     bencode_print(info_dict, 0);
     puts("");
 
-    const usize encode_cap = bencode_encode_exact_size(info_dict, 0);
-    assert(encode_cap > 0);
+    Slice_u8 info_dict_encoded = {0};
+    assert(bencode_encode(info_dict, &info_dict_encoded, &arena));
+    assert(info_dict_encoded.len <= INT_MAX);
+    printf("info dict encoded: %.*s\n", (i32)info_dict_encoded.len,
+           info_dict_encoded.data);
 
-    Slice_u8 encoded = {
-        .data = arena_alloc(&arena, __alignof__(u8), sizeof(u8), encode_cap),
-        .len = encode_cap};
-    assert(encoded.data);
+    BencodeValue metainfo_dict = {0};
+    const char *const announce_url_cstr = "http://localhost:12345";
+    Slice_u8 announce_url =
+        slice_u8_make((u8 *)announce_url_cstr, strlen(announce_url_cstr));
+    assert(torrent_make_metainfo_dict_v2(announce_url, info_dict.v.list,
+                                         piece_hashes, piece_hashes_count,
+                                         &metainfo_dict, &arena));
+    bencode_print(metainfo_dict, 0);
+    puts("");
 
-    const usize encoded_len = bencode_encode(info_dict, encoded);
-    encoded = slice_u8_take(encoded, encoded_len);
-    assert(encoded.len <= INT_MAX);
-    printf("info dict encoded: %.*s\n", (i32)encoded.len, encoded.data);
+    Slice_u8 metainfo_dict_encoded = {0};
+    assert(bencode_encode(metainfo_dict, &metainfo_dict_encoded, &arena));
+    assert(metainfo_dict_encoded.len <= INT_MAX);
+    printf("metainfo dict encoded: %.*s\n", (i32)metainfo_dict_encoded.len,
+           metainfo_dict_encoded.data);
 
   } else {
     fprintf(stderr, "unknown command\n");
