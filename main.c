@@ -1465,43 +1465,78 @@ torrent_build_merkle_tree(Slice_u8 data, usize piece_length_in_bytes,
   return true;
 }
 
+__attribute__((warn_unused_result)) static bool torrent_make_metainfo_dict_v2(
+    Slice_u8 announce_url, BencodeList info_dict, PieceHash *const piece_hashes,
+    usize piece_hashes_count, BencodeValue *dst, Arena *arena) {
+  assert(!slice_u8_is_empty(announce_url));
+  assert(info_dict.len > 0);
+  assert(piece_hashes);
+  assert(piece_hashes_count > 0);
+  assert(dst);
+  assert(arena);
+
+  dst->kind = BencodeKindDict;
+  dst->v.list.len = 2 * 3;
+  dst->v.list.data = arena_alloc(arena, __alignof__(BencodeValue),
+                                 sizeof(BencodeValue), dst->v.list.len);
+  if (!dst->v.list.data) {
+    return false;
+  }
+
+  // `metainfo["announce"] = announce_url`
+  {
+    BencodeValue *const announce_key = &dst->v.list.data[0];
+    announce_key->kind = BencodeKindString;
+    announce_key->v.s = slice_u8_make((u8 *)"announce", sizeof("announce") - 1);
+
+    BencodeValue *const announce_value = &dst->v.list.data[1];
+    announce_value->kind = BencodeKindString;
+    announce_value->v.s = announce_url;
+  }
+
+  return true;
+}
+
 __attribute__((warn_unused_result)) static bool
 torrent_make_info_dict_v2(Slice_u8 name, usize piece_length_in_bytes,
                           Slice_u8 file_data, Slice_u8 file_name,
-                          BencodeValue *info, Arena *arena) {
+                          BencodeValue *dst_info_dict, Arena *arena) {
   assert(piece_length_in_bytes >= 16 * KiB);      // Per spec.
   assert(is_power_of_two(piece_length_in_bytes)); // Per spec.
-  assert(info);
+  assert(dst_info_dict);
   assert(arena);
   const usize dict_items_count = 4;
-  *info = (BencodeValue){
+  *dst_info_dict = (BencodeValue){
       .kind = BencodeKindDict,
       .v.list.len = dict_items_count * 2,
       .v.list.data = arena_alloc(arena, __alignof__(BencodeValue),
                                  sizeof(BencodeValue), dict_items_count * 2),
   };
-  if (NULL == info->v.list.data) {
+  if (NULL == dst_info_dict->v.list.data) {
     return false;
   }
 
+  PieceHash *piece_hashes = NULL;
+  usize piece_hashes_count = 0;
+
   // `info["name"] = name`
   {
-    BencodeValue *const key = &info->v.list.data[4];
+    BencodeValue *const key = &dst_info_dict->v.list.data[4];
     key->kind = BencodeKindString;
     key->v.s = slice_u8_make((u8 *)"name", sizeof("name") - 1);
 
-    BencodeValue *const value = &info->v.list.data[5];
+    BencodeValue *const value = &dst_info_dict->v.list.data[5];
     value->kind = BencodeKindString;
     value->v.s = name;
   }
 
   // `info["piece length"] = piece_length_in_bytes`
   {
-    BencodeValue *const key = &info->v.list.data[6];
+    BencodeValue *const key = &dst_info_dict->v.list.data[6];
     key->kind = BencodeKindString;
     key->v.s = slice_u8_make((u8 *)"piece length", sizeof("piece length") - 1);
 
-    BencodeValue *const value = &info->v.list.data[7];
+    BencodeValue *const value = &dst_info_dict->v.list.data[7];
     value->kind = BencodeKindInteger;
     if (!isize_from_usize(piece_length_in_bytes, false, &value->v.num)) {
       return false;
@@ -1511,31 +1546,30 @@ torrent_make_info_dict_v2(Slice_u8 name, usize piece_length_in_bytes,
   // `info["meta version"] = 2`
   {
 
-    BencodeValue *const key = &info->v.list.data[2];
+    BencodeValue *const key = &dst_info_dict->v.list.data[2];
     key->kind = BencodeKindString;
     key->v.s = slice_u8_make((u8 *)"meta version", sizeof("meta version") - 1);
 
-    BencodeValue *const value = &info->v.list.data[3];
+    BencodeValue *const value = &dst_info_dict->v.list.data[3];
     value->kind = BencodeKindInteger;
     value->v.num = 2;
   }
 
   // `info["file tree"] = ...`
   {
-    BencodeValue *const file_tree_key = &info->v.list.data[0];
+    BencodeValue *const file_tree_key = &dst_info_dict->v.list.data[0];
     file_tree_key->kind = BencodeKindString;
     file_tree_key->v.s =
         slice_u8_make((u8 *)"file tree", sizeof("file tree") - 1);
 
-    PieceHash *nodes = NULL;
-    usize nodes_count = 0;
     u8 root[SHA256_DIGEST_LENGTH] = {0};
-    if (!torrent_build_merkle_tree(file_data, piece_length_in_bytes, &nodes,
-                                   &nodes_count, root, arena)) {
+    if (!torrent_build_merkle_tree(file_data, piece_length_in_bytes,
+                                   &piece_hashes, &piece_hashes_count, root,
+                                   arena)) {
       return false;
     }
 
-    BencodeValue *const file_tree_dict = &info->v.list.data[1];
+    BencodeValue *const file_tree_dict = &dst_info_dict->v.list.data[1];
     file_tree_dict->kind = BencodeKindDict;
     file_tree_dict->v.list.len = 2;
     file_tree_dict->v.list.data =
@@ -1611,6 +1645,14 @@ torrent_make_info_dict_v2(Slice_u8 name, usize piece_length_in_bytes,
     }
   }
 
+  // FIXME: Hardcoded values.
+  BencodeValue metainfo_dict = {0};
+  const char *const announce_url_cstr = "http://localhost:12345";
+  Slice_u8 announce_url =
+      slice_u8_make((u8 *)announce_url_cstr, strlen(announce_url_cstr));
+  assert(torrent_make_metainfo_dict_v2(announce_url, dst_info_dict->v.list,
+                                       piece_hashes, piece_hashes_count,
+                                       &metainfo_dict, arena));
   return true;
 }
 
@@ -1790,38 +1832,6 @@ __attribute__((warn_unused_result)) static usize bencode_encode(BencodeValue b,
   assert(dst.len == written);
 
   return written;
-}
-__attribute__((warn_unused_result)) static bool
-torrent_make_metainfo_dict_v2(Slice_u8 announce_url, BencodeList info_dict,
-                              PieceHash *const piece_hashes,
-                              usize piece_hashes_count, Arena *arena) {
-  assert(!slice_u8_is_empty(announce_url));
-  assert(info_dict.len > 0);
-  assert(piece_hashes);
-  assert(piece_hashes_count > 0);
-  assert(arena);
-
-  BencodeValue metainfo_dict = {.kind = BencodeKindDict};
-  metainfo_dict.v.list.len = 2 * 3;
-  metainfo_dict.v.list.data =
-      arena_alloc(arena, __alignof__(BencodeValue), sizeof(BencodeValue),
-                  metainfo_dict.v.list.len);
-  if (!metainfo_dict.v.list.data) {
-    return false;
-  }
-
-  // `metainfo["announce"] = announce_url`
-  {
-    BencodeValue *const announce_key = &metainfo_dict.v.list.data[0];
-    announce_key->kind = BencodeKindString;
-    announce_key->v.s = slice_u8_make((u8 *)"announce", sizeof("announce") - 1);
-
-    BencodeValue *const announce_value = &metainfo_dict.v.list.data[1];
-    announce_value->kind = BencodeKindString;
-    announce_value->v.s = announce_url;
-  }
-
-  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -4133,6 +4143,7 @@ int main(i32 argc, char *argv[]) {
     encoded = slice_u8_take(encoded, encoded_len);
     assert(encoded.len <= INT_MAX);
     printf("info dict encoded: %.*s\n", (i32)encoded.len, encoded.data);
+
   } else {
     fprintf(stderr, "unknown command\n");
     exit(1);
