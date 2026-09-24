@@ -83,13 +83,13 @@ typedef struct {
   u8 digest[SHA256_DIGEST_LENGTH];
 } PieceHash;
 
-__attribute((warn_unused_result)) static bool char_is_digit_ascii(u8 c) {
+__attribute__((warn_unused_result)) static bool char_is_digit_ascii(u8 c) {
   return '0' <= c && c <= '9';
 }
 
 // Convert `magnitude`, optionally negated, to an isize.
 // Returns false if the value does not fit.
-__attribute((warn_unused_result)) static bool
+__attribute__((warn_unused_result)) static bool
 isize_from_usize(usize magnitude, bool negative, isize *res) {
   assert(res);
 
@@ -102,7 +102,7 @@ isize_from_usize(usize magnitude, bool negative, isize *res) {
                   : !__builtin_add_overflow(magnitude, 0, res);
 }
 
-__attribute((warn_unused_result)) static void *
+__attribute__((warn_unused_result)) static void *
 arena_alloc(Arena *arena, usize align, usize elem_size, usize elem_count) {
   assert(arena != NULL);
   assert(arena->start != NULL);
@@ -136,7 +136,7 @@ arena_alloc(Arena *arena, usize align, usize elem_size, usize elem_count) {
   return (u8 *)start;
 }
 
-__attribute((warn_unused_result)) static Arena
+__attribute__((warn_unused_result)) static Arena
 arena_from_mem(u8 *mem, usize bytes_count) {
   assert(mem);
   assert(bytes_count);
@@ -149,7 +149,7 @@ arena_from_mem(u8 *mem, usize bytes_count) {
   return res;
 }
 
-__attribute((warn_unused_result)) static u8 *
+__attribute__((warn_unused_result)) static u8 *
 unix_virtual_mem_alloc(usize bytes_count) {
   assert(bytes_count > 0);
   void *alloc = mmap(NULL, bytes_count, PROT_READ | PROT_WRITE,
@@ -162,27 +162,27 @@ unix_virtual_mem_alloc(usize bytes_count) {
   return alloc;
 }
 
-__attribute((warn_unused_result)) static usize unix_get_page_size(void) {
-  i64 res = sysconf(_SC_PAGE_SIZE);
+__attribute__((warn_unused_result)) static usize unix_get_page_size(void) {
+  const i64 res = sysconf(_SC_PAGE_SIZE);
   assert(-1 != res && "unreachable");
 
   return (usize)res;
 }
 
-__attribute((warn_unused_result)) static bool unix_vprotect_none(void *ptr,
-                                                                 usize size) {
+__attribute__((warn_unused_result)) static bool unix_vprotect_none(void *ptr,
+                                                                   usize size) {
   if (-1 == mprotect(ptr, size, PROT_NONE)) {
     return false;
   }
   return true;
 }
 
-__attribute((warn_unused_result)) static bool is_power_of_two(usize value) {
+__attribute__((warn_unused_result)) static bool is_power_of_two(usize value) {
   return (value != 0) && ((value & (value - 1)) == 0);
 }
 
 // `multiple` must be a power of two, which every page size is.
-__attribute((warn_unused_result)) static usize
+__attribute__((warn_unused_result)) static usize
 usize_round_up_multiple_of(usize n, usize multiple) {
   assert(multiple != 0);
   assert(is_power_of_two(multiple));
@@ -197,7 +197,7 @@ usize_round_up_multiple_of(usize n, usize multiple) {
   return res;
 }
 
-__attribute((warn_unused_result)) static usize next_power_of_two(usize val) {
+__attribute__((warn_unused_result)) static usize next_power_of_two(usize val) {
   if (0 == val) {
     return 1;
   }
@@ -217,14 +217,15 @@ __attribute((warn_unused_result)) static usize next_power_of_two(usize val) {
   return val;
 }
 
-__attribute((warn_unused_result)) static usize ceil_usize(usize numerator,
-                                                          usize denominator) {
+__attribute__((warn_unused_result)) static usize ceil_usize(usize numerator,
+                                                            usize denominator) {
   assert(denominator);
 
   return numerator / denominator + (numerator % denominator != 0);
 }
 
-__attribute((warn_unused_result)) static Arena arena_valloc(usize bytes_count) {
+__attribute__((warn_unused_result)) static Arena
+arena_valloc(usize bytes_count) {
   const usize page_size = unix_get_page_size();
   assert(page_size > 0);
 
@@ -234,7 +235,7 @@ __attribute((warn_unused_result)) static Arena arena_valloc(usize bytes_count) {
   assert(!__builtin_add_overflow(usable_bytes, page_size, &os_alloc_size));
 
   u8 *const arena_memory = unix_virtual_mem_alloc(os_alloc_size);
-  Arena res = {0};
+  const Arena res = {0};
 
   if (arena_memory == NULL) {
     return res;
@@ -258,8 +259,8 @@ __attribute((warn_unused_result)) static Arena arena_valloc(usize bytes_count) {
 
 // Peek at the first byte of `slice`, leaving it in place.
 // Returns false, and does not touch `*res`, if there is no first byte.
-__attribute((warn_unused_result)) static bool slice_u8_first(Slice_u8 slice,
-                                                             u8 *res) {
+__attribute__((warn_unused_result)) static bool slice_u8_first(Slice_u8 slice,
+                                                               u8 *res) {
   assert(res);
 
   if (!slice.data) {
@@ -271,22 +272,6 @@ __attribute((warn_unused_result)) static bool slice_u8_first(Slice_u8 slice,
   }
 
   *res = slice.data[0];
-  return true;
-}
-
-__attribute((warn_unused_result)) static bool slice_u8_skip(Slice_u8 *slice,
-                                                            usize count) {
-  assert(slice);
-  if (!slice->data) {
-    return false;
-  }
-
-  if (slice->len < count) {
-    return false;
-  }
-
-  slice->len -= count;
-  slice->data += count;
   return true;
 }
 
@@ -303,18 +288,33 @@ static void slice_u8_advance(Slice_u8 *slice, usize count) {
   slice->data += count;
 }
 
+__attribute__((warn_unused_result)) static bool slice_u8_skip(Slice_u8 *slice,
+                                                              usize count) {
+  assert(slice);
+  if (!slice->data) {
+    return false;
+  }
+
+  if (slice->len < count) {
+    return false;
+  }
+
+  slice_u8_advance(slice, count);
+  return true;
+}
+
 // The caller must have already established that `count` bytes are available:
 // silently returning a short slice would turn a malformed length into a
 // successful parse of truncated data.
-__attribute((warn_unused_result)) static Slice_u8 slice_u8_take(Slice_u8 input,
-                                                                usize count) {
+__attribute__((warn_unused_result)) static Slice_u8
+slice_u8_take(Slice_u8 input, usize count) {
   assert(count <= input.len);
 
   return (Slice_u8){.data = input.data, .len = count};
 }
 
-__attribute((warn_unused_result)) static Slice_u8 slice_u8_make(u8 *data,
-                                                                usize len) {
+__attribute__((warn_unused_result)) static Slice_u8 slice_u8_make(u8 *data,
+                                                                  usize len) {
   if (0 != len) {
     assert(data);
   }
@@ -327,8 +327,8 @@ __attribute((warn_unused_result)) static Slice_u8 slice_u8_make(u8 *data,
 // `*slice` is only advanced on a match, which is what makes it usable as a
 // speculative `if (!consume(...)) { return false; }` inside a parse that rolls
 // back.
-__attribute((warn_unused_result)) static bool slice_u8_consume(Slice_u8 *slice,
-                                                               u8 expected) {
+__attribute__((warn_unused_result)) static bool
+slice_u8_consume(Slice_u8 *slice, u8 expected) {
   assert(slice);
   assert(slice->data);
 
@@ -349,8 +349,8 @@ __attribute((warn_unused_result)) static bool slice_u8_consume(Slice_u8 *slice,
 // Rejects a run with no digits at all, one that is not terminated by a
 // non-digit, one with a leading zero, and one that overflows a `usize`.
 // `*data` is only advanced, and `*res` only written, when the parse succeeds.
-__attribute((warn_unused_result)) static bool ascii_num_parse(Slice_u8 *data,
-                                                              usize *res) {
+__attribute__((warn_unused_result)) static bool ascii_num_parse(Slice_u8 *data,
+                                                                usize *res) {
   assert(data);
   assert(res);
 
@@ -469,10 +469,13 @@ unix_path_last_component(Slice_u8 path) {
     return (Slice_u8){.data = (u8 *)"/", .len = 1};
   }
 
-  for (isize i = path.len - 1; i >= 0; i--) {
-    u8 c = path.data[i];
+  // Counts down over one-past-the-byte so the whole walk stays in `usize`:
+  // `i` is the start of the component when `path.data[i - 1]` is the
+  // separator.
+  for (usize i = path.len; i > 0; i--) {
+    const u8 c = path.data[i - 1];
     if ('/' == c) {
-      const Slice_u8 res = {.data = path.data + i + 1, .len = path.len - i - 1};
+      const Slice_u8 res = {.data = path.data + i, .len = path.len - i};
       // The trailing separators are gone, so there is at least one byte left
       // after the last one.
       assert(!slice_u8_is_empty(res));
@@ -491,7 +494,7 @@ unix_path_last_component(Slice_u8 path) {
 //
 // `*input` is only advanced, and `*res` only written, when the parse
 // succeeds.
-__attribute((warn_unused_result)) static bool
+__attribute__((warn_unused_result)) static bool
 bencode_parse_num(Slice_u8 *input, BencodeValue *res) {
   assert(input);
   assert(input->data);
@@ -535,7 +538,7 @@ bencode_parse_num(Slice_u8 *input, BencodeValue *res) {
 // The string is not copied: it points into `*input`.
 // `*input` is only advanced, and `*res` only written, when the parse
 // succeeds.
-__attribute((warn_unused_result)) static bool
+__attribute__((warn_unused_result)) static bool
 bencode_parse_string(Slice_u8 *input, BencodeValue *res) {
   assert(input);
   assert(input->data);
@@ -578,8 +581,8 @@ bencode_parse_string(Slice_u8 *input, BencodeValue *res) {
 // Bytes are compared as unsigned values, so `0x80` sorts after `0x7f`. This is
 // a total order over arbitrary bytes, embedded zeroes included, and it is the
 // ordering bencode requires of dict keys.
-__attribute((warn_unused_result)) static i32 bytes_cmp(u8 *a, usize a_len,
-                                                       u8 *b, usize b_len) {
+__attribute__((warn_unused_result)) static i32
+bytes_cmp(const u8 *a, usize a_len, const u8 *b, usize b_len) {
   if (0 != a_len) {
     assert(a);
   }
@@ -603,7 +606,8 @@ __attribute((warn_unused_result)) static i32 bytes_cmp(u8 *a, usize a_len,
   return a_len < b_len ? -1 : 1;
 }
 
-static bool bencode_validate_dict(BencodeList list) {
+__attribute__((warn_unused_result)) static bool
+bencode_validate_dict(BencodeList list) {
   if (0 != list.len) {
     assert(NULL != list.data);
   }
@@ -642,7 +646,7 @@ static bool bencode_validate_dict(BencodeList list) {
 // leaves the caller with neither consumed input nor consumed memory.
 //
 // `scratch` is taken by value and is not consumed by the call.
-__attribute((warn_unused_result)) static bool
+__attribute__((warn_unused_result)) static bool
 bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
   assert(input);
   assert(arena);
@@ -819,13 +823,18 @@ static void bencode_print_indent(usize indent) {
 // value starts on begins at, which is what the children and the closing
 // bracket are aligned against. Nothing is written after the value either: a
 // trailing newline is the caller's to add.
-void bencode_print(BencodeValue v, usize indent) {
+static void bencode_print(BencodeValue v, usize indent) {
   switch (v.kind) {
   case BencodeKindInteger:
     printf("%zd", v.v.num);
     break;
 
   case BencodeKindString:
+    // A negative `%.*s` precision is "as if omitted" (C99 7.19.6.1), which
+    // would print until a NUL and read straight past the slice. A string
+    // that long can only come from a >2GiB input, so refuse rather than
+    // silently truncate.
+    assert(v.v.s.len <= INT_MAX);
     printf("\"%.*s\"", (i32)v.v.s.len, v.v.s.data);
     break;
 
@@ -925,15 +934,16 @@ static const u32 sha256_k[64] = {
 
 // `count` must be in 1..31: a rotation by 0 would shift a `u32` by 32, which
 // is undefined behaviour.
-__attribute((warn_unused_result)) static u32 u32_rotate_right(u32 x,
-                                                              u32 count) {
+__attribute__((warn_unused_result)) static u32 u32_rotate_right(u32 x,
+                                                                u32 count) {
   assert(count >= 1);
   assert(count <= 31);
 
   return (x >> count) | (x << (32 - count));
 }
 
-__attribute((warn_unused_result)) static u32 u32_from_bytes_be(const u8 *data) {
+__attribute__((warn_unused_result)) static u32
+u32_from_bytes_be(const u8 *data) {
   assert(data);
 
   return ((u32)data[0] << 24) | ((u32)data[1] << 16) | ((u32)data[2] << 8) |
@@ -1085,7 +1095,7 @@ sha256_compress_blocks_neon(u32 h[8], const u8 *blocks, usize blocks_count) {
 // The extension is optional even on AArch64, so ask rather than assume.
 // Cached because this sits on the hot path of every hash and `sysctlbyname` is
 // a syscall. Racing callers compute the same answer, so the race is benign.
-__attribute((warn_unused_result)) static bool sha256_neon_supported(void) {
+__attribute__((warn_unused_result)) static bool sha256_neon_supported(void) {
   static i32 cached = -1;
 
   if (cached < 0) {
@@ -1131,7 +1141,7 @@ static void sha256_init(Sha256Ctx *ctx) {
   };
 }
 
-static void sha256_update(Sha256Ctx *ctx, u8 *data, usize len) {
+static void sha256_update(Sha256Ctx *ctx, const u8 *data, usize len) {
   assert(ctx);
   if (0 != len) {
     assert(data);
@@ -1212,7 +1222,7 @@ static void sha256_digest(Slice_u8 data, u8 dst[SHA256_DIGEST_LENGTH]) {
 }
 
 // Debugging aid, so kept even when nothing calls it.
-__attribute((unused)) static void
+__attribute__((unused)) static void
 sha256_print_hex(const u8 digest[SHA256_DIGEST_LENGTH]) {
   const u8 lut[] = "0123456789abcdef";
 
@@ -1224,8 +1234,8 @@ sha256_print_hex(const u8 digest[SHA256_DIGEST_LENGTH]) {
   }
 }
 
-static void sha256_digest_pair(u8 left[SHA256_DIGEST_LENGTH],
-                               u8 right[SHA256_DIGEST_LENGTH],
+static void sha256_digest_pair(const u8 left[SHA256_DIGEST_LENGTH],
+                               const u8 right[SHA256_DIGEST_LENGTH],
                                u8 dst[SHA256_DIGEST_LENGTH]) {
   Sha256Ctx sha = {0};
   sha256_init(&sha);
@@ -1261,7 +1271,7 @@ typedef struct {
   PieceHash *const piece_hashes;
 } MerkleTree;
 
-__attribute((warn_unused_result)) static MerkleTree
+__attribute__((warn_unused_result)) static MerkleTree
 torrent_merkle_tree_make(Slice_u8 data, usize piece_length_in_bytes,
                          PieceHash *piece_hashes) {
   assert(data.data);
@@ -1362,7 +1372,7 @@ static void torrent_build_merkle_sub_tree(const MerkleTree *tree,
 
       sha256_digest(block_data, dst);
     } else { // Past the end of the file: a zero hash, per spec.
-      bzero(dst, SHA256_DIGEST_LENGTH);
+      memset(dst, 0, SHA256_DIGEST_LENGTH);
     }
   } else {
     // Progress: children sit one level down and the leaf case above is the
@@ -1394,7 +1404,7 @@ static void torrent_build_merkle_sub_tree(const MerkleTree *tree,
 // Build the merkle tree for one file, yielding its root (`pieces root` in the
 // info dictionary) and its piece layer (`piece layers` at the torrent root).
 // An empty file has neither, per BEP 52, and leaves `root` zeroed.
-__attribute((warn_unused_result)) static bool
+__attribute__((warn_unused_result)) static bool
 torrent_build_merkle_tree(Slice_u8 data, usize piece_length_in_bytes,
                           PieceHash **piece_hashes, usize *piece_hashes_count,
                           u8 root[SHA256_DIGEST_LENGTH], Arena *arena) {
@@ -1408,7 +1418,7 @@ torrent_build_merkle_tree(Slice_u8 data, usize piece_length_in_bytes,
 
   *piece_hashes = NULL;
   *piece_hashes_count = 0;
-  bzero(root, SHA256_DIGEST_LENGTH);
+  memset(root, 0, SHA256_DIGEST_LENGTH);
 
   if (0 == data.len) {
     return true;
@@ -1478,8 +1488,7 @@ torrent_make_info_dict_v2(Slice_u8 name, usize piece_length_in_bytes,
   {
     BencodeValue *const key = &info->v.list.data[4];
     key->kind = BencodeKindString;
-    key->v.s.len = sizeof("name") - 1;
-    key->v.s.data = (u8 *)"name";
+    key->v.s = slice_u8_make((u8 *)"name", sizeof("name") - 1);
 
     BencodeValue *const value = &info->v.list.data[5];
     value->kind = BencodeKindString;
@@ -1490,8 +1499,7 @@ torrent_make_info_dict_v2(Slice_u8 name, usize piece_length_in_bytes,
   {
     BencodeValue *const key = &info->v.list.data[6];
     key->kind = BencodeKindString;
-    key->v.s.len = sizeof("piece length") - 1;
-    key->v.s.data = (u8 *)"piece length";
+    key->v.s = slice_u8_make((u8 *)"piece length", sizeof("piece length") - 1);
 
     BencodeValue *const value = &info->v.list.data[7];
     value->kind = BencodeKindInteger;
@@ -1505,8 +1513,7 @@ torrent_make_info_dict_v2(Slice_u8 name, usize piece_length_in_bytes,
 
     BencodeValue *const key = &info->v.list.data[2];
     key->kind = BencodeKindString;
-    key->v.s.len = sizeof("meta version") - 1;
-    key->v.s.data = (u8 *)"meta version";
+    key->v.s = slice_u8_make((u8 *)"meta version", sizeof("meta version") - 1);
 
     BencodeValue *const value = &info->v.list.data[3];
     value->kind = BencodeKindInteger;
@@ -1517,8 +1524,8 @@ torrent_make_info_dict_v2(Slice_u8 name, usize piece_length_in_bytes,
   {
     BencodeValue *const file_tree_key = &info->v.list.data[0];
     file_tree_key->kind = BencodeKindString;
-    file_tree_key->v.s.len = sizeof("file tree") - 1;
-    file_tree_key->v.s.data = (u8 *)"file tree";
+    file_tree_key->v.s =
+        slice_u8_make((u8 *)"file tree", sizeof("file tree") - 1);
 
     PieceHash *nodes = NULL;
     usize nodes_count = 0;
@@ -1803,7 +1810,8 @@ __attribute__((warn_unused_result)) static Arena test_arena(usize bytes_count) {
   return arena;
 }
 
-static Slice_u8 test_slice(const char *input) {
+__attribute__((warn_unused_result)) static Slice_u8
+test_slice(const char *input) {
   assert(input);
 
   return slice_u8_make((u8 *)input, strlen(input));
@@ -2297,7 +2305,8 @@ static void test_bencode_parse_string(void) {
   }
 }
 
-static bool test_bencode_is_string(BencodeValue value, const char *expected) {
+__attribute__((warn_unused_result)) static bool
+test_bencode_is_string(BencodeValue value, const char *expected) {
   assert(expected);
 
   const usize len = strlen(expected);
@@ -2305,7 +2314,8 @@ static bool test_bencode_is_string(BencodeValue value, const char *expected) {
          (0 == len || 0 == memcmp(value.v.s.data, expected, len));
 }
 
-static BencodeValue test_bencode_make_string(const char *data, usize len) {
+__attribute__((warn_unused_result)) static BencodeValue
+test_bencode_make_string(const char *data, usize len) {
   if (0 != len) {
     assert(data);
   }
@@ -3011,7 +3021,8 @@ static void test_sha256_reuse(void) {
 // block distinct content. The expected roots below come from libtorrent 2.1.1
 // fed the exact same bytes, checked at both a 16KiB and a 256KiB piece size
 // since `pieces root` must not depend on the piece size.
-static Slice_u8 test_merkle_data(Arena *arena) {
+__attribute__((warn_unused_result)) static Slice_u8
+test_merkle_data(Arena *arena) {
   u8 *const buf = arena_alloc(arena, 1, 1, TEST_MERKLE_MAX_LEN);
   assert(buf);
 
@@ -3597,11 +3608,13 @@ static void test_bencode_encode_once(BencodeValue b, const char *expected) {
   }
 }
 
-static BencodeValue test_bencode_int(isize n) {
+__attribute__((warn_unused_result)) static BencodeValue
+test_bencode_int(isize n) {
   return (BencodeValue){.kind = BencodeKindInteger, .v.num = n};
 }
 
-static BencodeValue test_bencode_str(const char *s) {
+__attribute__((warn_unused_result)) static BencodeValue
+test_bencode_str(const char *s) {
   return (BencodeValue){.kind = BencodeKindString, .v.s = test_slice(s)};
 }
 
@@ -4024,7 +4037,7 @@ int main(i32 argc, char *argv[]) {
   assert(argc >= 2);
   assert(argv);
 
-  char *const cmd = argv[1];
+  const char *const cmd = argv[1];
   if (0 == strcmp(cmd, "test")) {
     test(argc > 2 ? argv[2] : NULL);
   } else if (0 == strcmp(cmd, "print-bencode")) {
@@ -4038,12 +4051,12 @@ int main(i32 argc, char *argv[]) {
     assert(st.st_size > 0);
 
     void *const bencode_data =
-        mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+        mmap(NULL, (usize)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
     assert((void *)-1 != bencode_data);
 
     Slice_u8 input = slice_u8_make((u8 *)bencode_data, (usize)st.st_size);
     Arena arena = arena_valloc(32 * MiB);
-    Arena scratch = arena_valloc(32 * MiB);
+    const Arena scratch = arena_valloc(32 * MiB);
 
     BencodeValue bencode = {0};
     assert(bencode_parse(&input, &arena, scratch, &bencode));
@@ -4061,7 +4074,7 @@ int main(i32 argc, char *argv[]) {
     assert(st.st_size > 0);
 
     void *const input_data =
-        mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+        mmap(NULL, (usize)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
     assert((void *)-1 != input_data);
 
     const Slice_u8 input = slice_u8_make((u8 *)input_data, (usize)st.st_size);
@@ -4086,6 +4099,7 @@ int main(i32 argc, char *argv[]) {
 
     const usize encoded_len = bencode_encode(info_dict, encoded);
     encoded = slice_u8_take(encoded, encoded_len);
+    assert(encoded.len <= INT_MAX);
     printf("info dict encoded: %.*s\n", (i32)encoded.len, encoded.data);
   } else {
     fprintf(stderr, "unknown command\n");
