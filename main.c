@@ -456,6 +456,49 @@ __attribute__((warn_unused_result)) static Error unix_listen(i32 fd,
   return ErrNone;
 }
 
+typedef enum {
+  FileOpenOptionsReadOnly = 1,
+} FileOpenOptions;
+
+__attribute__((warn_unused_result)) static Error
+unix_open(char *path, FileOpenOptions options, i32 *fd) {
+  assert(fd);
+
+  i32 unix_options = 0;
+  if (O_RDONLY == options) {
+    unix_options |= FileOpenOptionsReadOnly;
+  }
+
+  i32 ret = 0;
+  do {
+    ret = open(path, unix_options);
+  } while (-1 == ret && EINTR == errno);
+
+  if (-1 == ret) {
+    return unix_error_from_errno(errno);
+  }
+
+  *fd = ret;
+
+  return ErrNone;
+}
+
+// ---------- IO ----------
+
+typedef struct {
+  Error (*socket)(SocketDomain domain, SocketType type, i32 *fd);
+  Error (*listen)(i32 fd, i32 backlog);
+  Error (*open)(char *path, FileOpenOptions options, i32 *fd);
+} IO;
+
+__attribute__((warn_unused_result)) static IO io_unix_make(void) {
+  return (IO){
+      .socket = unix_socket,
+      .listen = unix_listen,
+      .open = unix_open,
+  };
+}
+
 // ---------- Misc ----------
 __attribute__((warn_unused_result)) static bool is_power_of_two(usize value) {
   return (value != 0) && ((value & (value - 1)) == 0);
@@ -4650,6 +4693,8 @@ int main(i32 argc, char *argv[]) {
   assert(argc >= 2);
   assert(argv);
 
+  IO io = io_unix_make();
+
   const char *const cmd = argv[1];
   const usize arena_cap = 32 * MiB;
   Arena arena = {0};
@@ -4660,8 +4705,8 @@ int main(i32 argc, char *argv[]) {
   } else if (0 == strcmp(cmd, "print-bencode")) {
     assert(3 == argc);
 
-    const i32 fd = open(argv[2], O_RDONLY);
-    assert(-1 != fd);
+    i32 fd = 0;
+    assert(ErrNone == io.open(argv[2], FileOpenOptionsReadOnly, &fd));
 
     struct stat st = {0};
     assert(-1 != fstat(fd, &st));
@@ -4683,8 +4728,8 @@ int main(i32 argc, char *argv[]) {
   } else if (0 == strcmp(cmd, "gen-merkle-tree")) {
     assert(3 == argc);
 
-    const i32 fd = open(argv[2], O_RDONLY);
-    assert(-1 != fd);
+    i32 fd = 0;
+    assert(ErrNone == io.open(argv[2], FileOpenOptionsReadOnly, &fd));
 
     struct stat st = {0};
     assert(-1 != fstat(fd, &st));
@@ -4747,14 +4792,13 @@ int main(i32 argc, char *argv[]) {
 
     i32 socket_fd = 0;
     {
-      Error err_socket =
-          unix_socket(SocketDomainIpv4, SocketTypeTcp, &socket_fd);
+      Error err_socket = io.socket(SocketDomainIpv4, SocketTypeTcp, &socket_fd);
       assert(ErrNone == err_socket);
       puts("opened socket");
     }
 
     {
-      Error err_listen = unix_listen(socket_fd, 1024);
+      Error err_listen = io.listen(socket_fd, 1024);
       assert(ErrNone == err_listen);
       puts("socket listening");
     }
