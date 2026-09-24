@@ -4448,6 +4448,12 @@ int main(i32 argc, char *argv[]) {
            fwrite(info_dict_encoded.data, 1, info_dict_encoded.len, stdout));
     puts("");
 
+    u8 info_hash[SHA256_DIGEST_LENGTH] = {0};
+    sha256_digest(info_dict_encoded, info_hash);
+    printf("info_hash=");
+    sha256_print_hex(info_hash);
+    puts("");
+
     BencodeValue metainfo_dict = {0};
     const char *const announce_url_cstr = "http://localhost:12345";
     Slice_u8 announce_url =
