@@ -4,6 +4,7 @@
 #include <inttypes.h>
 #include <limits.h>
 #include <netinet/in.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -549,6 +550,20 @@ unix_accept(void *ctx, i32 listen_socket, i32 *dst_accept_socket,
   return ErrNone;
 }
 
+typedef void *(*ThreadCallback)(void *data);
+
+__attribute__((warn_unused_result)) static Error
+unix_thread_create(void *ctx, ThreadCallback cb) {
+  pthread_t thread = {0};
+  i32 ret = pthread_create(&thread, NULL, cb, ctx);
+
+  if (-1 == ret) {
+    return unix_error_from_errno(errno);
+  }
+
+  return ErrNone;
+}
+
 // ---------- IO ----------
 
 typedef struct {
@@ -558,6 +573,7 @@ typedef struct {
   Error (*tcp_bind_ipv4)(void *ctx, i32 listen_socket, Ipv4Addr addr);
   Error (*accept)(void *ctx, i32 listen_socket, i32 *dst_accept_socket,
                   Ipv4Addr *dst_accept_addr);
+  Error (*thread_create)(void *ctx, ThreadCallback cb);
 } IO;
 
 __attribute__((warn_unused_result)) static IO io_unix_make(void) {
@@ -567,7 +583,50 @@ __attribute__((warn_unused_result)) static IO io_unix_make(void) {
       .open = unix_open,
       .tcp_bind_ipv4 = unix_tcp_bind_ipv4,
       .accept = unix_accept,
+      .thread_create = unix_thread_create,
   };
+}
+
+typedef void *(*AcceptCallback)(void *ctx /*, Ipv4Addr client_addr*/);
+
+__attribute__((warn_unused_result)) static Error
+io_listen_and_serve_tcp_ipv4(IO io, void *ctx, Ipv4Addr listen_addr,
+                             AcceptCallback on_accept) {
+  i32 listen_socket = 0;
+  {
+    Error err_socket =
+        io.socket(NULL, SocketDomainIpv4, SocketTypeTcp, &listen_socket);
+    assert(ErrNone == err_socket);
+    puts("opened socket");
+  }
+
+  {
+    Error err_bind = io.tcp_bind_ipv4(NULL, listen_socket, listen_addr);
+    assert(ErrNone == err_bind);
+    puts("socket bound");
+  }
+
+  {
+    Error err_listen = io.listen(NULL, listen_socket, 1024);
+    assert(ErrNone == err_listen);
+    puts("socket listening");
+  }
+
+  {
+    for (;;) {
+      i32 accept_socket = 0;
+      Ipv4Addr accept_addr = {0};
+
+      Error err_accept =
+          io.accept(NULL, listen_socket, &accept_socket, &accept_addr);
+      assert(ErrNone == err_accept);
+
+      Error err_thread = io.thread_create(ctx, on_accept);
+      assert(ErrNone == err_thread);
+    }
+  }
+
+  return ErrNone;
 }
 
 // ---------- Misc ----------
@@ -4770,6 +4829,17 @@ static void test(const char *filter) {
   printf("%zu test(s) passed\n", run);
 }
 
+static void *torrent_client_on_accept(void *ctx) {
+  (void)ctx;
+
+  puts("accepted");
+  // printf("accepted: %u.%u.%u.%u:%hu\n", accept_addr.ip >> 24 & 0xff,
+  //        accept_addr.ip >> 16 & 0xff, accept_addr.ip >> 8 & 0xff,
+  //        accept_addr.ip >> 0 & 0xff, accept_addr.port);
+
+  return NULL;
+}
+
 int main(i32 argc, char *argv[]) {
   assert(argc >= 2);
   assert(argv);
@@ -4871,37 +4941,11 @@ int main(i32 argc, char *argv[]) {
                                                stdout));
     puts("");
 
-    i32 listen_socket = 0;
-    {
-      Error err_socket =
-          io.socket(NULL, SocketDomainIpv4, SocketTypeTcp, &listen_socket);
-      assert(ErrNone == err_socket);
-      puts("opened socket");
-    }
-
-    {
-      const Ipv4Addr addr = {.port = 12345, .ip = 0};
-      Error err_bind = io.tcp_bind_ipv4(NULL, listen_socket, addr);
-      assert(ErrNone == err_bind);
-      puts("socket bound");
-    }
-
-    {
-      Error err_listen = io.listen(NULL, listen_socket, 1024);
-      assert(ErrNone == err_listen);
-      puts("socket listening");
-    }
-
-    {
-      i32 accept_socket = 0;
-      Ipv4Addr accept_addr = {0};
-
-      Error err_accept =
-          io.accept(NULL, listen_socket, &accept_socket, &accept_addr);
-      assert(ErrNone == err_accept);
-      printf("accepted: %u.%u.%u.%u:%hu\n", accept_addr.ip >> 24 & 0xff,
-             accept_addr.ip >> 16 & 0xff, accept_addr.ip >> 8 & 0xff,
-             accept_addr.ip >> 0 & 0xff, accept_addr.port);
+    const Ipv4Addr listen_addr = {.port = 12345, .ip = 0};
+    Error err_listen = io_listen_and_serve_tcp_ipv4(io, NULL, listen_addr,
+                                                    torrent_client_on_accept);
+    if (ErrNone != err_listen) {
+      fprintf(stderr, "failed to lsiten and serve: %d\n", err_listen);
     }
 
     const usize unused_bytes = (usize)arena.end - (usize)arena.start;
