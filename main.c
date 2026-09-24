@@ -1139,6 +1139,10 @@ static void sha256_digest_pair(u8 left[SHA256_DIGEST_LENGTH],
 
 static const usize TORRENT_BLOCK_SIZE = 16 * KiB;
 
+// Arbitrary, only needs to be a byte pattern the tree cannot produce on
+// its own. See the post condition in `torrent_build_merkle_tree`.
+#define MERKLE_PIECE_POISON 0xAA
+
 // Everything about a file's merkle tree that does not vary from node to node.
 // Built once by `torrent_build_merkle_tree` and passed down by pointer: the
 // recursion cannot then disagree with itself about where the piece layer sits,
@@ -1171,7 +1175,12 @@ torrent_merkle_tree_make(Slice_u8 data, usize piece_length_in_bytes,
 
   // A leaf is a block.
   const usize blocks_count = ceil_usize(data.len, TORRENT_BLOCK_SIZE);
+  assert(blocks_count > 0);
+
   const usize blocks_per_piece = piece_length_in_bytes / TORRENT_BLOCK_SIZE;
+  assert(blocks_per_piece > 0);
+  // Load bearing: `ctzll` below is only a `log2` because of this.
+  assert(is_power_of_two(blocks_per_piece));
 
   // `next_power_of_two` gives the padded leaf count, so its `log2` is the
   // depth those leaves sit at.
@@ -1180,6 +1189,13 @@ torrent_merkle_tree_make(Slice_u8 data, usize piece_length_in_bytes,
   // How many levels above the leaves one piece sits. Zero when a piece is a
   // single block, in which case the piece layer *is* the leaf layer.
   const usize piece_bits = (usize)__builtin_ctzll(blocks_per_piece);
+
+  // Every `1 << depth` below would be undefined past this, and `max_depth` is
+  // the largest depth any of them use.
+  assert(max_depth < 8 * sizeof(usize));
+  // The padded leaf layer covers every block, which is the whole point of
+  // rounding up to a power of two.
+  assert(blocks_count <= ((usize)1 << max_depth));
 
   // More than one piece means more than `blocks_per_piece` blocks, which
   // pushes the leaves strictly below the piece level, so the subtraction
@@ -1198,6 +1214,12 @@ torrent_merkle_tree_make(Slice_u8 data, usize piece_length_in_bytes,
   };
 
   assert(tree.pieces_count > 0);
+  // A piece spans at least one block, so there cannot be more of them.
+  assert(tree.pieces_count <= blocks_count);
+  // The same count the other way round, from bytes rather than blocks. This
+  // arithmetic has been wrong twice, and the caller derives its allocation
+  // from the byte form, so the two must agree.
+  assert(tree.pieces_count == ceil_usize(data.len, piece_length_in_bytes));
   assert(tree.piece_depth <= tree.max_depth);
   // The piece layer is a real layer, so it cannot hold more entries than it
   // has nodes.
@@ -1229,11 +1251,24 @@ static void torrent_build_merkle_sub_tree(const MerkleTree *tree,
           .len =
               remaining < TORRENT_BLOCK_SIZE ? remaining : TORRENT_BLOCK_SIZE,
       };
+      // The last block is the only short one, and no block may read past the
+      // mapping the caller handed us.
+      assert(block_data.len > 0);
+      assert(block_data.len <= TORRENT_BLOCK_SIZE);
+      assert(offset + block_data.len <= tree->data.len);
+      assert(block_data.len == TORRENT_BLOCK_SIZE ||
+             offset + block_data.len == tree->data.len);
+
       sha256_digest(block_data, dst);
     } else { // Past the end of the file: a zero hash, per spec.
       bzero(dst, SHA256_DIGEST_LENGTH);
     }
   } else {
+    // Progress: children sit one level down and the leaf case above is the
+    // only way out, so the recursion cannot run past `max_depth`.
+    assert(depth < tree->max_depth);
+    assert(2 * tree_width_idx + 1 < ((usize)1 << (depth + 1)));
+
     u8 left[SHA256_DIGEST_LENGTH] = {0};
     torrent_build_merkle_sub_tree(tree, 2 * tree_width_idx, depth + 1, left);
 
@@ -1293,11 +1328,25 @@ torrent_build_merkle_tree(Slice_u8 data, usize piece_length_in_bytes,
       torrent_merkle_tree_make(data, piece_length_in_bytes, hashes);
   assert(tree.pieces_count == pieces_count);
 
+  // Poison first so that a piece the traversal skips fails the check below
+  // instead of passing off arena leftovers as a hash. An unwritten entry is
+  // exactly how the piece arithmetic has failed before, and the zero pattern
+  // would not do: a padding leaf hashes to zero, so zero is a value the tree
+  // can legitimately produce.
+  memset(hashes, MERKLE_PIECE_POISON, pieces_count * sizeof(PieceHash));
+
   torrent_build_merkle_sub_tree(&tree, 0, 0, root);
 
   // A single piece file has no piece layer, so nothing was written and the
   // allocation stays hidden from the caller rather than handed over unset.
   if (tree.has_piece_layer) {
+    u8 poison[SHA256_DIGEST_LENGTH];
+    memset(poison, MERKLE_PIECE_POISON, sizeof(poison));
+    for (usize i = 0; i < tree.pieces_count; i++) {
+      assert(0 != memcmp(hashes[i].digest, poison, sizeof(poison)) &&
+             "the traversal missed a piece");
+    }
+
     *piece_hashes = hashes;
     *piece_hashes_count = tree.pieces_count;
   }
@@ -2588,14 +2637,12 @@ static void test_bencode_validate_dict(void) {
 }
 
 // Hash `data` in one `Update` call, the simplest possible use of the API.
-#if 0 // TODO: port to the new sha256_update / merkle tree API.
 static void test_sha256_once(Slice_u8 data, u8 res[SHA256_DIGEST_LENGTH]) {
   Sha256Ctx ctx = {0};
   sha256_init(&ctx);
-  sha256_update(&ctx, data);
+  sha256_update(&ctx, data.data, data.len);
   sha256_final(&ctx, res);
 }
-#endif
 
 // Expected digests are given as hex, the way every SHA-256 test vector in the
 // wild is published, so that a vector can be pasted in unmodified.
@@ -2611,7 +2658,6 @@ static void test_digest_from_hex(const char *hex,
   }
 }
 
-#if 0 // TODO: port to the new sha256_update / merkle tree API.
 static void test_sha256_expect_hex(Slice_u8 data, const char *expected_hex) {
   u8 expected[SHA256_DIGEST_LENGTH] = {0};
   test_digest_from_hex(expected_hex, expected);
@@ -2621,9 +2667,7 @@ static void test_sha256_expect_hex(Slice_u8 data, const char *expected_hex) {
 
   assert(0 == memcmp(actual, expected, sizeof(actual)));
 }
-#endif
 
-#if 0 // TODO: port to the new sha256_update / merkle tree API.
 static void test_sha256_vectors(void) {
   // FIPS 180-2 / NIST CAVP vectors.
   test_sha256_expect_hex(
@@ -2647,11 +2691,9 @@ static void test_sha256_vectors(void) {
       slice_u8_make((u8 *)"\x00", 1),
       "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d");
 }
-#endif
 
 // The million 'a' vector, fed in odd-sized chunks so that the partial block
 // handling is exercised on a message far longer than one block.
-#if 0 // TODO: port to the new sha256_update / merkle tree API.
 static void test_sha256_million_a(void) {
   Sha256Ctx ctx = {0};
   sha256_init(&ctx);
@@ -2659,7 +2701,7 @@ static void test_sha256_million_a(void) {
   u8 chunk[1000] = {0};
   memset(chunk, 'a', sizeof(chunk));
   for (usize i = 0; i < 1000; i++) {
-    sha256_update(&ctx, slice_u8_make(chunk, sizeof(chunk)));
+    sha256_update(&ctx, chunk, sizeof(chunk));
   }
 
   u8 actual[SHA256_DIGEST_LENGTH] = {0};
@@ -2672,11 +2714,9 @@ static void test_sha256_million_a(void) {
   };
   assert(0 == memcmp(actual, expected, sizeof(actual)));
 }
-#endif
 
 // Any split of the same message must give the same digest: one `Update`, one
 // `Update` per byte, and a split at every offset around the block boundary.
-#if 0 // TODO: port to the new sha256_update / merkle tree API.
 static void test_sha256_incremental(void) {
   u8 input[200] = {0};
   for (usize i = 0; i < sizeof(input); i++) {
@@ -2690,7 +2730,7 @@ static void test_sha256_incremental(void) {
     Sha256Ctx ctx = {0};
     sha256_init(&ctx);
     for (usize i = 0; i < sizeof(input); i++) {
-      sha256_update(&ctx, slice_u8_make(input + i, 1));
+      sha256_update(&ctx, input + i, 1);
     }
 
     u8 actual[SHA256_DIGEST_LENGTH] = {0};
@@ -2701,24 +2741,22 @@ static void test_sha256_incremental(void) {
   for (usize split = 0; split <= sizeof(input); split++) {
     Sha256Ctx ctx = {0};
     sha256_init(&ctx);
-    sha256_update(&ctx, slice_u8_make(input, split));
+    sha256_update(&ctx, input, split);
     // An empty `Update` in the middle must be a no-op, including when the
     // slice has no data pointer at all.
-    sha256_update(&ctx, (Slice_u8){0});
-    sha256_update(&ctx, slice_u8_make(input + split, sizeof(input) - split));
+    sha256_update(&ctx, NULL, 0);
+    sha256_update(&ctx, input + split, sizeof(input) - split);
 
     u8 actual[SHA256_DIGEST_LENGTH] = {0};
     sha256_final(&ctx, actual);
     assert(0 == memcmp(actual, expected, sizeof(actual)));
   }
 }
-#endif
 
 // Every message length from 0 to 1024 bytes, which covers every padding case
 // and every partial block length. One digest stands for all of them: they are
 // themselves hashed, in order, and the result compared to a constant obtained
 // from a reference implementation.
-#if 0 // TODO: port to the new sha256_update / merkle tree API.
 static void test_sha256_lengths(void) {
   u8 input[1025] = {0};
   for (usize i = 0; i < sizeof(input); i++) {
@@ -2731,7 +2769,7 @@ static void test_sha256_lengths(void) {
   for (usize len = 0; len < sizeof(input); len++) {
     u8 digest[SHA256_DIGEST_LENGTH] = {0};
     test_sha256_once(slice_u8_make(input, len), digest);
-    sha256_update(&outer, slice_u8_make(digest, sizeof(digest)));
+    sha256_update(&outer, digest, sizeof(digest));
   }
 
   u8 actual[SHA256_DIGEST_LENGTH] = {0};
@@ -2744,30 +2782,29 @@ static void test_sha256_lengths(void) {
   };
   assert(0 == memcmp(actual, expected, sizeof(actual)));
 }
-#endif
 
 // `Init` must fully reset a context, so that reusing one is the same as
 // starting from a fresh `{0}` one.
-#if 0 // TODO: port to the new sha256_update / merkle tree API.
 static void test_sha256_reuse(void) {
   u8 expected[SHA256_DIGEST_LENGTH] = {0};
   test_sha256_once(test_slice("abc"), expected);
 
   Sha256Ctx ctx = {0};
   sha256_init(&ctx);
-  sha256_update(&ctx, test_slice("some other message entirely"));
+  const Slice_u8 other = test_slice("some other message entirely");
+  sha256_update(&ctx, other.data, other.len);
 
   u8 discarded[SHA256_DIGEST_LENGTH] = {0};
   sha256_final(&ctx, discarded);
 
   sha256_init(&ctx);
-  sha256_update(&ctx, test_slice("abc"));
+  const Slice_u8 abc = test_slice("abc");
+  sha256_update(&ctx, abc.data, abc.len);
 
   u8 actual[SHA256_DIGEST_LENGTH] = {0};
   sha256_final(&ctx, actual);
   assert(0 == memcmp(actual, expected, sizeof(actual)));
 }
-#endif
 
 // ---------------------------------------------------------------------------
 // BEP 52 merkle tree
@@ -2781,7 +2818,6 @@ static void test_sha256_reuse(void) {
 // block distinct content. The expected roots below come from libtorrent 2.1.1
 // fed the exact same bytes, checked at both a 16KiB and a 256KiB piece size
 // since `pieces root` must not depend on the piece size.
-#if 0 // TODO: port to the new sha256_update / merkle tree API.
 static Slice_u8 test_merkle_data(Arena *arena) {
   u8 *const buf = arena_alloc(arena, 1, 1, TEST_MERKLE_MAX_LEN);
   assert(buf);
@@ -2796,13 +2832,11 @@ static Slice_u8 test_merkle_data(Arena *arena) {
 
   return slice_u8_make(buf, TEST_MERKLE_MAX_LEN);
 }
-#endif
 
 // Known answer tests. Sizes bracket every boundary the tree construction has:
 // shorter than a block, exactly a block, one byte past a block, an exact
 // power of two number of blocks, and block counts needing one or several
 // padding leaves.
-#if 0 // TODO: port to the new sha256_update / merkle tree API.
 static void test_torrent_merkle_vectors(void) {
   Arena data_arena = arena_valloc(TEST_MERKLE_MAX_LEN + 4 * KiB);
   assert(data_arena.start);
@@ -2810,131 +2844,148 @@ static void test_torrent_merkle_vectors(void) {
 
   const struct {
     usize len;
-    usize nodes_count;
     const char *root;
   } vectors[] = {
-      {1, 1,
-       "0bfe935e70c321c7ca3afc75ce0d0ca2f98b5422e008bb31c00c6d7f1f1c0ad6"},
-      {16383, 1,
+      {1, "0bfe935e70c321c7ca3afc75ce0d0ca2f98b5422e008bb31c00c6d7f1f1c0ad6"},
+      {16383,
        "3dd5a06f7768acc49864c34e60083ab8af5d90cb4fad8388c0391eedbb4ef37b"},
-      {16384, 1,
+      {16384,
        "6c2151ba392602898475e8faea682c1923ca241d0cee54d984b520286e005f0d"},
-      {16385, 3,
+      {16385,
        "26d66f8578c6efa252c8b8deb3810b923392392618bcfea7ce34e1ca0ccf9211"},
-      {32768, 3,
+      {32768,
        "e1bdca49b140c3391bb85e630b7cf05a73534b40d4fe2db5e60bfacd45be473a"},
-      {40960, 7,
+      {40960,
        "809301c68152c8413d38cb646268c1f5caa2dc5bf359d7148eaa9ea3aa0399a7"},
-      {81920, 15,
+      {81920,
        "4e1b3e51bf462b7d9863084f4c139a2106c729c0e0293b8abf692905ea57eee6"},
-      {131072, 15,
+      {131072,
        "d4e69a223d5f61c604c613be46f12a017e134baec50d7cc960a25ba3dfcf5fc3"},
-      {212992, 31,
+      {212992,
        "4c3bf66a99395bf30f382494b6e96fd9976df5ef489ae1a2173af1c1dc841f46"},
   };
+
+  // `pieces root` is defined over 16KiB blocks, so it must come out the same
+  // whatever the operator picked for the piece size. The expected values were
+  // taken from libtorrent 2.1.1 at both ends of this range.
+  const usize piece_lengths_in_bytes[] = {16 * KiB, 32 * KiB, 256 * KiB};
 
   for (usize i = 0; i < sizeof(vectors) / sizeof(vectors[0]); i++) {
     assert(vectors[i].len <= data.len);
 
-    // Poisoned, so that a node the implementation never writes cannot pass
-    // itself off as a zeroed padding hash.
-    Arena arena = test_arena(64 * KiB);
-
-    PieceHash *nodes = NULL;
-    usize nodes_count = 0;
-    assert(torrent_build_merkle_tree(slice_u8_make(data.data, vectors[i].len),
-                                     &nodes, &nodes_count, &arena));
-    assert(nodes);
-    assert(vectors[i].nodes_count == nodes_count);
-
     u8 expected[SHA256_DIGEST_LENGTH] = {0};
     test_digest_from_hex(vectors[i].root, expected);
 
-    // The root is the last node, which is what every caller relies on.
-    assert(0 ==
-           memcmp(nodes[nodes_count - 1].digest, expected, sizeof(expected)));
+    for (usize p = 0;
+         p < sizeof(piece_lengths_in_bytes) / sizeof(piece_lengths_in_bytes[0]);
+         p++) {
+      // Poisoned, so that a hash the implementation never writes cannot pass
+      // itself off as a zeroed padding hash.
+      Arena arena = test_arena(64 * KiB);
+
+      PieceHash *pieces = NULL;
+      usize pieces_count = 0;
+      u8 root[SHA256_DIGEST_LENGTH] = {0};
+      assert(torrent_build_merkle_tree(
+          slice_u8_make(data.data, vectors[i].len), piece_lengths_in_bytes[p],
+          &pieces, &pieces_count, root, &arena));
+
+      assert(0 == memcmp(root, expected, sizeof(expected)));
+    }
   }
 }
-#endif
 
-// Check the whole array, not just the root: a tree can hash to the right
-// value while laying its layers out somewhere a caller cannot find them.
-#if 0 // TODO: port to the new sha256_update / merkle tree API.
-static void test_torrent_merkle_structure(void) {
+// The piece layer, which is what actually ships in the `.torrent` next to the
+// info dictionary. Checked against an independently built tree rather than
+// against the implementation's own intermediate state.
+static void test_torrent_merkle_piece_layer(void) {
   Arena data_arena = arena_valloc(TEST_MERKLE_MAX_LEN + 4 * KiB);
   assert(data_arena.start);
   const Slice_u8 data = test_merkle_data(&data_arena);
 
   const usize lens[] = {1, 16384, 16385, 40960, 81920, 131072, 212992};
+  const usize piece_lengths_in_bytes[] = {16 * KiB, 32 * KiB, 64 * KiB,
+                                          256 * KiB};
 
   for (usize i = 0; i < sizeof(lens) / sizeof(lens[0]); i++) {
     const usize len = lens[i];
     assert(len <= data.len);
 
-    Arena arena = test_arena(64 * KiB);
+    for (usize p = 0;
+         p < sizeof(piece_lengths_in_bytes) / sizeof(piece_lengths_in_bytes[0]);
+         p++) {
+      const usize piece_length_in_bytes = piece_lengths_in_bytes[p];
 
-    PieceHash *nodes = NULL;
-    usize nodes_count = 0;
-    assert(torrent_build_merkle_tree(slice_u8_make(data.data, len), &nodes,
-                                     &nodes_count, &arena));
+      Arena arena = test_arena(64 * KiB);
 
-    const usize blocks =
-        len / TORRENT_BLOCK_SIZE + (len % TORRENT_BLOCK_SIZE != 0);
-    const usize leaves = next_power_of_two(blocks);
-    assert(2 * leaves - 1 == nodes_count);
+      PieceHash *pieces = NULL;
+      usize pieces_count = 0;
+      u8 root[SHA256_DIGEST_LENGTH] = {0};
+      assert(torrent_build_merkle_tree(slice_u8_make(data.data, len),
+                                       piece_length_in_bytes, &pieces,
+                                       &pieces_count, root, &arena));
 
-    // Leaf layer: the first `blocks` leaves cover the file, the rest are
-    // padding.
-    for (usize l = 0; l < leaves; l++) {
-      u8 expected[SHA256_DIGEST_LENGTH] = {0};
-
-      if (l < blocks) {
-        const usize offset = l * TORRENT_BLOCK_SIZE;
-        const usize block_len = len - offset < TORRENT_BLOCK_SIZE
-                                    ? len - offset
-                                    : TORRENT_BLOCK_SIZE;
-        sha256_digest(slice_u8_make(data.data + offset, block_len), expected);
-      } // Padding leaves stay zero, per BEP 52.
-
-      assert(0 == memcmp(nodes[l].digest, expected, sizeof(expected)));
-    }
-
-    // Interior layers, each appended after the one below it.
-    usize width = leaves;
-    usize offset = 0;
-    while (width > 1) {
-      const usize next_offset = offset + width;
-
-      for (usize w = 0; w < width / 2; w++) {
-        Sha256Ctx ctx = {0};
-        sha256_init(&ctx);
-        sha256_update(&ctx, slice_u8_make(nodes[offset + 2 * w].digest,
-                                          SHA256_DIGEST_LENGTH));
-        sha256_update(&ctx, slice_u8_make(nodes[offset + 2 * w + 1].digest,
-                                          SHA256_DIGEST_LENGTH));
-
-        u8 expected[SHA256_DIGEST_LENGTH] = {0};
-        sha256_final(&ctx, expected);
-
-        assert(0 == memcmp(nodes[next_offset + w].digest, expected,
-                           sizeof(expected)));
+      const usize expected_pieces = ceil_usize(len, piece_length_in_bytes);
+      if (expected_pieces > 1) {
+        assert(pieces);
+        assert(expected_pieces == pieces_count);
+      } else { // A file inside one piece has no piece layer, per BEP 52.
+        assert(NULL == pieces);
+        assert(0 == pieces_count);
       }
 
-      offset = next_offset;
-      width /= 2;
-    }
+      // Build the whole tree the slow, obvious way and read the answers off
+      // it. `TEST_MERKLE_MAX_LEN` is 13 blocks, so 16 leaves covers every case.
+      const usize blocks = ceil_usize(len, TORRENT_BLOCK_SIZE);
+      const usize leaves = next_power_of_two(blocks);
+      assert(leaves <= 16);
 
-    // The walk ends on the root, and the root is the last node.
-    assert(nodes_count - 1 == offset);
+      u8 layer[16][SHA256_DIGEST_LENGTH] = {{0}};
+      for (usize l = 0; l < leaves; l++) {
+        if (l < blocks) {
+          const usize offset = l * TORRENT_BLOCK_SIZE;
+          const usize block_len = len - offset < TORRENT_BLOCK_SIZE
+                                      ? len - offset
+                                      : TORRENT_BLOCK_SIZE;
+          sha256_digest(slice_u8_make(data.data + offset, block_len), layer[l]);
+        } // Padding leaves stay zero, per BEP 52.
+      }
+
+      // Width of the level where one node spans exactly one piece. Zero when
+      // a piece is wider than the whole padded tree, which never matches
+      // below and so checks nothing, which is right: there is no piece layer.
+      const usize blocks_per_piece = piece_length_in_bytes / TORRENT_BLOCK_SIZE;
+      const usize piece_width = leaves / blocks_per_piece;
+
+      for (usize width = leaves;; width /= 2) {
+        if (0 != pieces_count && width == piece_width) {
+          assert(pieces_count <= width);
+          for (usize piece = 0; piece < pieces_count; piece++) {
+            assert(0 == memcmp(pieces[piece].digest, layer[piece],
+                               SHA256_DIGEST_LENGTH));
+          }
+        }
+
+        if (1 == width) {
+          break;
+        }
+
+        for (usize w = 0; w < width / 2; w++) {
+          // `w <= 2 * w`, and the pair is read before the write lands, so
+          // folding in place cannot clobber an input it still needs.
+          sha256_digest_pair(layer[2 * w], layer[2 * w + 1], layer[w]);
+        }
+      }
+
+      assert(0 == memcmp(root, layer[0], SHA256_DIGEST_LENGTH));
+    }
   }
 }
-#endif
 
 // The padding rule, which is the part of BEP 52 that is easiest to get wrong:
 // leaves past the end of the file are 32 zero bytes, and only the leaf layer
 // is zeroed. Everything above it is hashed normally, so a node covering
 // nothing but padding is emphatically not zero.
-#if 0 // TODO: port to the new sha256_update / merkle tree API.
 static void test_torrent_merkle_padding(void) {
   Arena data_arena = arena_valloc(64 * KiB);
   assert(data_arena.start);
@@ -2948,64 +2999,94 @@ static void test_torrent_merkle_padding(void) {
 
   Arena arena = test_arena(64 * KiB);
 
-  PieceHash *nodes = NULL;
-  usize nodes_count = 0;
-  assert(torrent_build_merkle_tree(slice_u8_make(buf, len), &nodes,
-                                   &nodes_count, &arena));
-  assert(7 == nodes_count);
+  PieceHash *pieces = NULL;
+  usize pieces_count = 0;
+  u8 root[SHA256_DIGEST_LENGTH] = {0};
+  // One block per piece, so the piece layer is the leaf layer and every leaf
+  // that holds file data is observable.
+  assert(torrent_build_merkle_tree(slice_u8_make(buf, len), 16 * KiB, &pieces,
+                                   &pieces_count, root, &arena));
+  assert(pieces);
+  assert(3 == pieces_count);
 
-  const u8 zero[SHA256_DIGEST_LENGTH] = {0};
+  // The three real leaves are the hashes of the three blocks, the last at its
+  // true length rather than zero extended to a full block.
+  for (usize l = 0; l < 3; l++) {
+    const usize offset = l * TORRENT_BLOCK_SIZE;
+    const usize block_len = len - offset < TORRENT_BLOCK_SIZE
+                                ? len - offset
+                                : TORRENT_BLOCK_SIZE;
+    u8 expected[SHA256_DIGEST_LENGTH] = {0};
+    sha256_digest(slice_u8_make(buf + offset, block_len), expected);
+    assert(0 == memcmp(pieces[l].digest, expected, sizeof(expected)));
+  }
 
-  // The padding leaf is zero, and is not the hash of anything.
-  assert(0 == memcmp(nodes[3].digest, zero, sizeof(zero)));
+  // The fourth leaf is padding and so is absent from the piece layer, which
+  // is the truncation BEP 52 asks for.
+  assert(3 == pieces_count);
 
-  // In particular it is not the hash of a zero filled block, the other
-  // plausible reading of "set to zero".
+  // Now pin the padding rule through the root, the only place it is visible:
+  // the padding leaf is 32 zero bytes, not the hash of a zero filled block.
+  u8 leaf[4][SHA256_DIGEST_LENGTH] = {{0}};
+  for (usize l = 0; l < 3; l++) {
+    memcpy(leaf[l], pieces[l].digest, SHA256_DIGEST_LENGTH);
+  } // `leaf[3]` stays zero.
+
+  u8 left[SHA256_DIGEST_LENGTH] = {0};
+  u8 right[SHA256_DIGEST_LENGTH] = {0};
+  u8 expected_root[SHA256_DIGEST_LENGTH] = {0};
+  sha256_digest_pair(leaf[0], leaf[1], left);
+  sha256_digest_pair(leaf[2], leaf[3], right);
+  sha256_digest_pair(left, right, expected_root);
+  assert(0 == memcmp(root, expected_root, sizeof(expected_root)));
+
+  // The other plausible reading of "set to zero" gives a different root, so
+  // the test above is actually discriminating.
   u8 *const zero_block = arena_alloc(&data_arena, 1, 1, TORRENT_BLOCK_SIZE);
   assert(zero_block);
   memset(zero_block, 0, TORRENT_BLOCK_SIZE);
+  sha256_digest(slice_u8_make(zero_block, TORRENT_BLOCK_SIZE), leaf[3]);
 
-  u8 zero_block_hash[SHA256_DIGEST_LENGTH] = {0};
-  sha256_digest(slice_u8_make(zero_block, TORRENT_BLOCK_SIZE), zero_block_hash);
-  assert(0 !=
-         memcmp(nodes[3].digest, zero_block_hash, sizeof(zero_block_hash)));
+  u8 wrong_root[SHA256_DIGEST_LENGTH] = {0};
+  sha256_digest_pair(leaf[2], leaf[3], right);
+  sha256_digest_pair(left, right, wrong_root);
+  assert(0 != memcmp(root, wrong_root, sizeof(wrong_root)));
 
-  // The short tail block is hashed at its real length, not zero extended to a
-  // full block.
-  u8 tail[SHA256_DIGEST_LENGTH] = {0};
-  sha256_digest(slice_u8_make(buf + 2 * TORRENT_BLOCK_SIZE, 1), tail);
-  assert(0 == memcmp(nodes[2].digest, tail, sizeof(tail)));
-
-  // The parent of the padding leaf is a real hash, not more zeroes.
-  assert(0 != memcmp(nodes[5].digest, zero, sizeof(zero)));
+  // And a node above the leaf layer is hashed normally even when everything
+  // under it is padding, so it is emphatically not zero.
+  const u8 zero[SHA256_DIGEST_LENGTH] = {0};
+  u8 all_padding[SHA256_DIGEST_LENGTH] = {0};
+  sha256_digest_pair((u8 *)zero, (u8 *)zero, all_padding);
+  assert(0 != memcmp(all_padding, zero, sizeof(zero)));
 }
-#endif
 
 // BEP 52: an empty file has no pieces root at all.
-#if 0 // TODO: port to the new sha256_update / merkle tree API.
 static void test_torrent_merkle_empty(void) {
   Arena arena = test_arena(64 * KiB);
 
-  // Preset to garbage: both out parameters must be cleared, since a caller
+  // Preset to garbage: every out parameter must be cleared, since a caller
   // has no other way to tell that no tree was built.
-  PieceHash *nodes = (PieceHash *)(usize)0xdeadbeef;
-  usize nodes_count = 123;
+  PieceHash *pieces = (PieceHash *)(usize)0xdeadbeef;
+  usize pieces_count = 123;
+  u8 root[SHA256_DIGEST_LENGTH];
+  memset(root, 0xcd, sizeof(root));
 
-  assert(
-      torrent_build_merkle_tree((Slice_u8){0}, &nodes, &nodes_count, &arena));
-  assert(NULL == nodes);
-  assert(0 == nodes_count);
+  assert(torrent_build_merkle_tree((Slice_u8){0}, 256 * KiB, &pieces,
+                                   &pieces_count, root, &arena));
+  assert(NULL == pieces);
+  assert(0 == pieces_count);
+
+  const u8 zero[SHA256_DIGEST_LENGTH] = {0};
+  assert(0 == memcmp(root, zero, sizeof(zero)));
 }
-#endif
 
 // The one failure path: an arena too small for the tree is reported, not
 // asserted, and leaves nothing half built behind.
-#if 0 // TODO: port to the new sha256_update / merkle tree API.
 static void test_torrent_merkle_oom(void) {
   Arena data_arena = arena_valloc(64 * KiB);
   assert(data_arena.start);
 
-  // Two blocks, so the tree needs three nodes.
+  // Two blocks, so at one block per piece the layer needs two hashes.
   const usize len = TORRENT_BLOCK_SIZE + 1;
   u8 *const buf = arena_alloc(&data_arena, 1, 1, len);
   assert(buf);
@@ -3013,19 +3094,20 @@ static void test_torrent_merkle_oom(void) {
 
   Arena arena = test_arena(4 * KiB);
 
-  // Leave room for fewer nodes than the tree needs.
+  // Leave room for fewer hashes than the piece layer needs.
   const usize free_bytes = (usize)(arena.end - arena.start);
-  assert(free_bytes > 2 * sizeof(PieceHash));
-  u8 *const hog = arena_alloc(&arena, 1, 1, free_bytes - 2 * sizeof(PieceHash));
+  assert(free_bytes > sizeof(PieceHash));
+  u8 *const hog = arena_alloc(&arena, 1, 1, free_bytes - sizeof(PieceHash));
   assert(hog);
 
-  PieceHash *nodes = NULL;
-  usize nodes_count = 0;
-  assert(!torrent_build_merkle_tree(slice_u8_make(buf, len), &nodes,
-                                    &nodes_count, &arena));
-  assert(NULL == nodes);
+  PieceHash *pieces = NULL;
+  usize pieces_count = 0;
+  u8 root[SHA256_DIGEST_LENGTH] = {0};
+  assert(!torrent_build_merkle_tree(slice_u8_make(buf, len), 16 * KiB, &pieces,
+                                    &pieces_count, root, &arena));
+  assert(NULL == pieces);
+  assert(0 == pieces_count);
 }
-#endif
 
 // ---------------------------------------------------------------------------
 // encode_usize_base_10
@@ -3704,18 +3786,18 @@ static void test(const char *filter) {
       {"bencode_parse", test_bencode_parse},
       {"bytes_cmp", test_bytes_cmp},
       {"bencode_validate_dict", test_bencode_validate_dict},
-      // TODO: {"sha256_vectors", test_sha256_vectors},
-      // TODO: {"sha256_million_a", test_sha256_million_a},
-      // TODO: {"sha256_incremental", test_sha256_incremental},
-      // TODO: {"sha256_lengths", test_sha256_lengths},
-      // TODO: {"sha256_reuse", test_sha256_reuse},
+      {"sha256_vectors", test_sha256_vectors},
+      {"sha256_million_a", test_sha256_million_a},
+      {"sha256_incremental", test_sha256_incremental},
+      {"sha256_lengths", test_sha256_lengths},
+      {"sha256_reuse", test_sha256_reuse},
       {"sha256_neon_matches_scalar", test_sha256_neon_matches_scalar},
       {"sha256_neon_lengths", test_sha256_neon_lengths},
-      // TODO: {"torrent_merkle_vectors", test_torrent_merkle_vectors},
-      // TODO: {"torrent_merkle_structure", test_torrent_merkle_structure},
-      // TODO: {"torrent_merkle_padding", test_torrent_merkle_padding},
-      // TODO: {"torrent_merkle_empty", test_torrent_merkle_empty},
-      // TODO: {"torrent_merkle_oom", test_torrent_merkle_oom},
+      {"torrent_merkle_vectors", test_torrent_merkle_vectors},
+      {"torrent_merkle_piece_layer", test_torrent_merkle_piece_layer},
+      {"torrent_merkle_padding", test_torrent_merkle_padding},
+      {"torrent_merkle_empty", test_torrent_merkle_empty},
+      {"torrent_merkle_oom", test_torrent_merkle_oom},
       {"usize_digits_base_10", test_usize_digits_base_10},
       {"encode_usize_base_10", test_encode_usize_base_10},
       {"encode_usize_base_10_exact_fit", test_encode_usize_base_10_exact_fit},
