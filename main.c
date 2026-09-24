@@ -42,6 +42,19 @@ typedef enum {
   ErrInvalidData,
   ErrOSPermission,
   ErrRange,
+  // The port is already bound.
+  ErrAddrInUse,
+  // Nothing to do right now; the same call may succeed later. This is the
+  // expected, unexceptional answer from a non-blocking socket.
+  ErrAgain,
+  // A signal arrived before the call could make progress. Nothing failed:
+  // the call is meant to be reissued immediately.
+  ErrInterrupted,
+  // The peer went away, at any of the points it can: before the connection
+  // was accepted, during a read, or on a write to a closed socket.
+  ErrConnReset,
+  // The process or the system is out of file descriptors.
+  ErrTooManyFiles,
 } Error;
 
 __attribute__((warn_unused_result)) static bool char_is_digit_ascii(u8 c) {
@@ -254,22 +267,49 @@ slice_u8_consume(Slice_u8 *slice, u8 expected) {
 }
 // ---------- Unix ----------
 
-// Map an `errno` onto our own errors. Shared by every syscall wrapper below:
-// the values that matter here are the ones `mmap` and `mprotect` document, and
-// they mean the same thing whichever of the two produced them.
+// Map an `errno` onto our own errors. Shared by every syscall wrapper: an
+// `errno` means the same thing whichever call produced it, so the mapping
+// lives in one place rather than being repeated per wrapper.
 //
 // Anything not listed is this code calling the kernel wrong, which is what
-// `ErrInvalidData` covers: a bad descriptor, a misaligned address, a length of
-// zero, an unsupported protection.
+// `ErrInvalidData` covers: a bad descriptor, a misaligned address, a length
+// of zero, an unsupported protection, a socket option that does not apply.
 __attribute__((warn_unused_result)) static Error unix_error_from_errno(i32 e) {
   switch (e) {
   case EACCES:
   case EPERM:
     return ErrOSPermission;
+
   case ENOMEM:
+  case ENOBUFS:
     return ErrOOM;
+
   case EOVERFLOW:
     return ErrRange;
+
+  case EADDRINUSE:
+    return ErrAddrInUse;
+
+  // `EAGAIN` and `EWOULDBLOCK` are permitted to be the same value, and on
+  // this platform they are, so the second label would be a duplicate case.
+  case EAGAIN:
+#if EAGAIN != EWOULDBLOCK
+  case EWOULDBLOCK:
+#endif
+    return ErrAgain;
+
+  case EINTR:
+    return ErrInterrupted;
+
+  case ECONNABORTED:
+  case ECONNRESET:
+  case EPIPE:
+    return ErrConnReset;
+
+  case EMFILE: // Per process limit.
+  case ENFILE: // System wide limit.
+    return ErrTooManyFiles;
+
   default:
     return ErrInvalidData;
   }
@@ -2207,6 +2247,69 @@ static void test_arena_alloc(void) {
     assert(b == a + 2);
     assert((usize)arena.start == (usize)a + 5 * sizeof(BencodeValue));
   }
+}
+
+// Every `errno` the syscalls this program makes are documented to set, and
+// what each one is supposed to come back as. A value landing in the
+// `ErrInvalidData` default by accident rather than on purpose is exactly the
+// kind of thing that goes unnoticed, so list them explicitly.
+static void test_unix_error_from_errno(void) {
+  const struct {
+    i32 errno_value;
+    Error expected;
+  } cases[] = {
+      // Permission.
+      {EACCES, ErrOSPermission},
+      {EPERM, ErrOSPermission},
+
+      // Out of memory, including the socket buffer flavour.
+      {ENOMEM, ErrOOM},
+      {ENOBUFS, ErrOOM},
+
+      {EOVERFLOW, ErrRange},
+      {EADDRINUSE, ErrAddrInUse},
+      {EAGAIN, ErrAgain},
+      {EWOULDBLOCK, ErrAgain},
+      {EINTR, ErrInterrupted},
+
+      // Every way a peer can vanish.
+      {ECONNABORTED, ErrConnReset},
+      {ECONNRESET, ErrConnReset},
+      {EPIPE, ErrConnReset},
+
+      // Descriptor exhaustion, per process and system wide.
+      {EMFILE, ErrTooManyFiles},
+      {ENFILE, ErrTooManyFiles},
+
+      // Calling the kernel wrong, from every syscall in use: bad descriptor,
+      // not a socket, wrong family or protocol, unsupported operation,
+      // misaligned address, no such file.
+      {EBADF, ErrInvalidData},
+      {ENOTSOCK, ErrInvalidData},
+      {EAFNOSUPPORT, ErrInvalidData},
+      {EPROTOTYPE, ErrInvalidData},
+      {EPROTONOSUPPORT, ErrInvalidData},
+      {EOPNOTSUPP, ErrInvalidData},
+      {EINVAL, ErrInvalidData},
+      {ENOTSUP, ErrInvalidData},
+      {ENODEV, ErrInvalidData},
+      {ENXIO, ErrInvalidData},
+      {ENOENT, ErrInvalidData},
+      {EISDIR, ErrInvalidData},
+
+      // Nothing is ever mapped to success.
+      {0, ErrInvalidData},
+  };
+
+  for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    assert(cases[i].expected == unix_error_from_errno(cases[i].errno_value));
+    assert(ErrNone != unix_error_from_errno(cases[i].errno_value));
+  }
+
+  // `EAGAIN` and `EWOULDBLOCK` are allowed to be the same value; whether they
+  // are or not, both have to answer `ErrAgain`.
+  assert(ErrAgain == unix_error_from_errno(EAGAIN));
+  assert(ErrAgain == unix_error_from_errno(EWOULDBLOCK));
 }
 
 static void test_arena_valloc(void) {
@@ -4429,6 +4532,7 @@ static void test(const char *filter) {
       {"usize_round_up_multiple_of", test_usize_round_up_multiple_of},
       {"next_power_of_two", test_next_power_of_two},
       {"arena_alloc", test_arena_alloc},
+      {"unix_error_from_errno", test_unix_error_from_errno},
       {"arena_valloc", test_arena_valloc},
       {"slice_u8", test_slice_u8},
       {"unix_path_last_component", test_unix_path_last_component},
