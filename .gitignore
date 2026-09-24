@@ -3,3 +3,4 @@ a.out
 a.out.san
 a.out.san.dSYM/
 .DS_Store
+*.O2
