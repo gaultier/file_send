@@ -1140,19 +1140,20 @@ static const usize TORRENT_BLOCK_SIZE = 16 * KiB;
 // `data`: file data to be hashed.
 // `tree_width_idx`: index in the tree, bounded by the tree width.
 // `real_blocks_count`: total (not padded) block count, constant (per file).
-// `depth`: Current height in the tree.
+// `depth`: Current depth in the tree.
 // `depth == 0`: root.
 // `depth == max_depth`: leaf.
 // `piece_length`: length in bytes of a piece, picked by the user/operator.
 // `dst_piece_hashes`: resulting SHA256 hash for each piece, needed by the info
-// dictionary.
+// dictionary. Must be at least `pieces_count` in capacity.
 // `dst`: resulting SHA256 hash for the subtree.
 static void torrent_build_merkle_sub_tree(Slice_u8 data, usize tree_width_idx,
                                           usize real_blocks_count, usize depth,
                                           usize piece_length,
                                           PieceHash *dst_piece_hashes,
                                           u8 dst[SHA256_DIGEST_LENGTH]) {
-  // TODO: assert(tree_width_idx < ...);
+
+  assert(tree_width_idx < (usize)(1 << depth));
 
   assert(real_blocks_count > 0);
   const usize padded_blocks_count = next_power_of_two(real_blocks_count);
@@ -1168,6 +1169,13 @@ static void torrent_build_merkle_sub_tree(Slice_u8 data, usize tree_width_idx,
   assert(dst);
 
   const bool is_leaf = max_depth == depth;
+  const bool only_one_piece = 16 * KiB == piece_length;
+
+  if (only_one_piece) {
+    sha256_digest(data, dst);
+    memcpy(dst_piece_hashes, dst, SHA256_DIGEST_LENGTH);
+    return;
+  }
 
   if (is_leaf) {
     // Need to hash the file data?
@@ -1187,7 +1195,11 @@ static void torrent_build_merkle_sub_tree(Slice_u8 data, usize tree_width_idx,
   }
 
   assert(!is_leaf);
-  const usize piece_depth = max_depth - (__builtin_ctzll(piece_length) - 14);
+  assert(__builtin_ctzll(piece_length) >= 14);
+  usize piece_depth = 0;
+  assert(!__builtin_sub_overflow(
+      max_depth, (__builtin_ctzll(piece_length) - 14), &piece_depth));
+  assert(piece_depth < 256); // TODO: Better bound.
 
   const usize new_depth = depth + 1;
   assert(new_depth <= max_depth);
@@ -1204,9 +1216,10 @@ static void torrent_build_merkle_sub_tree(Slice_u8 data, usize tree_width_idx,
 
   sha256_digest_pair(left, right, dst);
 
-  const usize pieces_count =
-      piece_length * real_blocks_count / TORRENT_BLOCK_SIZE;
+  const usize pieces_count = piece_length / TORRENT_BLOCK_SIZE;
   assert(pieces_count > 0);
+  assert(pieces_count < real_blocks_count);
+  assert(pieces_count < data.len / TORRENT_BLOCK_SIZE);
 
   // Record (real, not padding) piece hash?
   if (piece_depth == depth && tree_width_idx < pieces_count) {
