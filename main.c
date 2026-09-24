@@ -404,7 +404,9 @@ typedef enum {
 typedef enum { SocketTypeUdp, SocketTypeTcp } SocketType;
 
 __attribute__((warn_unused_result)) static Error
-unix_socket(SocketDomain domain, SocketType type, i32 *fd) {
+unix_socket(void *ctx, SocketDomain domain, SocketType type, i32 *fd) {
+  (void)ctx;
+
   assert(fd);
 
   i32 unix_domain = 0;
@@ -442,8 +444,10 @@ unix_socket(SocketDomain domain, SocketType type, i32 *fd) {
   return ErrNone;
 }
 
-__attribute__((warn_unused_result)) static Error unix_listen(i32 fd,
+__attribute__((warn_unused_result)) static Error unix_listen(void *ctx, i32 fd,
                                                              i32 backlog) {
+  (void)ctx;
+
   i32 ret = 0;
   do {
     ret = listen(fd, backlog);
@@ -461,7 +465,9 @@ typedef enum {
 } FileOpenOptions;
 
 __attribute__((warn_unused_result)) static Error
-unix_open(char *path, FileOpenOptions options, i32 *fd) {
+unix_open(void *ctx, char *path, FileOpenOptions options, i32 *fd) {
+  (void)ctx;
+
   assert(fd);
 
   i32 unix_options = 0;
@@ -486,9 +492,9 @@ unix_open(char *path, FileOpenOptions options, i32 *fd) {
 // ---------- IO ----------
 
 typedef struct {
-  Error (*socket)(SocketDomain domain, SocketType type, i32 *fd);
-  Error (*listen)(i32 fd, i32 backlog);
-  Error (*open)(char *path, FileOpenOptions options, i32 *fd);
+  Error (*socket)(void *ctx, SocketDomain domain, SocketType type, i32 *fd);
+  Error (*listen)(void *ctx, i32 fd, i32 backlog);
+  Error (*open)(void *ctx, char *path, FileOpenOptions options, i32 *fd);
 } IO;
 
 __attribute__((warn_unused_result)) static IO io_unix_make(void) {
@@ -4706,7 +4712,7 @@ int main(i32 argc, char *argv[]) {
     assert(3 == argc);
 
     i32 fd = 0;
-    assert(ErrNone == io.open(argv[2], FileOpenOptionsReadOnly, &fd));
+    assert(ErrNone == io.open(NULL, argv[2], FileOpenOptionsReadOnly, &fd));
 
     struct stat st = {0};
     assert(-1 != fstat(fd, &st));
@@ -4729,7 +4735,7 @@ int main(i32 argc, char *argv[]) {
     assert(3 == argc);
 
     i32 fd = 0;
-    assert(ErrNone == io.open(argv[2], FileOpenOptionsReadOnly, &fd));
+    assert(ErrNone == io.open(NULL, argv[2], FileOpenOptionsReadOnly, &fd));
 
     struct stat st = {0};
     assert(-1 != fstat(fd, &st));
@@ -4792,13 +4798,14 @@ int main(i32 argc, char *argv[]) {
 
     i32 socket_fd = 0;
     {
-      Error err_socket = io.socket(SocketDomainIpv4, SocketTypeTcp, &socket_fd);
+      Error err_socket =
+          io.socket(NULL, SocketDomainIpv4, SocketTypeTcp, &socket_fd);
       assert(ErrNone == err_socket);
       puts("opened socket");
     }
 
     {
-      Error err_listen = io.listen(socket_fd, 1024);
+      Error err_listen = io.listen(NULL, socket_fd, 1024);
       assert(ErrNone == err_listen);
       puts("socket listening");
     }
