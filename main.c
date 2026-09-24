@@ -1311,6 +1311,8 @@ torrent_merkle_tree_make(Slice_u8 data, usize piece_length_in_bytes,
   const bool has_piece_layer = ceil_usize(blocks_count, blocks_per_piece) > 1;
   if (has_piece_layer) {
     assert(piece_bits < max_depth);
+  } else {
+    assert(data.len <= piece_length_in_bytes);
   }
 
   const MerkleTree tree = {
@@ -1470,8 +1472,6 @@ __attribute__((warn_unused_result)) static bool torrent_make_metainfo_dict_v2(
     usize piece_hashes_count, BencodeValue *dst, Arena *arena) {
   assert(!slice_u8_is_empty(announce_url));
   assert(info_dict.len > 0);
-  assert(piece_hashes);
-  assert(piece_hashes_count > 0);
   assert(dst);
   assert(arena);
 
@@ -1492,6 +1492,12 @@ __attribute__((warn_unused_result)) static bool torrent_make_metainfo_dict_v2(
     BencodeValue *const announce_value = &dst->v.list.data[1];
     announce_value->kind = BencodeKindString;
     announce_value->v.s = announce_url;
+  }
+
+  // TODO
+  {
+    (void)piece_hashes;
+    (void)piece_hashes_count;
   }
 
   return true;
@@ -1567,6 +1573,12 @@ torrent_make_info_dict_v2(Slice_u8 name, usize piece_length_in_bytes,
                                    &piece_hashes, &piece_hashes_count, root,
                                    arena)) {
       return false;
+    }
+    // If the file data does not fit within one piece, then the piece layer is
+    // required (per spec).
+    if (file_data.len > piece_length_in_bytes) {
+      assert(piece_hashes);
+      assert(piece_hashes_count > 0);
     }
 
     BencodeValue *const file_tree_dict = &dst_info_dict->v.list.data[1];
