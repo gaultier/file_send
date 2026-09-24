@@ -599,7 +599,11 @@ unix_enable_socket_reuse(void *ctx, i32 fd) {
     ret = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val));
   } while (-1 == ret && EINTR == errno);
 
-  return unix_error_from_errno(ret);
+  if (-1 == ret) {
+    return unix_error_from_errno(errno);
+  }
+
+  return ErrNone;
 }
 
 // ---------- IO ----------
