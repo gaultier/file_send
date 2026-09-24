@@ -4956,6 +4956,35 @@ typedef struct {
   // More: torrent, etc.
 } TorrentClientHandleCtx;
 
+#define TORRENT_CLIENTS_MAX 1024
+
+typedef struct {
+  // Bitset.
+  u64 occupied[TORRENT_CLIENTS_MAX / 64];
+
+  TorrentClientHandleCtx slots[TORRENT_CLIENTS_MAX];
+} TorrentClientHandleCtxPool;
+
+__attribute__((warn_unused_result)) static TorrentClientHandleCtx *
+torrent_client_ctx_pool_alloc(TorrentClientHandleCtxPool *pool) {
+  assert(pool);
+
+  // TODO
+
+  return NULL;
+}
+
+__attribute__((warn_unused_result)) static TorrentClientHandleCtx *
+torrent_client_ctx_pool_release(TorrentClientHandleCtxPool *pool,
+                                TorrentClientHandleCtx *slot) {
+  assert(pool);
+  assert(slot);
+
+  // TODO
+
+  return NULL;
+}
+
 static void *torrent_client_handle(void *vctx) {
   assert(vctx);
 
