@@ -4865,6 +4865,9 @@ static void *torrent_client_handle(void *vctx) {
 
   puts("torrent_client_handle end");
 
+  // Responsible for freeing our context.
+  free(ctx);
+
   return NULL;
 }
 
