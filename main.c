@@ -1202,7 +1202,9 @@ torrent_merkle_tree_make(Slice_u8 data, usize piece_length_in_bytes,
   // cannot underflow. A single piece file skips the layer entirely and its
   // `piece_depth` is never read.
   const bool has_piece_layer = ceil_usize(blocks_count, blocks_per_piece) > 1;
-  assert(!has_piece_layer || piece_bits < max_depth);
+  if (has_piece_layer) {
+    assert(piece_bits < max_depth);
+  }
 
   const MerkleTree tree = {
       .data = data,
@@ -1221,10 +1223,11 @@ torrent_merkle_tree_make(Slice_u8 data, usize piece_length_in_bytes,
   // from the byte form, so the two must agree.
   assert(tree.pieces_count == ceil_usize(data.len, piece_length_in_bytes));
   assert(tree.piece_depth <= tree.max_depth);
-  // The piece layer is a real layer, so it cannot hold more entries than it
-  // has nodes.
-  assert(!tree.has_piece_layer ||
-         tree.pieces_count <= ((usize)1 << tree.piece_depth));
+  if (tree.has_piece_layer) {
+    // The piece layer is a real layer, so it cannot hold more entries than it
+    // has nodes.
+    assert(tree.pieces_count <= ((usize)1 << tree.piece_depth));
+  }
 
   return tree;
 }
@@ -1256,8 +1259,9 @@ static void torrent_build_merkle_sub_tree(const MerkleTree *tree,
       assert(block_data.len > 0);
       assert(block_data.len <= TORRENT_BLOCK_SIZE);
       assert(offset + block_data.len <= tree->data.len);
-      assert(block_data.len == TORRENT_BLOCK_SIZE ||
-             offset + block_data.len == tree->data.len);
+      if (TORRENT_BLOCK_SIZE != block_data.len) {
+        assert(offset + block_data.len == tree->data.len);
+      }
 
       sha256_digest(block_data, dst);
     } else { // Past the end of the file: a zero hash, per spec.
