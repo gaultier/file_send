@@ -423,8 +423,8 @@ slice_u8_contains_byte(Slice_u8 s, u8 byte) {
   return NULL != memchr(s.data, byte, s.len);
 }
 
-__attribute__((warn_unused_result)) static bool slice_u8_eq_cstr(Slice_u8 s,
-                                                                 char *cstr) {
+__attribute__((warn_unused_result)) static bool
+slice_u8_eq_cstr(Slice_u8 s, const char *cstr) {
   if (!cstr) {
     return slice_u8_is_empty(s);
   }
@@ -2041,6 +2041,90 @@ static void test_slice_u8(void) {
     const Slice_u8 taken = slice_u8_take(slice, 2);
     assert(2 == taken.len);
     assert(data == taken.data);
+  }
+}
+
+static void test_unix_path_last_component(void) {
+  const struct {
+    const char *input;
+    // The expected component, or `NULL` when the path is rejected and the
+    // function returns the empty slice.
+    const char *expected;
+  } cases[] = {
+      // An empty path, and paths that shrink to nothing once the trailing
+      // separators are removed.
+      {"", "."},
+      {"/", "."},
+      {"///", "."},
+
+      // No separator at all: the whole path is the component.
+      {"a", "a"},
+      {"traces.jsonl.zip", "traces.jsonl.zip"},
+
+      // The usual cases.
+      {"/a", "a"},
+      {"a/b", "b"},
+      {"/a/b/c.zip", "c.zip"},
+      {"./a", "a"},
+      {"../a", "a"},
+
+      // Trailing separators are removed first.
+      {"a/", "a"},
+      {"/a/b/", "b"},
+      {"a/b///", "b"},
+
+      // A component made of dots is only special when it is exactly "..".
+      {".", "."},
+      {"a/.", "."},
+      {"...", "..."},
+      {"a/..b", "..b"},
+      {"a/b..", "b.."},
+
+      // "..": rejected, but only when a separator precedes it. See the
+      // comment below.
+      {"a/..", NULL},
+      {"/..", NULL},
+      {"a/../", NULL},
+      {"..", ".."},
+      {"../", ".."},
+
+      // Consecutive separators yield an empty component rather than
+      // skipping over them.
+      {"a//b", "b"},
+      {"a//", "a"},
+  };
+
+  for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    const Slice_u8 got = unix_path_last_component(test_slice(cases[i].input));
+
+    if (!cases[i].expected) {
+      assert(slice_u8_is_empty(got));
+      continue;
+    }
+
+    assert(slice_u8_eq_cstr(got, cases[i].expected));
+    // A component never contains a separator.
+    assert(!slice_u8_contains_byte(got, '/'));
+  }
+
+  // A null slice is the same as an empty one.
+  assert(
+      slice_u8_eq_cstr(unix_path_last_component(slice_u8_make(NULL, 0)), "."));
+
+  // The result borrows from the input: no copy, and it is a suffix of the
+  // path (after the trailing separators are removed).
+  {
+    const Slice_u8 path = test_slice("/a/b/c.zip");
+    const Slice_u8 got = unix_path_last_component(path);
+    assert(path.data + path.len - got.len == got.data);
+  }
+  // The input is passed by value, so the caller's slice is untouched even
+  // though the function trims trailing separators.
+  {
+    Slice_u8 path = test_slice("/a/b/");
+    const Slice_u8 got = unix_path_last_component(path);
+    assert(slice_u8_eq_cstr(got, "b"));
+    assert(5 == path.len);
   }
 }
 
@@ -3888,6 +3972,7 @@ static void test(const char *filter) {
       {"arena_alloc", test_arena_alloc},
       {"arena_valloc", test_arena_valloc},
       {"slice_u8", test_slice_u8},
+      {"unix_path_last_component", test_unix_path_last_component},
       {"ascii_num_parse", test_ascii_num_parse},
       {"bencode_parse_num", test_bencode_parse_num},
       {"bencode_parse_string", test_bencode_parse_string},
@@ -3984,9 +4069,8 @@ int main(i32 argc, char *argv[]) {
     const Slice_u8 file_name = unix_path_last_component(file_path);
     Arena arena = arena_valloc(32 * MiB);
 
-    Slice_u8 name = {.data = (u8 *)"test", .len = 4};
     BencodeValue info_dict = {0};
-    assert(torrent_make_info_dict_v2(name, TORRENT_BLOCK_SIZE * 16, input,
+    assert(torrent_make_info_dict_v2(file_name, TORRENT_BLOCK_SIZE * 16, input,
                                      file_name, &info_dict, &arena));
 
     bencode_print(info_dict, 0);
