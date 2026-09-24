@@ -35,15 +35,6 @@ typedef ssize_t isize;
 static const usize KiB = 1024;
 static const usize MiB = 1024 * KiB;
 
-typedef struct {
-  // Start of the arena allocation.
-  // Increases with each allocation.
-  u8 *start;
-  // Size of the full arena.
-  // Only used to detect the OOM case.
-  u8 *end;
-} Arena;
-
 #define SHA256_DIGEST_LENGTH 32
 
 typedef struct {
@@ -70,6 +61,16 @@ isize_from_usize(usize magnitude, bool negative, isize *res) {
 }
 
 // ---------- Arena ----------
+
+typedef struct {
+  // Start of the arena allocation.
+  // Increases with each allocation.
+  u8 *start;
+  // Size of the full arena.
+  // Only used to detect the OOM case.
+  u8 *end;
+} Arena;
+
 __attribute__((warn_unused_result)) static void *
 arena_alloc(Arena *arena, usize align, usize elem_size, usize elem_count) {
   assert(arena != NULL);
