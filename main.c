@@ -4159,6 +4159,9 @@ int main(i32 argc, char *argv[]) {
   assert(argv);
 
   const char *const cmd = argv[1];
+  const usize arena_cap = 32 * MiB;
+  Arena arena = arena_valloc(arena_cap);
+
   if (0 == strcmp(cmd, "test")) {
     test(argc > 2 ? argv[2] : NULL);
   } else if (0 == strcmp(cmd, "print-bencode")) {
@@ -4176,7 +4179,6 @@ int main(i32 argc, char *argv[]) {
     assert((void *)-1 != bencode_data);
 
     Slice_u8 input = slice_u8_make((u8 *)bencode_data, (usize)st.st_size);
-    Arena arena = arena_valloc(32 * MiB);
     const Arena scratch = arena_valloc(32 * MiB);
 
     BencodeValue bencode = {0};
@@ -4235,6 +4237,10 @@ int main(i32 argc, char *argv[]) {
     printf("metainfo dict encoded: %.*s\n", (i32)metainfo_dict_encoded.len,
            metainfo_dict_encoded.data);
 
+    const usize unused_bytes = (usize)arena.end - (usize)arena.start;
+    const usize used_bytes = arena_cap - unused_bytes;
+    printf("mem used: %zu\n", used_bytes);
+    printf("mem unused: %zu\n", unused_bytes);
   } else {
     fprintf(stderr, "unknown command\n");
     exit(1);
