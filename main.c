@@ -1475,8 +1475,10 @@ __attribute__((warn_unused_result)) static bool torrent_make_metainfo_dict_v2(
   assert(dst);
   assert(arena);
 
+  const usize kv_count = piece_hashes_count > 0 ? 3 : 2;
+
   dst->kind = BencodeKindDict;
-  dst->v.list.len = 2 * 3;
+  dst->v.list.len = 2 * kv_count;
   dst->v.list.data = arena_alloc(arena, __alignof__(BencodeValue),
                                  sizeof(BencodeValue), dst->v.list.len);
   if (!dst->v.list.data) {
@@ -1494,10 +1496,37 @@ __attribute__((warn_unused_result)) static bool torrent_make_metainfo_dict_v2(
     announce_value->v.s = announce_url;
   }
 
-  // TODO
+  // `metainfo["info"] = info_dict`
   {
-    (void)piece_hashes;
-    (void)piece_hashes_count;
+    BencodeValue *const info_key = &dst->v.list.data[2];
+    info_key->kind = BencodeKindString;
+    info_key->v.s = slice_u8_make((u8 *)"info", sizeof("info") - 1);
+
+    dst->v.list.data[3].kind = BencodeKindDict;
+    dst->v.list.data[3].v.list = info_dict;
+  }
+
+  // `metainfo["pieces layer"] = piece_hashes`
+  if (piece_hashes_count > 0) {
+    assert(piece_hashes);
+    assert(6 == kv_count);
+
+    BencodeValue *const pieces_key = &dst->v.list.data[4];
+    pieces_key->kind = BencodeKindString;
+    pieces_key->v.s =
+        slice_u8_make((u8 *)"piece layers", sizeof("piece layers") - 1);
+
+    BencodeValue *const pieces_value = &dst->v.list.data[5];
+    pieces_value->kind = BencodeKindString;
+    pieces_value->v.s.len = SHA256_DIGEST_LENGTH;
+    pieces_value->v.s.data =
+        arena_alloc(arena, __alignof__(BencodeValue), sizeof(BencodeValue),
+                    pieces_value->v.s.len);
+    if (!pieces_value->v.s.data) {
+      return false;
+    }
+
+    // TODO: copy
   }
 
   return true;
