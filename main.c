@@ -35,6 +35,12 @@ typedef ssize_t isize;
 static const usize KiB = 1024;
 static const usize MiB = 1024 * KiB;
 
+typedef enum {
+  ErrNone,
+  ErrOOM,
+  ErrInvalidData,
+} Error;
+
 __attribute__((warn_unused_result)) static bool char_is_digit_ascii(u8 c) {
   return '0' <= c && c <= '9';
 }
