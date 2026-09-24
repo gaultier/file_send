@@ -1791,6 +1791,38 @@ __attribute__((warn_unused_result)) static usize bencode_encode(BencodeValue b,
 
   return written;
 }
+__attribute__((warn_unused_result)) static bool
+torrent_make_metainfo_dict_v2(Slice_u8 announce_url, BencodeList info_dict,
+                              PieceHash *const piece_hashes,
+                              usize piece_hashes_count, Arena *arena) {
+  assert(!slice_u8_is_empty(announce_url));
+  assert(info_dict.len > 0);
+  assert(piece_hashes);
+  assert(piece_hashes_count > 0);
+  assert(arena);
+
+  BencodeValue metainfo_dict = {.kind = BencodeKindDict};
+  metainfo_dict.v.list.len = 2 * 3;
+  metainfo_dict.v.list.data =
+      arena_alloc(arena, __alignof__(BencodeValue), sizeof(BencodeValue),
+                  metainfo_dict.v.list.len);
+  if (!metainfo_dict.v.list.data) {
+    return false;
+  }
+
+  // `metainfo["announce"] = announce_url`
+  {
+    BencodeValue *const announce_key = &metainfo_dict.v.list.data[0];
+    announce_key->kind = BencodeKindString;
+    announce_key->v.s = slice_u8_make((u8 *)"announce", sizeof("announce") - 1);
+
+    BencodeValue *const announce_value = &metainfo_dict.v.list.data[1];
+    announce_value->kind = BencodeKindString;
+    announce_value->v.s = announce_url;
+  }
+
+  return true;
+}
 
 // ---------------------------------------------------------------------------
 // Tests
