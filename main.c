@@ -81,7 +81,7 @@ struct BencodeValue {
 
 typedef struct {
   u8 digest[SHA256_DIGEST_LENGTH];
-} MerkleNode;
+} PieceHash;
 
 __attribute((warn_unused_result)) static bool char_is_digit_ascii(u8 c) {
   return '0' <= c && c <= '9';
@@ -214,6 +214,13 @@ __attribute((warn_unused_result)) static usize next_power_of_two(usize val) {
   assert(0 != val && 0 == (val & (val - 1)) && "not a power of two");
 
   return val;
+}
+
+__attribute((warn_unused_result)) static usize ceil_usize(usize numerator,
+                                                          usize denominator) {
+  assert(denominator);
+
+  return numerator / denominator + (numerator % denominator != 0);
 }
 
 __attribute((warn_unused_result)) static Arena arena_valloc(usize bytes_count) {
@@ -1123,44 +1130,49 @@ static const usize TORRENT_BLOCK_SIZE = 16 * KiB;
 // static const usize TORRENT_PIECES_PER_BLOCK = 16;
 
 __attribute((warn_unused_result)) static bool
-torrent_build_merkle_tree(Slice_u8 data, MerkleNode **nodes, usize *nodes_count,
+torrent_build_merkle_tree(Slice_u8 data, PieceHash **piece_hashes,
+                          usize *piece_hashes_count, usize piece_length,
                           Arena *arena) {
-  assert(nodes);
+  assert(piece_hashes);
+  assert(piece_hashes_count);
+  assert(piece_length >= 16 * KiB);      // Per spec.
+  assert(is_power_of_two(piece_length)); // Per spec.
   assert(arena);
   assert(arena->start);
 
-  *nodes = NULL;
-  *nodes_count = 0;
+  *piece_hashes = NULL;
+  *piece_hashes_count = 0;
 
   if (0 == data.len) {
     return true;
   }
   assert(data.data);
 
-  const usize leaves_count = next_power_of_two(
-      data.len / TORRENT_BLOCK_SIZE + (data.len % TORRENT_BLOCK_SIZE != 0));
+  // NOTE: A leaf is a block.
+  const usize leaves_count =
+      next_power_of_two(ceil_usize(data.len, TORRENT_BLOCK_SIZE));
   assert(leaves_count > 0);
+  assert(is_power_of_two(leaves_count));
 
-  // Nodes count = 2* leaves_count - 1.
-  assert(!__builtin_mul_overflow(leaves_count, 2, nodes_count));
-  assert(*nodes_count > 0);
-  *nodes_count -= 1;
-  assert(*nodes_count > 0);
+  const usize pieces_count = ceil_usize(data.len, piece_length);
+  assert(pieces_count > 0);
 
-  assert(leaves_count <= *nodes_count);
+  assert(pieces_count <= leaves_count);
 
-  *nodes = arena_alloc(arena, __alignof__(MerkleNode), sizeof(MerkleNode),
-                       *nodes_count);
+  *piece_hashes = arena_alloc(arena, __alignof__(PieceHash), sizeof(PieceHash),
+                              pieces_count);
   // OOM?
-  if (!*nodes) {
+  if (!*piece_hashes) {
     return false;
   }
 
-  assert(*nodes);
+  assert(*piece_hashes);
+  *piece_hashes_count = pieces_count;
 
+#if 0
   for (usize i = 0; i < leaves_count; i++) {
-    assert(i < *nodes_count);
-    MerkleNode *const node = &((*nodes)[i]);
+    assert(i < *piece_hashes_count);
+    PieceHash *const node = &((*piece_hashes)[i]);
 
     if (data.len > 0) { // Still inside the file?
       const Slice_u8 block_data = {.data = data.data,
@@ -1187,17 +1199,17 @@ torrent_build_merkle_tree(Slice_u8 data, MerkleNode **nodes, usize *nodes_count,
   usize offset = 0;
   for (; width > 1;) {
     assert(width <= leaves_count);
-    assert(offset < *nodes_count);
+    assert(offset < *piece_hashes_count);
 
     const usize next_width = width / 2;
     const usize next_offset = offset + width;
 
     assert(next_width <= leaves_count);
-    assert(next_offset < *nodes_count);
+    assert(next_offset < *piece_hashes_count);
 
     for (usize w = 0; w < next_width; w++) {
-      const MerkleNode *const left = &((*nodes)[offset + 2 * w]);
-      const MerkleNode *const right = &((*nodes)[offset + 2 * w + 1]);
+      const PieceHash *const left = &((*piece_hashes)[offset + 2 * w]);
+      const PieceHash *const right = &((*piece_hashes)[offset + 2 * w + 1]);
 
       Sha256Ctx ctx = {0};
       sha256_init(&ctx);
@@ -1205,16 +1217,17 @@ torrent_build_merkle_tree(Slice_u8 data, MerkleNode **nodes, usize *nodes_count,
                                      .len = SHA256_DIGEST_LENGTH});
       sha256_update(&ctx, (Slice_u8){.data = (u8 *)right->digest,
                                      .len = SHA256_DIGEST_LENGTH});
-      sha256_final(&ctx, (*nodes)[next_offset + w].digest);
+      sha256_final(&ctx, (*piece_hashes)[next_offset + w].digest);
 
       printf("width=%zu offset=%zu: ", width, offset);
-      sha256_print_hex((*nodes)[next_offset + w].digest);
+      sha256_print_hex((*piece_hashes)[next_offset + w].digest);
       puts("");
     }
 
     offset = next_offset;
     width = next_width;
   }
+#endif
 
   return true;
 }
@@ -1284,13 +1297,13 @@ torrent_make_info_dict_v2(Slice_u8 name, usize piece_length, Slice_u8 file_data,
     file_tree_key->v.s.len = sizeof("file tree") - 1;
     file_tree_key->v.s.data = (u8 *)"file tree";
 
-    MerkleNode *nodes = NULL;
+    PieceHash *nodes = NULL;
     usize nodes_count = 0;
     if (!torrent_build_merkle_tree(file_data, &nodes, &nodes_count, arena)) {
       return false;
     }
     assert(nodes_count > 0);
-    const MerkleNode *const root = &nodes[nodes_count - 1];
+    const PieceHash *const root = &nodes[nodes_count - 1];
     printf("root=");
     sha256_print_hex(root->digest);
     puts("");
@@ -1454,8 +1467,8 @@ bencode_encode_exact_size(BencodeValue b, usize depth) {
   switch (b.kind) {
   case BencodeKindInteger:
     // `i` <digits> `e`
-    assert(!__builtin_add_overflow(res, 2 + isize_digits_base_10(b.v.num),
-                                   &res));
+    assert(
+        !__builtin_add_overflow(res, 2 + isize_digits_base_10(b.v.num), &res));
     break;
   case BencodeKindString:
     // <length> `:` <bytes>
@@ -1543,8 +1556,8 @@ bencode_encode_rec(BencodeValue b, Slice_u8 dst, usize depth) {
 // rather than sufficiency costs nothing and buys the check below: the two
 // passes are compared without walking the tree a third time, and the
 // recursion cannot scribble into slack it was never given.
-__attribute__((warn_unused_result)) static usize
-bencode_encode(BencodeValue b, Slice_u8 dst) {
+__attribute__((warn_unused_result)) static usize bencode_encode(BencodeValue b,
+                                                                Slice_u8 dst) {
   assert(dst.data);
 
   const usize written = bencode_encode_rec(b, dst, 0);
@@ -2741,7 +2754,7 @@ static void test_torrent_merkle_vectors(void) {
     // itself off as a zeroed padding hash.
     Arena arena = test_arena(64 * KiB);
 
-    MerkleNode *nodes = NULL;
+    PieceHash *nodes = NULL;
     usize nodes_count = 0;
     assert(torrent_build_merkle_tree(slice_u8_make(data.data, vectors[i].len),
                                      &nodes, &nodes_count, &arena));
@@ -2772,7 +2785,7 @@ static void test_torrent_merkle_structure(void) {
 
     Arena arena = test_arena(64 * KiB);
 
-    MerkleNode *nodes = NULL;
+    PieceHash *nodes = NULL;
     usize nodes_count = 0;
     assert(torrent_build_merkle_tree(slice_u8_make(data.data, len), &nodes,
                                      &nodes_count, &arena));
@@ -2845,7 +2858,7 @@ static void test_torrent_merkle_padding(void) {
 
   Arena arena = test_arena(64 * KiB);
 
-  MerkleNode *nodes = NULL;
+  PieceHash *nodes = NULL;
   usize nodes_count = 0;
   assert(torrent_build_merkle_tree(slice_u8_make(buf, len), &nodes,
                                    &nodes_count, &arena));
@@ -2883,7 +2896,7 @@ static void test_torrent_merkle_empty(void) {
 
   // Preset to garbage: both out parameters must be cleared, since a caller
   // has no other way to tell that no tree was built.
-  MerkleNode *nodes = (MerkleNode *)(usize)0xdeadbeef;
+  PieceHash *nodes = (PieceHash *)(usize)0xdeadbeef;
   usize nodes_count = 123;
 
   assert(
@@ -2908,12 +2921,11 @@ static void test_torrent_merkle_oom(void) {
 
   // Leave room for fewer nodes than the tree needs.
   const usize free_bytes = (usize)(arena.end - arena.start);
-  assert(free_bytes > 2 * sizeof(MerkleNode));
-  u8 *const hog =
-      arena_alloc(&arena, 1, 1, free_bytes - 2 * sizeof(MerkleNode));
+  assert(free_bytes > 2 * sizeof(PieceHash));
+  u8 *const hog = arena_alloc(&arena, 1, 1, free_bytes - 2 * sizeof(PieceHash));
   assert(hog);
 
-  MerkleNode *nodes = NULL;
+  PieceHash *nodes = NULL;
   usize nodes_count = 0;
   assert(!torrent_build_merkle_tree(slice_u8_make(buf, len), &nodes,
                                     &nodes_count, &arena));
@@ -3230,8 +3242,10 @@ static void test_bencode_encode_leaves(void) {
   test_bencode_encode_once(test_bencode_int(-1), "i-1e");
   test_bencode_encode_once(test_bencode_int(42), "i42e");
   test_bencode_encode_once(test_bencode_int(-42), "i-42e");
-  test_bencode_encode_once(test_bencode_int(INT64_MAX), "i9223372036854775807e");
-  test_bencode_encode_once(test_bencode_int(INT64_MIN), "i-9223372036854775808e");
+  test_bencode_encode_once(test_bencode_int(INT64_MAX),
+                           "i9223372036854775807e");
+  test_bencode_encode_once(test_bencode_int(INT64_MIN),
+                           "i-9223372036854775808e");
 
   test_bencode_encode_once(test_bencode_str(""), "0:");
   test_bencode_encode_once(test_bencode_str("a"), "1:a");
@@ -3275,8 +3289,8 @@ static void test_bencode_encode_containers(void) {
   test_bencode_encode_once(empty_dict, "de");
 
   // `l4:spami42ee`
-  BencodeValue *items = arena_alloc(&arena, __alignof__(BencodeValue),
-                                    sizeof(BencodeValue), 2);
+  BencodeValue *items =
+      arena_alloc(&arena, __alignof__(BencodeValue), sizeof(BencodeValue), 2);
   assert(items);
   items[0] = test_bencode_str("spam");
   items[1] = test_bencode_int(42);
@@ -3285,8 +3299,8 @@ static void test_bencode_encode_containers(void) {
   test_bencode_encode_once(list, "l4:spami42ee");
 
   // `d3:keyl4:spami42eee`: a container nested inside a dict.
-  BencodeValue *pair = arena_alloc(&arena, __alignof__(BencodeValue),
-                                   sizeof(BencodeValue), 2);
+  BencodeValue *pair =
+      arena_alloc(&arena, __alignof__(BencodeValue), sizeof(BencodeValue), 2);
   assert(pair);
   pair[0] = test_bencode_str("key");
   pair[1] = list;
@@ -3315,14 +3329,13 @@ static void test_bencode_encode_wide_dict(void) {
     key[2] = (u8)('0' + (i / 10) % 10);
     key[3] = (u8)('0' + i % 10);
 
-    entries[2 * i] = (BencodeValue){.kind = BencodeKindString,
-                                    .v.s = slice_u8_make(key, 4)};
+    entries[2 * i] =
+        (BencodeValue){.kind = BencodeKindString, .v.s = slice_u8_make(key, 4)};
     entries[2 * i + 1] = test_bencode_int((isize)i);
   }
 
-  const BencodeValue dict = {.kind = BencodeKindDict,
-                             .v.list.len = pairs * 2,
-                             .v.list.data = entries};
+  const BencodeValue dict = {
+      .kind = BencodeKindDict, .v.list.len = pairs * 2, .v.list.data = entries};
 
   const usize cap = bencode_encode_exact_size(dict, 0);
   Slice_u8 dst = {.data = arena_alloc(&arena, __alignof__(u8), sizeof(u8), cap),
