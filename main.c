@@ -469,10 +469,13 @@ unix_path_last_component(Slice_u8 path) {
     return (Slice_u8){.data = (u8 *)"/", .len = 1};
   }
 
-  for (isize i = path.len - 1; i >= 0; i--) {
-    const u8 c = path.data[i];
+  // Counts down over one-past-the-byte so the whole walk stays in `usize`:
+  // `i` is the start of the component when `path.data[i - 1]` is the
+  // separator.
+  for (usize i = path.len; i > 0; i--) {
+    const u8 c = path.data[i - 1];
     if ('/' == c) {
-      const Slice_u8 res = {.data = path.data + i + 1, .len = path.len - i - 1};
+      const Slice_u8 res = {.data = path.data + i, .len = path.len - i};
       // The trailing separators are gone, so there is at least one byte left
       // after the last one.
       assert(!slice_u8_is_empty(res));
@@ -4048,7 +4051,7 @@ int main(i32 argc, char *argv[]) {
     assert(st.st_size > 0);
 
     void *const bencode_data =
-        mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+        mmap(NULL, (usize)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
     assert((void *)-1 != bencode_data);
 
     Slice_u8 input = slice_u8_make((u8 *)bencode_data, (usize)st.st_size);
@@ -4071,7 +4074,7 @@ int main(i32 argc, char *argv[]) {
     assert(st.st_size > 0);
 
     void *const input_data =
-        mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+        mmap(NULL, (usize)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
     assert((void *)-1 != input_data);
 
     const Slice_u8 input = slice_u8_make((u8 *)input_data, (usize)st.st_size);

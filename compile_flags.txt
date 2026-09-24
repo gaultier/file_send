@@ -5,6 +5,7 @@
 -std=c99
 -Wall
 -Wextra
+-Wsign-conversion
 -Werror
 -Wno-cast-function-type-mismatch
 -g
