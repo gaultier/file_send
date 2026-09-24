@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
 #include <limits.h>
@@ -39,6 +40,8 @@ typedef enum {
   ErrNone,
   ErrOOM,
   ErrInvalidData,
+  ErrOSPermission,
+  ErrRange,
 } Error;
 
 __attribute__((warn_unused_result)) static bool char_is_digit_ascii(u8 c) {
@@ -46,8 +49,8 @@ __attribute__((warn_unused_result)) static bool char_is_digit_ascii(u8 c) {
 }
 
 // Convert `magnitude`, optionally negated, to an isize.
-// Returns false if the value does not fit.
-__attribute__((warn_unused_result)) static bool
+// Returns `ErrRange` if the value does not fit.
+__attribute__((warn_unused_result)) static Error
 isize_from_usize(usize magnitude, bool negative, isize *res) {
   assert(res);
 
@@ -56,8 +59,9 @@ isize_from_usize(usize magnitude, bool negative, isize *res) {
   // conversions: `0 - magnitude` is a checked negation, `magnitude + 0` a
   // checked cast. This handles the asymmetric boundary (`|ISIZE_MIN|` is a
   // valid magnitude but not a valid positive value) with no special case.
-  return negative ? !__builtin_sub_overflow(0, magnitude, res)
-                  : !__builtin_add_overflow(magnitude, 0, res);
+  const bool overflow = negative ? __builtin_sub_overflow(0, magnitude, res)
+                                 : __builtin_add_overflow(magnitude, 0, res);
+  return overflow ? ErrRange : ErrNone;
 }
 
 // ---------- Arena ----------
@@ -161,27 +165,28 @@ slice_u8_eq_cstr(Slice_u8 s, const char *cstr) {
 }
 
 // Peek at the first byte of `slice`, leaving it in place.
-// Returns false, and does not touch `*res`, if there is no first byte.
-__attribute__((warn_unused_result)) static bool slice_u8_first(Slice_u8 slice,
-                                                               u8 *res) {
+// Returns `ErrInvalidData`, and does not touch `*res`, if there is no first
+// byte.
+__attribute__((warn_unused_result)) static Error slice_u8_first(Slice_u8 slice,
+                                                                u8 *res) {
   assert(res);
 
   if (!slice.data) {
-    return false;
+    return ErrInvalidData;
   }
 
   if (slice.len == 0) {
-    return false;
+    return ErrInvalidData;
   }
 
   *res = slice.data[0];
-  return true;
+  return ErrNone;
 }
 
 // Advance past `count` bytes. The caller must have already established that
 // they are available, which is why this cannot fail; use `slice_u8_skip` when
-// the input may be short. Unlike an `assert(slice_u8_skip(...))`, the advance
-// still happens when asserts are compiled out.
+// the input may be short. Unlike an `assert(ErrNone == slice_u8_skip(...))`,
+// the advance still happens when asserts are compiled out.
 static void slice_u8_advance(Slice_u8 *slice, usize count) {
   assert(slice);
   assert(slice->data);
@@ -191,19 +196,19 @@ static void slice_u8_advance(Slice_u8 *slice, usize count) {
   slice->data += count;
 }
 
-__attribute__((warn_unused_result)) static bool slice_u8_skip(Slice_u8 *slice,
-                                                              usize count) {
+__attribute__((warn_unused_result)) static Error slice_u8_skip(Slice_u8 *slice,
+                                                               usize count) {
   assert(slice);
   if (!slice->data) {
-    return false;
+    return ErrInvalidData;
   }
 
   if (slice->len < count) {
-    return false;
+    return ErrInvalidData;
   }
 
   slice_u8_advance(slice, count);
-  return true;
+  return ErrNone;
 }
 
 // The caller must have already established that `count` bytes are available:
@@ -228,36 +233,64 @@ __attribute__((warn_unused_result)) static Slice_u8 slice_u8_make(u8 *data,
 // Consume the first byte of `*slice` if it is `expected`.
 //
 // `*slice` is only advanced on a match, which is what makes it usable as a
-// speculative `if (!consume(...)) { return false; }` inside a parse that rolls
-// back.
-__attribute__((warn_unused_result)) static bool
+// speculative `if (ErrNone != consume(...)) { return ...; }` inside a parse
+// that rolls back. A byte that simply does not match is reported the same way
+// as a missing one: it is the caller that knows whether that is an error.
+__attribute__((warn_unused_result)) static Error
 slice_u8_consume(Slice_u8 *slice, u8 expected) {
   assert(slice);
   assert(slice->data);
 
   u8 actual = 0;
-  if (!slice_u8_first(*slice, &actual)) {
-    return false;
+  if (ErrNone != slice_u8_first(*slice, &actual)) {
+    return ErrInvalidData;
   }
   if (actual != expected) {
-    return false;
+    return ErrInvalidData;
   }
 
   slice_u8_advance(slice, 1);
-  return true;
+  return ErrNone;
 }
 // ---------- Unix ----------
-__attribute__((warn_unused_result)) static u8 *
-unix_virtual_mem_alloc(usize bytes_count) {
+
+// Map an `errno` onto our own errors. Shared by every syscall wrapper below:
+// the values that matter here are the ones `mmap` and `mprotect` document, and
+// they mean the same thing whichever of the two produced them.
+//
+// Anything not listed is this code calling the kernel wrong, which is what
+// `ErrInvalidData` covers: a bad descriptor, a misaligned address, a length of
+// zero, an unsupported protection.
+__attribute__((warn_unused_result)) static Error unix_error_from_errno(i32 e) {
+  switch (e) {
+  case EACCES:
+  case EPERM:
+    return ErrOSPermission;
+  case ENOMEM:
+    return ErrOOM;
+  case EOVERFLOW:
+    return ErrRange;
+  default:
+    return ErrInvalidData;
+  }
+}
+
+// On success `*res` is the mapping; on failure it is left alone and the
+// `errno` `mmap` set is mapped onto an `Error`.
+__attribute__((warn_unused_result)) static Error
+unix_virtual_mem_alloc(usize bytes_count, u8 **res) {
   assert(bytes_count > 0);
-  void *alloc = mmap(NULL, bytes_count, PROT_READ | PROT_WRITE,
-                     MAP_ANON | MAP_PRIVATE, -1, 0);
+  assert(res);
+
+  void *const alloc = mmap(NULL, bytes_count, PROT_READ | PROT_WRITE,
+                           MAP_ANON | MAP_PRIVATE, -1, 0);
 
   if ((void *)-1 == alloc) {
-    return NULL;
+    return unix_error_from_errno(errno);
   }
 
-  return alloc;
+  *res = alloc;
+  return ErrNone;
 }
 
 __attribute__((warn_unused_result)) static usize unix_get_page_size(void) {
@@ -267,12 +300,13 @@ __attribute__((warn_unused_result)) static usize unix_get_page_size(void) {
   return (usize)res;
 }
 
-__attribute__((warn_unused_result)) static bool unix_vprotect_none(void *ptr,
-                                                                   usize size) {
+__attribute__((warn_unused_result)) static Error
+unix_vprotect_none(void *ptr, usize size) {
   if (-1 == mprotect(ptr, size, PROT_NONE)) {
-    return false;
+    return unix_error_from_errno(errno);
   }
-  return true;
+
+  return ErrNone;
 }
 
 // Matches https://pkg.go.dev/path/filepath#Base.
@@ -378,14 +412,15 @@ arena_valloc(usize bytes_count) {
   // Guard page.
   assert(!__builtin_add_overflow(usable_bytes, page_size, &os_alloc_size));
 
-  u8 *const arena_memory = unix_virtual_mem_alloc(os_alloc_size);
   const Arena res = {0};
 
-  if (arena_memory == NULL) {
+  u8 *arena_memory = NULL;
+  if (ErrNone != unix_virtual_mem_alloc(os_alloc_size, &arena_memory)) {
     return res;
   }
+  assert(arena_memory);
 
-  assert(unix_vprotect_none(arena_memory + usable_bytes, page_size));
+  assert(ErrNone == unix_vprotect_none(arena_memory + usable_bytes, page_size));
 
   // Right-align the arena against the guard page so that *any* write past
   // `arena.end` faults immediately, then round the start down to the
@@ -406,13 +441,13 @@ arena_valloc(usize bytes_count) {
 // Rejects a run with no digits at all, one that is not terminated by a
 // non-digit, one with a leading zero, and one that overflows a `usize`.
 // `*data` is only advanced, and `*res` only written, when the parse succeeds.
-__attribute__((warn_unused_result)) static bool ascii_num_parse(Slice_u8 *data,
-                                                                usize *res) {
+__attribute__((warn_unused_result)) static Error ascii_num_parse(Slice_u8 *data,
+                                                                 usize *res) {
   assert(data);
   assert(res);
 
   if (!data->data) {
-    return false;
+    return ErrInvalidData;
   }
 
   Slice_u8 remaining = *data;
@@ -425,21 +460,21 @@ __attribute__((warn_unused_result)) static bool ascii_num_parse(Slice_u8 *data,
     u8 current = 0;
 
     // Unterminated.
-    if (!slice_u8_first(remaining, &current)) {
-      return false;
+    if (ErrNone != slice_u8_first(remaining, &current)) {
+      return ErrInvalidData;
     }
 
     // End.
     if (!char_is_digit_ascii(current)) {
       // No digit at all e.g. `e` or `:spam`: not a number.
       if (0 == consumed) {
-        return false;
+        return ErrInvalidData;
       }
 
       assert(consumed < MAX_LEN);
       *data = remaining;
       *res = num;
-      return true;
+      return ErrNone;
     }
 
     if (current == '0' && consumed == 0) {
@@ -448,15 +483,17 @@ __attribute__((warn_unused_result)) static bool ascii_num_parse(Slice_u8 *data,
 
     // Leading zeroes forbidden except `i0e`.
     if (consumed > 0 && has_leading_zero) {
-      return false;
+      return ErrInvalidData;
     }
 
+    // A run of digits too long for a `usize` is well formed but out of
+    // range, which is a different complaint from malformed input.
     const usize digit = current - '0';
     if (__builtin_mul_overflow(num, 10, &num)) {
-      return false;
+      return ErrRange;
     }
     if (__builtin_add_overflow(num, digit, &num)) {
-      return false;
+      return ErrRange;
     }
 
     slice_u8_advance(&remaining, 1);
@@ -499,7 +536,7 @@ struct BencodeValue {
 //
 // `*input` is only advanced, and `*res` only written, when the parse
 // succeeds.
-__attribute__((warn_unused_result)) static bool
+__attribute__((warn_unused_result)) static Error
 bencode_parse_num(Slice_u8 *input, BencodeValue *res) {
   assert(input);
   assert(input->data);
@@ -507,35 +544,43 @@ bencode_parse_num(Slice_u8 *input, BencodeValue *res) {
 
   Slice_u8 remaining = *input;
 
-  if (!slice_u8_consume(&remaining, 'i')) {
-    return false;
+  if (ErrNone != slice_u8_consume(&remaining, 'i')) {
+    return ErrInvalidData;
   }
 
-  const bool negative_sign = slice_u8_consume(&remaining, '-');
+  const bool negative_sign = ErrNone == slice_u8_consume(&remaining, '-');
 
-  // Also rejects `ie` and `i-e`: a number needs at least one digit.
+  // Also rejects `ie` and `i-e`: a number needs at least one digit. A run of
+  // digits too wide for a `usize` comes back as `ErrRange`, which is passed
+  // through rather than flattened: the input is well formed, just too big.
   usize magnitude = 0;
-  if (!ascii_num_parse(&remaining, &magnitude)) {
-    return false;
+  {
+    const Error err = ascii_num_parse(&remaining, &magnitude);
+    if (ErrNone != err) {
+      return err;
+    }
   }
 
   // `i-0e` is invalid bencode.
   if (negative_sign && 0 == magnitude) {
-    return false;
+    return ErrInvalidData;
   }
 
   isize num = 0;
-  if (!isize_from_usize(magnitude, negative_sign, &num)) {
-    return false;
+  {
+    const Error err = isize_from_usize(magnitude, negative_sign, &num);
+    if (ErrNone != err) {
+      return err;
+    }
   }
 
-  if (!slice_u8_consume(&remaining, 'e')) {
-    return false;
+  if (ErrNone != slice_u8_consume(&remaining, 'e')) {
+    return ErrInvalidData;
   }
 
   *input = remaining;
   *res = (BencodeValue){.kind = BencodeKindInteger, .v.num = num};
-  return true;
+  return ErrNone;
 }
 
 // `4:spam`
@@ -543,7 +588,7 @@ bencode_parse_num(Slice_u8 *input, BencodeValue *res) {
 // The string is not copied: it points into `*input`.
 // `*input` is only advanced, and `*res` only written, when the parse
 // succeeds.
-__attribute__((warn_unused_result)) static bool
+__attribute__((warn_unused_result)) static Error
 bencode_parse_string(Slice_u8 *input, BencodeValue *res) {
   assert(input);
   assert(input->data);
@@ -553,17 +598,20 @@ bencode_parse_string(Slice_u8 *input, BencodeValue *res) {
 
   // Also rejects a leading `:` or any non-digit: a length needs a digit.
   usize len = 0;
-  if (!ascii_num_parse(&remaining, &len)) {
-    return false;
+  {
+    const Error err = ascii_num_parse(&remaining, &len);
+    if (ErrNone != err) {
+      return err;
+    }
   }
 
-  if (!slice_u8_consume(&remaining, ':')) {
-    return false;
+  if (ErrNone != slice_u8_consume(&remaining, ':')) {
+    return ErrInvalidData;
   }
 
   // Truncated body.
   if (len > remaining.len) {
-    return false;
+    return ErrInvalidData;
   }
 
   const Slice_u8 s = slice_u8_take(remaining, len);
@@ -576,7 +624,7 @@ bencode_parse_string(Slice_u8 *input, BencodeValue *res) {
   if (0 != res->v.s.len) {
     assert(res->v.s.data);
   }
-  return true;
+  return ErrNone;
 }
 
 // Compare two byte strings lexicographically: the first differing byte decides,
@@ -611,7 +659,7 @@ bytes_cmp(const u8 *a, usize a_len, const u8 *b, usize b_len) {
   return a_len < b_len ? -1 : 1;
 }
 
-__attribute__((warn_unused_result)) static bool
+__attribute__((warn_unused_result)) static Error
 bencode_validate_dict(BencodeList list) {
   if (0 != list.len) {
     assert(NULL != list.data);
@@ -619,14 +667,14 @@ bencode_validate_dict(BencodeList list) {
 
   // Mismatched key-value pairs?
   if (list.len % 2 != 0) {
-    return false;
+    return ErrInvalidData;
   }
 
   for (usize i = 0; i < list.len; i += 2) {
     const BencodeValue key = list.data[i];
 
     if (key.kind != BencodeKindString) {
-      return false;
+      return ErrInvalidData;
     }
 
     if (i > 1) {
@@ -634,12 +682,12 @@ bencode_validate_dict(BencodeList list) {
 
       if (bytes_cmp(previous.v.s.data, previous.v.s.len, key.v.s.data,
                     key.v.s.len) >= 0) {
-        return false;
+        return ErrInvalidData;
       }
     }
   }
 
-  return true;
+  return ErrNone;
 }
 
 #define BENCODE_MAX_DEPTH 128
@@ -651,7 +699,7 @@ bencode_validate_dict(BencodeList list) {
 // leaves the caller with neither consumed input nor consumed memory.
 //
 // `scratch` is taken by value and is not consumed by the call.
-__attribute__((warn_unused_result)) static bool
+__attribute__((warn_unused_result)) static Error
 bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
   assert(input);
   assert(arena);
@@ -663,7 +711,7 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
 
   // Nothing to do?
   if (0 == input->len) {
-    return false;
+    return ErrInvalidData;
   }
 
   Slice_u8 remaining = *input;
@@ -676,7 +724,7 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
                                      sizeof(BencodeValue), values_cap);
   // OOM?
   if (!values) {
-    return false;
+    return ErrOOM;
   }
   usize values_count = 0;
 
@@ -687,16 +735,19 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
 
   for (usize _i = 0; _i < MAX_LEN; _i++) {
     u8 current = 0;
-    if (!slice_u8_first(remaining, &current)) {
-      return false;
+    if (ErrNone != slice_u8_first(remaining, &current)) {
+      return ErrInvalidData;
     }
 
     switch (current) {
     case 'i':
       // Parsed straight into its final slot: no intermediate copy.
       assert(values_count < values_cap);
-      if (!bencode_parse_num(&remaining, &values[values_count])) {
-        return false;
+      {
+        const Error err = bencode_parse_num(&remaining, &values[values_count]);
+        if (ErrNone != err) {
+          return err;
+        }
       }
       values_count++;
       break;
@@ -704,7 +755,7 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
     case 'l':
     case 'd':
       if (containers_count >= BENCODE_MAX_DEPTH) {
-        return false;
+        return ErrInvalidData;
       }
       slice_u8_advance(&remaining, 1);
 
@@ -718,7 +769,7 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
     case 'e': {
       if (0 == containers_count) {
         // Stray `e`, reject.
-        return false;
+        return ErrInvalidData;
       }
 
       slice_u8_advance(&remaining, 1);
@@ -732,7 +783,7 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
 
       // Should always be key-value pairs.
       if (!container.is_list && children_len % 2 != 0) {
-        return false;
+        return ErrInvalidData;
       }
 
       // Now record the value for this container.
@@ -746,7 +797,7 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
                         sizeof(BencodeValue), children_len);
         // OOM?
         if (!children) {
-          return false;
+          return ErrOOM;
         }
 
         // Copy the items from `values` to the new right-sized allocation.
@@ -754,9 +805,11 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
                                    children_len * sizeof(BencodeValue));
         value.v.list.len = children_len;
 
-        if (BencodeKindDict == value.kind &&
-            !bencode_validate_dict(value.v.list)) {
-          return false;
+        if (BencodeKindDict == value.kind) {
+          const Error err = bencode_validate_dict(value.v.list);
+          if (ErrNone != err) {
+            return err;
+          }
         }
       }
 
@@ -783,15 +836,19 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
     case '9':
       // Parsed straight into its final slot: no intermediate copy.
       assert(values_count < values_cap);
-      if (!bencode_parse_string(&remaining, &values[values_count])) {
-        return false;
+      {
+        const Error err =
+            bencode_parse_string(&remaining, &values[values_count]);
+        if (ErrNone != err) {
+          return err;
+        }
       }
       values_count++;
       break;
 
       // Unknown character.
     default:
-      return false;
+      return ErrInvalidData;
     }
 
     // We just finished to correctly parse a value.
@@ -807,11 +864,11 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
       *input = remaining;
       *arena = arena_local;
       *res = values[0];
-      return true;
+      return ErrNone;
     }
   }
 
-  return false;
+  return ErrInvalidData;
 }
 
 static void bencode_print_indent(usize indent) {
@@ -1419,7 +1476,7 @@ static void torrent_build_merkle_sub_tree(const MerkleTree *tree,
 // Build the merkle tree for one file, yielding its root (`pieces root` in the
 // info dictionary) and its piece layer (`piece layers` at the torrent root).
 // An empty file has neither, per BEP 52, and leaves `root` zeroed.
-__attribute__((warn_unused_result)) static bool
+__attribute__((warn_unused_result)) static Error
 torrent_build_merkle_tree(Slice_u8 data, usize piece_length_in_bytes,
                           PieceHash **piece_hashes, usize *piece_hashes_count,
                           u8 root[SHA256_DIGEST_LENGTH], Arena *arena) {
@@ -1436,7 +1493,7 @@ torrent_build_merkle_tree(Slice_u8 data, usize piece_length_in_bytes,
   memset(root, 0, SHA256_DIGEST_LENGTH);
 
   if (0 == data.len) {
-    return true;
+    return ErrNone;
   }
   assert(data.data);
 
@@ -1447,7 +1504,7 @@ torrent_build_merkle_tree(Slice_u8 data, usize piece_length_in_bytes,
                                         sizeof(PieceHash), pieces_count);
   // OOM?
   if (!hashes) {
-    return false;
+    return ErrOOM;
   }
 
   const MerkleTree tree =
@@ -1477,10 +1534,10 @@ torrent_build_merkle_tree(Slice_u8 data, usize piece_length_in_bytes,
     *piece_hashes_count = tree.pieces_count;
   }
 
-  return true;
+  return ErrNone;
 }
 
-__attribute__((warn_unused_result)) static bool torrent_make_metainfo_dict_v2(
+__attribute__((warn_unused_result)) static Error torrent_make_metainfo_dict_v2(
     Slice_u8 pieces_root, Slice_u8 announce_url, BencodeList info_dict,
     const PieceHash *piece_hashes, usize piece_hashes_count, BencodeValue *dst,
     Arena *arena) {
@@ -1500,7 +1557,7 @@ __attribute__((warn_unused_result)) static bool torrent_make_metainfo_dict_v2(
   dst->v.list.data = arena_alloc(arena, __alignof__(BencodeValue),
                                  sizeof(BencodeValue), dst->v.list.len);
   if (!dst->v.list.data) {
-    return false;
+    return ErrOOM;
   }
 
   // `metainfo["announce"] = announce_url`
@@ -1540,7 +1597,7 @@ __attribute__((warn_unused_result)) static bool torrent_make_metainfo_dict_v2(
     // which leaves the dict empty.
     if (0 == piece_hashes_count) {
       pieces_value->v.list = (BencodeList){0};
-      return true;
+      return ErrNone;
     }
 
     assert(piece_hashes);
@@ -1549,7 +1606,7 @@ __attribute__((warn_unused_result)) static bool torrent_make_metainfo_dict_v2(
         arena_alloc(arena, __alignof__(BencodeValue), sizeof(BencodeValue),
                     pieces_value->v.list.len);
     if (!pieces_value->v.list.data) {
-      return false;
+      return ErrOOM;
     }
 
     // `metainfo["piece layers"][pieces_root] = piece_hashes`
@@ -1568,17 +1625,17 @@ __attribute__((warn_unused_result)) static bool torrent_make_metainfo_dict_v2(
       layer_value->v.s.data =
           arena_alloc(arena, __alignof__(u8), sizeof(u8), layer_value->v.s.len);
       if (!layer_value->v.s.data) {
-        return false;
+        return ErrOOM;
       }
 
       memcpy(layer_value->v.s.data, piece_hashes, layer_value->v.s.len);
     }
   }
 
-  return true;
+  return ErrNone;
 }
 
-__attribute__((warn_unused_result)) static bool torrent_make_info_dict_v2(
+__attribute__((warn_unused_result)) static Error torrent_make_info_dict_v2(
     Slice_u8 name, usize piece_length_in_bytes, Slice_u8 file_data,
     Slice_u8 file_name, BencodeValue *dst_info_dict, Slice_u8 *dst_pieces_root,
     PieceHash **dst_piece_hashes, usize *dst_piece_hashes_count, Arena *arena) {
@@ -1602,7 +1659,7 @@ __attribute__((warn_unused_result)) static bool torrent_make_info_dict_v2(
                                  sizeof(BencodeValue), dict_items_count * 2),
   };
   if (NULL == dst_info_dict->v.list.data) {
-    return false;
+    return ErrOOM;
   }
 
   // `info["name"] = name`
@@ -1624,8 +1681,10 @@ __attribute__((warn_unused_result)) static bool torrent_make_info_dict_v2(
 
     BencodeValue *const value = &dst_info_dict->v.list.data[7];
     value->kind = BencodeKindInteger;
-    if (!isize_from_usize(piece_length_in_bytes, false, &value->v.num)) {
-      return false;
+    const Error err =
+        isize_from_usize(piece_length_in_bytes, false, &value->v.num);
+    if (ErrNone != err) {
+      return err;
     }
   }
 
@@ -1649,10 +1708,11 @@ __attribute__((warn_unused_result)) static bool torrent_make_info_dict_v2(
         slice_u8_make((u8 *)"file tree", sizeof("file tree") - 1);
 
     u8 root[SHA256_DIGEST_LENGTH] = {0};
-    if (!torrent_build_merkle_tree(file_data, piece_length_in_bytes,
-                                   dst_piece_hashes, dst_piece_hashes_count,
-                                   root, arena)) {
-      return false;
+    const Error err = torrent_build_merkle_tree(
+        file_data, piece_length_in_bytes, dst_piece_hashes,
+        dst_piece_hashes_count, root, arena);
+    if (ErrNone != err) {
+      return err;
     }
     // If the file data does not fit within one piece, then the piece layer is
     // required (per spec).
@@ -1668,7 +1728,7 @@ __attribute__((warn_unused_result)) static bool torrent_make_info_dict_v2(
         arena_alloc(arena, __alignof__(BencodeValue), sizeof(BencodeValue),
                     file_tree_dict->v.list.len);
     if (NULL == file_tree_dict->v.list.data) {
-      return false;
+      return ErrOOM;
     }
 
     // `info["file tree"][file_name] = {}`
@@ -1684,7 +1744,7 @@ __attribute__((warn_unused_result)) static bool torrent_make_info_dict_v2(
           arena_alloc(arena, __alignof__(BencodeValue), sizeof(BencodeValue),
                       file_name_dict->v.list.len);
       if (NULL == file_name_dict->v.list.data) {
-        return false;
+        return ErrOOM;
       }
 
       // `info["file tree"][file_name][""] = {}`
@@ -1700,7 +1760,7 @@ __attribute__((warn_unused_result)) static bool torrent_make_info_dict_v2(
             arena_alloc(arena, __alignof__(BencodeValue), sizeof(BencodeValue),
                         empty_dict->v.list.len);
         if (NULL == empty_dict->v.list.data) {
-          return false;
+          return ErrOOM;
         }
 
         // `info["file tree"][file_name][""]["length"] = file_data.length`
@@ -1711,8 +1771,10 @@ __attribute__((warn_unused_result)) static bool torrent_make_info_dict_v2(
 
           BencodeValue *const length_value = &empty_dict->v.list.data[1];
           length_value->kind = BencodeKindInteger;
-          if (!isize_from_usize(file_data.len, false, &length_value->v.num)) {
-            return false;
+          const Error length_err =
+              isize_from_usize(file_data.len, false, &length_value->v.num);
+          if (ErrNone != length_err) {
+            return length_err;
           }
         }
 
@@ -1729,7 +1791,7 @@ __attribute__((warn_unused_result)) static bool torrent_make_info_dict_v2(
           pieces_root_value->v.s.data = arena_alloc(
               arena, __alignof__(u8), sizeof(u8), SHA256_DIGEST_LENGTH);
           if (NULL == pieces_root_value->v.s.data) {
-            return false;
+            return ErrOOM;
           }
           memcpy(pieces_root_value->v.s.data, root, SHA256_DIGEST_LENGTH);
 
@@ -1741,7 +1803,7 @@ __attribute__((warn_unused_result)) static bool torrent_make_info_dict_v2(
     }
   }
 
-  return true;
+  return ErrNone;
 }
 
 __attribute__((warn_unused_result)) static usize usize_digits_base_10(usize n) {
@@ -1922,7 +1984,7 @@ bencode_encode_in_place(BencodeValue b, Slice_u8 dst) {
   return written;
 }
 
-__attribute__((warn_unused_result)) static usize
+__attribute__((warn_unused_result)) static Error
 bencode_encode(BencodeValue b, Slice_u8 *dst, Arena *arena) {
   assert(dst);
   assert(arena);
@@ -1933,14 +1995,14 @@ bencode_encode(BencodeValue b, Slice_u8 *dst, Arena *arena) {
       (Slice_u8){.data = arena_alloc(arena, __alignof__(u8), sizeof(u8), size),
                  .len = size};
   if (!dst->data) {
-    return false;
+    return ErrOOM;
   }
 
   const usize written = bencode_encode_in_place(b, *dst);
   assert(written == size);
   assert(written == dst->len);
 
-  return true;
+  return ErrNone;
 }
 
 // ---------------------------------------------------------------------------
@@ -1983,26 +2045,26 @@ static void test_isize_from_usize(void) {
   isize res = 0;
 
   // Positive.
-  assert(isize_from_usize(0, false, &res));
+  assert(ErrNone == isize_from_usize(0, false, &res));
   assert(0 == res);
-  assert(isize_from_usize(123, false, &res));
+  assert(ErrNone == isize_from_usize(123, false, &res));
   assert(123 == res);
-  assert(isize_from_usize((usize)SSIZE_MAX, false, &res));
+  assert(ErrNone == isize_from_usize((usize)SSIZE_MAX, false, &res));
   assert(SSIZE_MAX == res);
-  assert(!isize_from_usize((usize)SSIZE_MAX + 1, false, &res));
-  assert(!isize_from_usize(SIZE_MAX, false, &res));
+  assert(ErrNone != isize_from_usize((usize)SSIZE_MAX + 1, false, &res));
+  assert(ErrNone != isize_from_usize(SIZE_MAX, false, &res));
 
   // Negative. `|ISIZE_MIN|` is one greater than `ISIZE_MAX`.
-  assert(isize_from_usize(0, true, &res));
+  assert(ErrNone == isize_from_usize(0, true, &res));
   assert(0 == res);
-  assert(isize_from_usize(123, true, &res));
+  assert(ErrNone == isize_from_usize(123, true, &res));
   assert(-123 == res);
-  assert(isize_from_usize((usize)SSIZE_MAX, true, &res));
+  assert(ErrNone == isize_from_usize((usize)SSIZE_MAX, true, &res));
   assert(-SSIZE_MAX == res);
-  assert(isize_from_usize((usize)SSIZE_MAX + 1, true, &res));
+  assert(ErrNone == isize_from_usize((usize)SSIZE_MAX + 1, true, &res));
   assert((-SSIZE_MAX - 1) == res);
-  assert(!isize_from_usize((usize)SSIZE_MAX + 2, true, &res));
-  assert(!isize_from_usize(SIZE_MAX, true, &res));
+  assert(ErrNone != isize_from_usize((usize)SSIZE_MAX + 2, true, &res));
+  assert(ErrNone != isize_from_usize(SIZE_MAX, true, &res));
 }
 
 static void test_usize_round_up_multiple_of(void) {
@@ -2154,45 +2216,46 @@ static void test_slice_u8(void) {
   // slice_u8_first.
   {
     u8 first = 0xAA;
-    assert(!slice_u8_first(slice_u8_make(NULL, 0), &first));
-    assert(!slice_u8_first(slice_u8_make(data, 0), &first));
+    assert(ErrNone != slice_u8_first(slice_u8_make(NULL, 0), &first));
+    assert(ErrNone != slice_u8_first(slice_u8_make(data, 0), &first));
     // Nothing is written when there is no first byte.
     assert(0xAA == first);
 
-    assert(slice_u8_first(slice_u8_make(data, sizeof(data)), &first));
+    assert(ErrNone ==
+           slice_u8_first(slice_u8_make(data, sizeof(data)), &first));
     assert('a' == first);
 
     // Peeking does not consume.
     Slice_u8 slice = slice_u8_make(data, sizeof(data));
-    assert(slice_u8_first(slice, &first));
+    assert(ErrNone == slice_u8_first(slice, &first));
     assert(sizeof(data) == slice.len);
   }
   // slice_u8_skip.
   {
     Slice_u8 empty = slice_u8_make(NULL, 0);
-    assert(!slice_u8_skip(&empty, 1));
+    assert(ErrNone != slice_u8_skip(&empty, 1));
 
     Slice_u8 slice = slice_u8_make(data, sizeof(data));
 
     // Past the end: refused, and the slice is unchanged.
-    assert(!slice_u8_skip(&slice, sizeof(data) + 1));
+    assert(ErrNone != slice_u8_skip(&slice, sizeof(data) + 1));
     assert(sizeof(data) == slice.len);
     assert(data == slice.data);
 
-    assert(slice_u8_skip(&slice, 0));
+    assert(ErrNone == slice_u8_skip(&slice, 0));
     assert(sizeof(data) == slice.len);
 
-    assert(slice_u8_skip(&slice, 2));
+    assert(ErrNone == slice_u8_skip(&slice, 2));
     assert(1 == slice.len);
 
     u8 first = 0;
-    assert(slice_u8_first(slice, &first));
+    assert(ErrNone == slice_u8_first(slice, &first));
     assert('c' == first);
 
     // Skipping exactly to the end is legal.
-    assert(slice_u8_skip(&slice, 1));
+    assert(ErrNone == slice_u8_skip(&slice, 1));
     assert(0 == slice.len);
-    assert(!slice_u8_first(slice, &first));
+    assert(ErrNone != slice_u8_first(slice, &first));
   }
   // slice_u8_take.
   {
@@ -2290,31 +2353,32 @@ static void test_unix_path_last_component(void) {
 static void test_ascii_num_parse(void) {
   const struct {
     const char *input;
-    bool ok;
+    Error expected;
     usize num;
     // What is left of the input afterwards. Only meaningful on success.
     const char *remaining;
   } cases[] = {
-      {"123e", true, 123, "e"},
-      {"0e", true, 0, "e"},
-      {"7:spam", true, 7, ":spam"},
+      {"123e", ErrNone, 123, "e"},
+      {"0e", ErrNone, 0, "e"},
+      {"7:spam", ErrNone, 7, ":spam"},
       // The largest representable usize.
-      {"18446744073709551615e", true, SIZE_MAX, "e"},
+      {"18446744073709551615e", ErrNone, SIZE_MAX, "e"},
       // Unterminated: the digits run to the end of the input.
-      {"123", false, 0, NULL},
-      {"", false, 0, NULL},
+      {"123", ErrInvalidData, 0, NULL},
+      {"", ErrInvalidData, 0, NULL},
       // No digit at all. The old API reported this as a success consuming
       // nothing and left it to the caller to notice.
-      {"e", false, 0, NULL},
-      {":spam", false, 0, NULL},
-      {"-1e", false, 0, NULL},
+      {"e", ErrInvalidData, 0, NULL},
+      {":spam", ErrInvalidData, 0, NULL},
+      {"-1e", ErrInvalidData, 0, NULL},
       // A single zero is fine, leading zeroes are not.
-      {"0123e", false, 0, NULL},
-      {"00e", false, 0, NULL},
-      // Overflow on the final add: SIZE_MAX + 1.
-      {"18446744073709551616e", false, 0, NULL},
+      {"0123e", ErrInvalidData, 0, NULL},
+      {"00e", ErrInvalidData, 0, NULL},
+      // Well formed but too wide for a `usize`, which is `ErrRange` rather
+      // than malformed input. Overflow on the final add: SIZE_MAX + 1.
+      {"18446744073709551616e", ErrRange, 0, NULL},
       // Overflow on the multiply: 20 nines.
-      {"99999999999999999999e", false, 0, NULL},
+      {"99999999999999999999e", ErrRange, 0, NULL},
   };
 
   for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
@@ -2322,9 +2386,9 @@ static void test_ascii_num_parse(void) {
     const Slice_u8 before = data;
 
     usize num = 0xAA;
-    assert(ascii_num_parse(&data, &num) == cases[i].ok);
+    assert(cases[i].expected == ascii_num_parse(&data, &num));
 
-    if (!cases[i].ok) {
+    if (ErrNone != cases[i].expected) {
       // A failed parse consumes nothing and writes nothing.
       assert(before.data == data.data);
       assert(before.len == data.len);
@@ -2341,7 +2405,7 @@ static void test_ascii_num_parse(void) {
   {
     Slice_u8 data = slice_u8_make(NULL, 0);
     usize num = 0;
-    assert(!ascii_num_parse(&data, &num));
+    assert(ErrInvalidData == ascii_num_parse(&data, &num));
   }
 }
 
@@ -2384,7 +2448,7 @@ static void test_bencode_parse_num(void) {
 
     // Poisoned so that a write on the failure path is visible.
     BencodeValue value = {.kind = BencodeKindDict};
-    assert(bencode_parse_num(&data, &value) == cases[i].ok);
+    assert((ErrNone == bencode_parse_num(&data, &value)) == cases[i].ok);
 
     if (!cases[i].ok) {
       // A failed parse consumes nothing and writes nothing.
@@ -2430,7 +2494,7 @@ static void test_bencode_parse_string(void) {
 
     // Poisoned so that a write on the failure path is visible.
     BencodeValue value = {.kind = BencodeKindDict};
-    assert(bencode_parse_string(&data, &value) == cases[i].ok);
+    assert((ErrNone == bencode_parse_string(&data, &value)) == cases[i].ok);
 
     if (!cases[i].ok) {
       // A failed parse consumes nothing and writes nothing.
@@ -2451,7 +2515,7 @@ static void test_bencode_parse_string(void) {
     Slice_u8 data = test_slice(input);
 
     BencodeValue value = {0};
-    assert(bencode_parse_string(&data, &value));
+    assert(ErrNone == bencode_parse_string(&data, &value));
     assert((u8 *)input + 2 == value.v.s.data);
   }
 }
@@ -2553,7 +2617,8 @@ static void test_bencode_parse(void) {
     u8 *const arena_start = arena.start;
 
     BencodeValue value = {0};
-    assert(bencode_parse(&data, &arena, scratch, &value) == cases[i].ok);
+    assert((ErrNone == bencode_parse(&data, &arena, scratch, &value)) ==
+           cases[i].ok);
 
     if (!cases[i].ok) {
       // A failed parse rolls back the input and the output arena both.
@@ -2585,7 +2650,8 @@ static void test_bencode_parse(void) {
 
       BencodeValue value = {0};
       // Only `0:` has a body short enough to succeed.
-      assert(bencode_parse(&data, &arena, scratch, &value) == ('0' == c));
+      assert((ErrNone == bencode_parse(&data, &arena, scratch, &value)) ==
+             ('0' == c));
     }
   }
 
@@ -2597,7 +2663,7 @@ static void test_bencode_parse(void) {
 
     Slice_u8 data = test_slice("ld1:a1:beli2eee");
     BencodeValue value = {0};
-    assert(bencode_parse(&data, &arena, scratch, &value));
+    assert(ErrNone == bencode_parse(&data, &arena, scratch, &value));
     assert(BencodeKindList == value.kind);
     assert(2 == value.v.list.len);
 
@@ -2622,7 +2688,7 @@ static void test_bencode_parse(void) {
     const char *const input = "l4:spame";
     Slice_u8 data = test_slice(input);
     BencodeValue value = {0};
-    assert(bencode_parse(&data, &arena, scratch, &value));
+    assert(ErrNone == bencode_parse(&data, &arena, scratch, &value));
     assert((u8 *)input + 3 == value.v.list.data[0].v.s.data);
   }
 
@@ -2640,7 +2706,7 @@ static void test_bencode_parse(void) {
 
       Slice_u8 data = slice_u8_make(input, 2 * depth);
       BencodeValue value = {0};
-      const bool ok = bencode_parse(&data, &arena, scratch, &value);
+      const bool ok = ErrNone == bencode_parse(&data, &arena, scratch, &value);
 
       assert(ok == (depth <= BENCODE_MAX_DEPTH));
       if (ok) {
@@ -2667,7 +2733,7 @@ static void test_bencode_parse(void) {
 
     Slice_u8 data = slice_u8_make(input, sizeof(input));
     BencodeValue value = {0};
-    assert(bencode_parse(&data, &arena, scratch, &value));
+    assert(ErrNone == bencode_parse(&data, &arena, scratch, &value));
     assert(BencodeKindList == value.kind);
     assert(children_len == value.v.list.len);
 
@@ -2683,7 +2749,7 @@ static void test_bencode_parse(void) {
 
     Slice_u8 data = test_slice("li1ei2ee");
     BencodeValue value = {0};
-    assert(!bencode_parse(&data, &arena, scratch, &value));
+    assert(ErrNone != bencode_parse(&data, &arena, scratch, &value));
   }
   // Out of output arena: the children of a container do not fit.
   {
@@ -2692,11 +2758,11 @@ static void test_bencode_parse(void) {
 
     Slice_u8 data = test_slice("li1ee");
     BencodeValue value = {0};
-    assert(!bencode_parse(&data, &arena, scratch, &value));
+    assert(ErrNone != bencode_parse(&data, &arena, scratch, &value));
 
     // An empty container needs no allocation at all, so it still succeeds.
     Slice_u8 data_empty = test_slice("le");
-    assert(bencode_parse(&data_empty, &arena, scratch, &value));
+    assert(ErrNone == bencode_parse(&data_empty, &arena, scratch, &value));
     assert(0 == value.v.list.len);
   }
 
@@ -2710,12 +2776,12 @@ static void test_bencode_parse(void) {
 
     Slice_u8 data_a = test_slice("li1ei2ee");
     BencodeValue a = {0};
-    assert(bencode_parse(&data_a, &arena, scratch, &a));
+    assert(ErrNone == bencode_parse(&data_a, &arena, scratch, &a));
     assert(scratch_start == scratch.start);
 
     Slice_u8 data_b = test_slice("li3ee");
     BencodeValue b = {0};
-    assert(bencode_parse(&data_b, &arena, scratch, &b));
+    assert(ErrNone == bencode_parse(&data_b, &arena, scratch, &b));
     assert(scratch_start == scratch.start);
 
     assert(a.v.list.data != b.v.list.data);
@@ -2733,7 +2799,7 @@ static void test_bencode_parse(void) {
 
     Slice_u8 data = slice_u8_make(NULL, 0);
     BencodeValue value = {0};
-    assert(!bencode_parse(&data, &arena, scratch, &value));
+    assert(ErrNone != bencode_parse(&data, &arena, scratch, &value));
   }
 
   // A parse that fails *after* allocating gives the memory back: the inner
@@ -2748,7 +2814,7 @@ static void test_bencode_parse(void) {
 
     // Poisoned so that a write on the failure path is visible.
     BencodeValue value = {.kind = BencodeKindString};
-    assert(!bencode_parse(&data, &arena, scratch, &value));
+    assert(ErrNone != bencode_parse(&data, &arena, scratch, &value));
 
     assert(arena_start == arena.start);
     assert(strlen(input) == data.len);
@@ -2839,7 +2905,7 @@ static void test_bencode_validate_dict(void) {
   // Empty: trivially valid, and a NULL `data` is allowed when `len` is zero.
   {
     const BencodeList list = {0};
-    assert(bencode_validate_dict(list));
+    assert(ErrNone == bencode_validate_dict(list));
   }
   // Keys strictly increasing.
   {
@@ -2849,7 +2915,7 @@ static void test_bencode_validate_dict(void) {
         test_bencode_make_string("c", 1), num,
     };
     const BencodeList list = {.len = 6, .data = children};
-    assert(bencode_validate_dict(list));
+    assert(ErrNone == bencode_validate_dict(list));
   }
   // Out of order, anywhere in the dict.
   {
@@ -2860,7 +2926,7 @@ static void test_bencode_validate_dict(void) {
         num,
     };
     const BencodeList list = {.len = 4, .data = children};
-    assert(!bencode_validate_dict(list));
+    assert(ErrNone != bencode_validate_dict(list));
   }
   {
     BencodeValue children[] = {
@@ -2869,7 +2935,7 @@ static void test_bencode_validate_dict(void) {
         test_bencode_make_string("b", 1), num,
     };
     const BencodeList list = {.len = 6, .data = children};
-    assert(!bencode_validate_dict(list));
+    assert(ErrNone != bencode_validate_dict(list));
   }
   // Duplicate keys: sorted is not enough, the order has to be strict.
   {
@@ -2880,19 +2946,19 @@ static void test_bencode_validate_dict(void) {
         num,
     };
     const BencodeList list = {.len = 4, .data = children};
-    assert(!bencode_validate_dict(list));
+    assert(ErrNone != bencode_validate_dict(list));
   }
   // Keys must be strings.
   {
     BencodeValue children[] = {num, num};
     const BencodeList list = {.len = 2, .data = children};
-    assert(!bencode_validate_dict(list));
+    assert(ErrNone != bencode_validate_dict(list));
   }
   // ... including a non-string key that is not the first one.
   {
     BencodeValue children[] = {test_bencode_make_string("a", 1), num, num, num};
     const BencodeList list = {.len = 4, .data = children};
-    assert(!bencode_validate_dict(list));
+    assert(ErrNone != bencode_validate_dict(list));
   }
   // Values are not constrained, only keys are.
   {
@@ -2905,19 +2971,19 @@ static void test_bencode_validate_dict(void) {
         nested_dict,
     };
     const BencodeList list = {.len = 4, .data = children};
-    assert(bencode_validate_dict(list));
+    assert(ErrNone == bencode_validate_dict(list));
   }
   // An odd number of children is not key/value pairs.
   {
     BencodeValue children[] = {test_bencode_make_string("a", 1), num,
                                test_bencode_make_string("b", 1)};
     const BencodeList list = {.len = 3, .data = children};
-    assert(!bencode_validate_dict(list));
+    assert(ErrNone != bencode_validate_dict(list));
   }
   {
     BencodeValue children[] = {test_bencode_make_string("a", 1)};
     const BencodeList list = {.len = 1, .data = children};
-    assert(!bencode_validate_dict(list));
+    assert(ErrNone != bencode_validate_dict(list));
   }
   // The empty key is legal and sorts before every other key.
   {
@@ -2928,7 +2994,7 @@ static void test_bencode_validate_dict(void) {
         num,
     };
     const BencodeList list = {.len = 4, .data = children};
-    assert(bencode_validate_dict(list));
+    assert(ErrNone == bencode_validate_dict(list));
   }
   // A key that is a prefix of the next one is in order; the reverse is not.
   {
@@ -2939,7 +3005,7 @@ static void test_bencode_validate_dict(void) {
         num,
     };
     const BencodeList list = {.len = 4, .data = children};
-    assert(bencode_validate_dict(list));
+    assert(ErrNone == bencode_validate_dict(list));
   }
   {
     BencodeValue children[] = {
@@ -2949,7 +3015,7 @@ static void test_bencode_validate_dict(void) {
         num,
     };
     const BencodeList list = {.len = 4, .data = children};
-    assert(!bencode_validate_dict(list));
+    assert(ErrNone != bencode_validate_dict(list));
   }
   // Ordering is by raw byte value, so `0x80` sorts *after* `0x7f`. A signed
   // comparison would get this pair backwards.
@@ -2961,7 +3027,7 @@ static void test_bencode_validate_dict(void) {
         num,
     };
     const BencodeList list = {.len = 4, .data = children};
-    assert(bencode_validate_dict(list));
+    assert(ErrNone == bencode_validate_dict(list));
   }
   {
     BencodeValue children[] = {
@@ -2971,7 +3037,7 @@ static void test_bencode_validate_dict(void) {
         num,
     };
     const BencodeList list = {.len = 4, .data = children};
-    assert(!bencode_validate_dict(list));
+    assert(ErrNone != bencode_validate_dict(list));
   }
   // Keys are compared over their whole length, zero bytes included.
   {
@@ -2986,7 +3052,7 @@ static void test_bencode_validate_dict(void) {
         num,
     };
     const BencodeList list = {.len = 4, .data = children};
-    assert(bencode_validate_dict(list));
+    assert(ErrNone == bencode_validate_dict(list));
   }
 }
 
@@ -3241,7 +3307,8 @@ static void test_torrent_merkle_vectors(void) {
       PieceHash *pieces = NULL;
       usize pieces_count = 0;
       u8 root[SHA256_DIGEST_LENGTH] = {0};
-      assert(torrent_build_merkle_tree(slice_u8_make(data.data, vectors[i].len),
+      assert(ErrNone ==
+             torrent_build_merkle_tree(slice_u8_make(data.data, vectors[i].len),
                                        piece_lengths_in_bytes[p], &pieces,
                                        &pieces_count, root, &arena));
 
@@ -3276,9 +3343,10 @@ static void test_torrent_merkle_piece_layer(void) {
       PieceHash *pieces = NULL;
       usize pieces_count = 0;
       u8 root[SHA256_DIGEST_LENGTH] = {0};
-      assert(torrent_build_merkle_tree(slice_u8_make(data.data, len),
-                                       piece_length_in_bytes, &pieces,
-                                       &pieces_count, root, &arena));
+      assert(ErrNone == torrent_build_merkle_tree(slice_u8_make(data.data, len),
+                                                  piece_length_in_bytes,
+                                                  &pieces, &pieces_count, root,
+                                                  &arena));
 
       const usize expected_pieces = ceil_usize(len, piece_length_in_bytes);
       if (expected_pieces > 1) {
@@ -3359,8 +3427,9 @@ static void test_torrent_merkle_padding(void) {
   u8 root[SHA256_DIGEST_LENGTH] = {0};
   // One block per piece, so the piece layer is the leaf layer and every leaf
   // that holds file data is observable.
-  assert(torrent_build_merkle_tree(slice_u8_make(buf, len), 16 * KiB, &pieces,
-                                   &pieces_count, root, &arena));
+  assert(ErrNone == torrent_build_merkle_tree(slice_u8_make(buf, len), 16 * KiB,
+                                              &pieces, &pieces_count, root,
+                                              &arena));
   assert(pieces);
   assert(3 == pieces_count);
 
@@ -3425,8 +3494,8 @@ static void test_torrent_merkle_empty(void) {
   u8 root[SHA256_DIGEST_LENGTH];
   memset(root, 0xcd, sizeof(root));
 
-  assert(torrent_build_merkle_tree((Slice_u8){0}, 256 * KiB, &pieces,
-                                   &pieces_count, root, &arena));
+  assert(ErrNone == torrent_build_merkle_tree((Slice_u8){0}, 256 * KiB, &pieces,
+                                              &pieces_count, root, &arena));
   assert(NULL == pieces);
   assert(0 == pieces_count);
 
@@ -3457,8 +3526,9 @@ static void test_torrent_merkle_oom(void) {
   PieceHash *pieces = NULL;
   usize pieces_count = 0;
   u8 root[SHA256_DIGEST_LENGTH] = {0};
-  assert(!torrent_build_merkle_tree(slice_u8_make(buf, len), 16 * KiB, &pieces,
-                                    &pieces_count, root, &arena));
+  assert(ErrNone != torrent_build_merkle_tree(slice_u8_make(buf, len), 16 * KiB,
+                                              &pieces, &pieces_count, root,
+                                              &arena));
   assert(NULL == pieces);
   assert(0 == pieces_count);
 }
@@ -3616,7 +3686,7 @@ static void test_encode_usize_base_10_round_trip(void) {
 
     Slice_u8 to_parse = slice_u8_make(terminated, got + 1);
     usize parsed = 0;
-    assert(ascii_num_parse(&to_parse, &parsed));
+    assert(ErrNone == ascii_num_parse(&to_parse, &parsed));
     assert(n == parsed);
   }
 }
@@ -3717,7 +3787,7 @@ static void test_encode_isize_base_10_round_trip(void) {
 
     Slice_u8 to_parse = slice_u8_make(framed, got + 2);
     BencodeValue parsed = {0};
-    assert(bencode_parse_num(&to_parse, &parsed));
+    assert(ErrNone == bencode_parse_num(&to_parse, &parsed));
     assert(BencodeKindInteger == parsed.kind);
     assert(n == parsed.v.num);
   }
@@ -3888,7 +3958,7 @@ static void test_bencode_encode_wide_dict(void) {
   Arena scratch = test_arena(1 * MiB);
   Slice_u8 to_parse = slice_u8_take(dst, written);
   BencodeValue parsed = {0};
-  assert(bencode_parse(&to_parse, &parse_arena, scratch, &parsed));
+  assert(ErrNone == bencode_parse(&to_parse, &parse_arena, scratch, &parsed));
   assert(BencodeKindDict == parsed.kind);
   assert(pairs * 2 == parsed.v.list.len);
 }
@@ -3923,7 +3993,7 @@ static void test_bencode_encode_round_trip(void) {
     const Slice_u8 original = input;
 
     BencodeValue parsed = {0};
-    assert(bencode_parse(&input, &arena, scratch, &parsed));
+    assert(ErrNone == bencode_parse(&input, &arena, scratch, &parsed));
 
     test_bencode_encode_once(parsed, documents[i]);
 
@@ -3949,9 +4019,11 @@ static void test_bencode_encode_torrent_info(void) {
   PieceHash *piece_hashes = NULL;
   usize piece_hashes_count = 0;
   Slice_u8 pieces_root_slice = {0};
-  assert(torrent_make_info_dict_v2(
-      name, 16 * TORRENT_BLOCK_SIZE, slice_u8_make(file_data, file_len), name,
-      &info, &pieces_root_slice, &piece_hashes, &piece_hashes_count, &arena));
+  assert(ErrNone ==
+         torrent_make_info_dict_v2(name, 16 * TORRENT_BLOCK_SIZE,
+                                   slice_u8_make(file_data, file_len), name,
+                                   &info, &pieces_root_slice, &piece_hashes,
+                                   &piece_hashes_count, &arena));
 
   const usize cap = bencode_encode_exact_size(info, 0);
   Slice_u8 dst = {.data = arena_alloc(&arena, __alignof__(u8), sizeof(u8), cap),
@@ -4054,9 +4126,11 @@ static void test_torrent_metainfo_once(usize file_len,
   Slice_u8 pieces_root = {0};
   PieceHash *piece_hashes = NULL;
   usize piece_hashes_count = 0;
-  assert(torrent_make_info_dict_v2(
-      name, 16 * TORRENT_BLOCK_SIZE, slice_u8_make(file_data, file_len), name,
-      &info, &pieces_root, &piece_hashes, &piece_hashes_count, &arena));
+  assert(ErrNone ==
+         torrent_make_info_dict_v2(name, 16 * TORRENT_BLOCK_SIZE,
+                                   slice_u8_make(file_data, file_len), name,
+                                   &info, &pieces_root, &piece_hashes,
+                                   &piece_hashes_count, &arena));
 
   // The root the info dict publishes is the one libtorrent computes.
   u8 expected_root[SHA256_DIGEST_LENGTH] = {0};
@@ -4068,9 +4142,9 @@ static void test_torrent_metainfo_once(usize file_len,
   assert(piece_hashes_count * SHA256_DIGEST_LENGTH == expected_layer_len);
 
   BencodeValue metainfo = {0};
-  assert(torrent_make_metainfo_dict_v2(pieces_root, announce, info.v.list,
-                                       piece_hashes, piece_hashes_count,
-                                       &metainfo, &arena));
+  assert(ErrNone == torrent_make_metainfo_dict_v2(
+                        pieces_root, announce, info.v.list, piece_hashes,
+                        piece_hashes_count, &metainfo, &arena));
 
   // Three keys, in the order bencode requires: announce < info < piece layers.
   assert(BencodeKindDict == metainfo.kind);
@@ -4132,7 +4206,7 @@ static void test_torrent_metainfo_once(usize file_len,
   // then finding those exact bytes inside the metainfo encoding is the
   // property everything downstream depends on: nesting must not perturb them.
   Slice_u8 info_encoded = {0};
-  assert(bencode_encode(info, &info_encoded, &arena));
+  assert(ErrNone == bencode_encode(info, &info_encoded, &arena));
 
   u8 infohash[SHA256_DIGEST_LENGTH] = {0};
   sha256_digest(info_encoded, infohash);
@@ -4141,7 +4215,7 @@ static void test_torrent_metainfo_once(usize file_len,
   assert(0 == memcmp(infohash, expected_infohash, sizeof(infohash)));
 
   Slice_u8 metainfo_encoded = {0};
-  assert(bencode_encode(metainfo, &metainfo_encoded, &arena));
+  assert(ErrNone == bencode_encode(metainfo, &metainfo_encoded, &arena));
   assert(metainfo_encoded.len > info_encoded.len);
   assert(test_slice_contains(metainfo_encoded, info_encoded));
 
@@ -4162,7 +4236,7 @@ static void test_torrent_metainfo_once(usize file_len,
   // never does, so a mis-ordered key only ever shows up here.
   Slice_u8 to_parse = metainfo_encoded;
   BencodeValue reparsed = {0};
-  assert(bencode_parse(&to_parse, &arena, scratch, &reparsed));
+  assert(ErrNone == bencode_parse(&to_parse, &arena, scratch, &reparsed));
   assert(0 == to_parse.len);
   assert(BencodeKindDict == reparsed.kind);
   assert(2 * 3 == reparsed.v.list.len);
@@ -4419,7 +4493,7 @@ int main(i32 argc, char *argv[]) {
     const Arena scratch = arena_valloc(32 * MiB);
 
     BencodeValue bencode = {0};
-    assert(bencode_parse(&input, &arena, scratch, &bencode));
+    assert(ErrNone == bencode_parse(&input, &arena, scratch, &bencode));
 
     bencode_print(bencode, 0);
     printf("\n");
@@ -4445,15 +4519,16 @@ int main(i32 argc, char *argv[]) {
     PieceHash *piece_hashes = NULL;
     usize piece_hashes_count = 0;
     Slice_u8 pieces_root = {0};
-    assert(torrent_make_info_dict_v2(
-        file_name, TORRENT_BLOCK_SIZE * 16, input, file_name, &info_dict,
-        &pieces_root, &piece_hashes, &piece_hashes_count, &arena));
+    assert(ErrNone == torrent_make_info_dict_v2(
+                          file_name, TORRENT_BLOCK_SIZE * 16, input, file_name,
+                          &info_dict, &pieces_root, &piece_hashes,
+                          &piece_hashes_count, &arena));
 
     bencode_print(info_dict, 0);
     puts("");
 
     Slice_u8 info_dict_encoded = {0};
-    assert(bencode_encode(info_dict, &info_dict_encoded, &arena));
+    assert(ErrNone == bencode_encode(info_dict, &info_dict_encoded, &arena));
     // Bencode is binary: `%s` stops at the first NUL regardless of the
     // precision given, so the bytes go out through `fwrite`.
     printf("info dict encoded: ");
@@ -4471,14 +4546,16 @@ int main(i32 argc, char *argv[]) {
     const char *const announce_url_cstr = "http://localhost:12345";
     Slice_u8 announce_url =
         slice_u8_make((u8 *)announce_url_cstr, strlen(announce_url_cstr));
-    assert(torrent_make_metainfo_dict_v2(
-        pieces_root, announce_url, info_dict.v.list, piece_hashes,
-        piece_hashes_count, &metainfo_dict, &arena));
+    assert(ErrNone == torrent_make_metainfo_dict_v2(
+                          pieces_root, announce_url, info_dict.v.list,
+                          piece_hashes, piece_hashes_count, &metainfo_dict,
+                          &arena));
     bencode_print(metainfo_dict, 0);
     puts("");
 
     Slice_u8 metainfo_dict_encoded = {0};
-    assert(bencode_encode(metainfo_dict, &metainfo_dict_encoded, &arena));
+    assert(ErrNone ==
+           bencode_encode(metainfo_dict, &metainfo_dict_encoded, &arena));
     printf("metainfo dict encoded: ");
     assert(metainfo_dict_encoded.len == fwrite(metainfo_dict_encoded.data, 1,
                                                metainfo_dict_encoded.len,
