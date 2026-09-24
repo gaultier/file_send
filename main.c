@@ -4854,7 +4854,7 @@ typedef struct {
 static void *torrent_client_handle(void *vctx) {
   assert(vctx);
 
-  TorrentClientHandleCtx *ctx = vctx;
+  TorrentClientHandleCtx *const ctx = vctx;
 
   printf("torrent_client_handle");
   const u32 ip = ctx->addr.ip;
