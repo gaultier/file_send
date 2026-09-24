@@ -564,6 +564,18 @@ unix_thread_create(void *ctx, ThreadCallback cb) {
   return ErrNone;
 }
 
+__attribute__((warn_unused_result)) static Error unix_close(void *ctx, i32 fd) {
+  (void)ctx;
+
+  i32 ret = close(fd);
+
+  if (-1 == ret) {
+    return unix_error_from_errno(errno);
+  }
+
+  return ErrNone;
+}
+
 // ---------- IO ----------
 
 typedef struct {
@@ -574,6 +586,7 @@ typedef struct {
   Error (*accept)(void *ctx, i32 listen_socket, i32 *dst_accept_socket,
                   Ipv4Addr *dst_accept_addr);
   Error (*thread_create)(void *ctx, ThreadCallback cb);
+  Error (*close)(void *ctx, i32 fd);
 } IO;
 
 __attribute__((warn_unused_result)) static IO io_unix_make(void) {
@@ -584,30 +597,32 @@ __attribute__((warn_unused_result)) static IO io_unix_make(void) {
       .tcp_bind_ipv4 = unix_tcp_bind_ipv4,
       .accept = unix_accept,
       .thread_create = unix_thread_create,
+      .close = unix_close,
   };
 }
 
-typedef void *(*AcceptCallback)(void *ctx /*, Ipv4Addr client_addr*/);
+typedef Error (*AcceptCallback)(const IO *io, void *ctx, Ipv4Addr accept_addr,
+                                i32 accept_socket);
 
 __attribute__((warn_unused_result)) static Error
-io_listen_and_serve_tcp_ipv4(IO io, void *ctx, Ipv4Addr listen_addr,
+io_listen_and_serve_tcp_ipv4(const IO *io, void *ctx, Ipv4Addr listen_addr,
                              AcceptCallback on_accept) {
   i32 listen_socket = 0;
   {
     Error err_socket =
-        io.socket(NULL, SocketDomainIpv4, SocketTypeTcp, &listen_socket);
+        io->socket(ctx, SocketDomainIpv4, SocketTypeTcp, &listen_socket);
     assert(ErrNone == err_socket);
     puts("opened socket");
   }
 
   {
-    Error err_bind = io.tcp_bind_ipv4(NULL, listen_socket, listen_addr);
+    Error err_bind = io->tcp_bind_ipv4(ctx, listen_socket, listen_addr);
     assert(ErrNone == err_bind);
     puts("socket bound");
   }
 
   {
-    Error err_listen = io.listen(NULL, listen_socket, 1024);
+    Error err_listen = io->listen(ctx, listen_socket, 1024);
     assert(ErrNone == err_listen);
     puts("socket listening");
   }
@@ -618,11 +633,10 @@ io_listen_and_serve_tcp_ipv4(IO io, void *ctx, Ipv4Addr listen_addr,
       Ipv4Addr accept_addr = {0};
 
       Error err_accept =
-          io.accept(NULL, listen_socket, &accept_socket, &accept_addr);
+          io->accept(ctx, listen_socket, &accept_socket, &accept_addr);
       assert(ErrNone == err_accept);
 
-      Error err_thread = io.thread_create(ctx, on_accept);
-      assert(ErrNone == err_thread);
+      on_accept(io, ctx, accept_addr, accept_socket);
     }
   }
 
@@ -4829,22 +4843,53 @@ static void test(const char *filter) {
   printf("%zu test(s) passed\n", run);
 }
 
-static void *torrent_client_on_accept(void *ctx) {
-  (void)ctx;
+typedef struct {
+  void *ctx;
+  Ipv4Addr addr;
+  i32 socket;
+  const IO *io;
+  // More: torrent, etc.
+} TorrentClientHandleCtx;
 
-  puts("accepted");
-  // printf("accepted: %u.%u.%u.%u:%hu\n", accept_addr.ip >> 24 & 0xff,
-  //        accept_addr.ip >> 16 & 0xff, accept_addr.ip >> 8 & 0xff,
-  //        accept_addr.ip >> 0 & 0xff, accept_addr.port);
+static void *torrent_client_handle(void *vctx) {
+  assert(vctx);
+
+  TorrentClientHandleCtx *ctx = vctx;
+
+  printf("torrent_client_handle");
+  const u32 ip = ctx->addr.ip;
+  printf("accepted: %u.%u.%u.%u:%hu\n", ip >> 24 & 0xff, ip >> 16 & 0xff,
+         ip >> 8 & 0xff, ip >> 0 & 0xff, ctx->addr.port);
+
+  (void)ctx->io->close(ctx->ctx, ctx->socket);
+
+  puts("torrent_client_handle end");
 
   return NULL;
+}
+
+__attribute__((warn_unused_result)) static Error
+torrent_client_on_accept(const IO *io, void *ctx, Ipv4Addr accept_addr,
+                         i32 accept_socket) {
+
+  puts("accepted");
+
+  // FIXME: Pool.
+  TorrentClientHandleCtx *client_ctx = malloc(sizeof(TorrentClientHandleCtx));
+  assert(client_ctx);
+  client_ctx->ctx = ctx;
+  client_ctx->addr = accept_addr;
+  client_ctx->socket = accept_socket;
+  client_ctx->io = io;
+
+  return io->thread_create(client_ctx, torrent_client_handle);
 }
 
 int main(i32 argc, char *argv[]) {
   assert(argc >= 2);
   assert(argv);
 
-  IO io = io_unix_make();
+  const IO io = io_unix_make();
 
   const char *const cmd = argv[1];
   const usize arena_cap = 32 * MiB;
@@ -4942,7 +4987,7 @@ int main(i32 argc, char *argv[]) {
     puts("");
 
     const Ipv4Addr listen_addr = {.port = 12345, .ip = 0};
-    Error err_listen = io_listen_and_serve_tcp_ipv4(io, NULL, listen_addr,
+    Error err_listen = io_listen_and_serve_tcp_ipv4(&io, NULL, listen_addr,
                                                     torrent_client_on_accept);
     if (ErrNone != err_listen) {
       fprintf(stderr, "failed to lsiten and serve: %d\n", err_listen);
