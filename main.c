@@ -827,6 +827,11 @@ static void bencode_print(BencodeValue v, usize indent) {
     break;
 
   case BencodeKindString:
+    // A negative `%.*s` precision is "as if omitted" (C99 7.19.6.1), which
+    // would print until a NUL and read straight past the slice. A string
+    // that long can only come from a >2GiB input, so refuse rather than
+    // silently truncate.
+    assert(v.v.s.len <= INT_MAX);
     printf("\"%.*s\"", (i32)v.v.s.len, v.v.s.data);
     break;
 
@@ -4091,6 +4096,7 @@ int main(i32 argc, char *argv[]) {
 
     const usize encoded_len = bencode_encode(info_dict, encoded);
     encoded = slice_u8_take(encoded, encoded_len);
+    assert(encoded.len <= INT_MAX);
     printf("info dict encoded: %.*s\n", (i32)encoded.len, encoded.data);
   } else {
     fprintf(stderr, "unknown command\n");
