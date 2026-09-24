@@ -1038,7 +1038,7 @@ static void sha256_init(Sha256Ctx *ctx) {
 
 static void sha256_update(Sha256Ctx *ctx, u8 *data, usize len) {
   assert(ctx);
-  assert(data.data || 0 == data.len);
+  assert(data || 0 == len);
   assert(ctx->partial_len < SHA256_CBLOCK);
 
   const u8 *remaining = data;
@@ -1091,7 +1091,7 @@ static void sha256_final(Sha256Ctx *ctx, u8 res[SHA256_DIGEST_LENGTH]) {
       len_mod < 56 ? 56 - len_mod : 56 + SHA256_CBLOCK - len_mod;
 
   u8 padding[SHA256_CBLOCK] = {0x80};
-  sha256_update(ctx, padding_len);
+  sha256_update(ctx, padding, padding_len);
 
   u8 len_bytes[8] = {0};
   for (usize i = 0; i < 8; i++) {
@@ -1130,16 +1130,60 @@ static void sha256_digest_pair(u8 left[SHA256_DIGEST_LENGTH],
                                u8 dst[SHA256_DIGEST_LENGTH]) {
   Sha256Ctx sha = {0};
   sha256_init(&sha);
-  sha256_update(&sha, left, sizeof(SHA256_DIGEST_LENGTH));
-  sha256_update(&sha, right, sizeof(SHA256_DIGEST_LENGTH));
+  sha256_update(&sha, left, SHA256_DIGEST_LENGTH);
+  sha256_update(&sha, right, SHA256_DIGEST_LENGTH);
   sha256_final(&sha, dst);
 }
 
 static const usize TORRENT_BLOCK_SIZE = 16 * KiB;
 // static const usize TORRENT_PIECES_PER_BLOCK = 16;
 
-__attribute((warn_unused_result)) static bool
-torrent_build_merkle_sub_tree(Slice_u8 data, u8 out[SHA256_DIGEST_LENGTH]) {}
+// `height == 0`: root.
+static void torrent_build_merkle_sub_tree(Slice_u8 data, usize first_leaf,
+                                          usize blocks_count, usize height,
+                                          u8 out[SHA256_DIGEST_LENGTH]) {
+  assert(out);
+  assert(blocks_count > 0);
+  const usize max_height = (usize)__builtin_ctzll(blocks_count);
+  assert(height <= max_height);
+
+  const bool is_leaf = max_height == height;
+
+  if (is_leaf) {
+    // Need to hash the file data?
+    if (first_leaf < blocks_count) {
+      assert(first_leaf * TORRENT_BLOCK_SIZE < data.len);
+
+      const Slice_u8 block_data = {
+          .data = data.data + first_leaf * TORRENT_BLOCK_SIZE,
+          .len = first_leaf * TORRENT_BLOCK_SIZE
+                     ? TORRENT_BLOCK_SIZE
+                     : data.len - first_leaf * TORRENT_BLOCK_SIZE,
+      };
+      sha256_digest(block_data, out);
+      return;
+    } else { // Padding block: all zeroes.
+      bzero(out, SHA256_DIGEST_LENGTH);
+      return;
+    }
+  }
+
+  assert(!is_leaf);
+
+  const usize new_height = height + 1;
+  assert(new_height <= max_height);
+
+  u8 left[SHA256_DIGEST_LENGTH] = {0};
+  torrent_build_merkle_sub_tree(data, 2 * first_leaf /* FIXME: check formula */,
+                                blocks_count, new_height, left);
+
+  u8 right[SHA256_DIGEST_LENGTH] = {0};
+  torrent_build_merkle_sub_tree(data,
+                                2 * first_leaf + 1 /* FIXME: check formula */,
+                                blocks_count, new_height, right);
+
+  sha256_digest_pair(left, right, out);
+}
 
 __attribute((warn_unused_result)) static bool
 torrent_build_merkle_tree(Slice_u8 data, PieceHash **piece_hashes,
