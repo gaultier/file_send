@@ -433,10 +433,7 @@ unix_socket(void *ctx, SocketDomain domain, SocketType type, i32 *fd) {
     assert(0 && "todo");
   }
 
-  i32 ret = 0;
-  do {
-    ret = socket(unix_domain, unix_type, 0);
-  } while (-1 == ret && EINTR == errno);
+  const i32 ret = socket(unix_domain, unix_type, 0);
 
   if (-1 == ret) {
     return unix_error_from_errno(errno);
@@ -451,10 +448,7 @@ __attribute__((warn_unused_result)) static Error unix_listen(void *ctx, i32 fd,
                                                              i32 backlog) {
   (void)ctx;
 
-  i32 ret = 0;
-  do {
-    ret = listen(fd, backlog);
-  } while (-1 == ret && EINTR == errno);
+  const i32 ret = listen(fd, backlog);
 
   if (-1 == ret) {
     return unix_error_from_errno(errno);
@@ -474,8 +468,8 @@ unix_open(void *ctx, char *path, FileOpenOptions options, i32 *fd) {
   assert(fd);
 
   i32 unix_options = 0;
-  if (O_RDONLY == options) {
-    unix_options |= FileOpenOptionsReadOnly;
+  if (FileOpenOptionsReadOnly & options) {
+    unix_options |= O_RDONLY;
   }
 
   i32 ret = 0;
@@ -554,11 +548,27 @@ typedef void *(*ThreadCallback)(void *data);
 
 __attribute__((warn_unused_result)) static Error
 unix_thread_create(void *ctx, ThreadCallback cb) {
-  pthread_t thread = {0};
-  i32 ret = pthread_create(&thread, NULL, cb, ctx);
+  assert(cb);
 
-  if (-1 == ret) {
-    return unix_error_from_errno(errno);
+  // Nothing ever joins these threads, so the implementation has to reclaim
+  // the stack and the thread structure itself once the callback returns.
+  pthread_attr_t attr = {0};
+  const i32 ret_init = pthread_attr_init(&attr);
+  if (0 != ret_init) {
+    return unix_error_from_errno(ret_init);
+  }
+  // Only fails on an invalid detach state, and this one is a constant.
+  assert(0 == pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED));
+
+  pthread_t thread = {0};
+  // Unlike every other wrapper here, the `pthread_*` calls return the error
+  // number directly and leave `errno` untouched.
+  const i32 ret = pthread_create(&thread, &attr, cb, ctx);
+
+  assert(0 == pthread_attr_destroy(&attr));
+
+  if (0 != ret) {
+    return unix_error_from_errno(ret);
   }
 
   return ErrNone;
@@ -607,40 +617,66 @@ typedef Error (*AcceptCallback)(const IO *io, void *ctx, Ipv4Addr accept_addr,
 __attribute__((warn_unused_result)) static Error
 io_listen_and_serve_tcp_ipv4(const IO *io, void *ctx, Ipv4Addr listen_addr,
                              AcceptCallback on_accept) {
+  assert(io);
+  assert(on_accept);
+
   i32 listen_socket = 0;
   {
-    Error err_socket =
+    const Error err_socket =
         io->socket(ctx, SocketDomainIpv4, SocketTypeTcp, &listen_socket);
-    assert(ErrNone == err_socket);
+    if (ErrNone != err_socket) {
+      return err_socket;
+    }
     puts("opened socket");
   }
 
   {
-    Error err_bind = io->tcp_bind_ipv4(ctx, listen_socket, listen_addr);
-    assert(ErrNone == err_bind);
+    // A port left behind by a previous run is an ordinary answer, not a bug
+    // in this process, so it travels back as an `Error`.
+    const Error err_bind = io->tcp_bind_ipv4(ctx, listen_socket, listen_addr);
+    if (ErrNone != err_bind) {
+      (void)io->close(ctx, listen_socket);
+      return err_bind;
+    }
     puts("socket bound");
   }
 
   {
-    Error err_listen = io->listen(ctx, listen_socket, 1024);
-    assert(ErrNone == err_listen);
+    const Error err_listen = io->listen(ctx, listen_socket, 1024);
+    if (ErrNone != err_listen) {
+      (void)io->close(ctx, listen_socket);
+      return err_listen;
+    }
     puts("socket listening");
   }
 
-  {
-    for (;;) {
-      i32 accept_socket = 0;
-      Ipv4Addr accept_addr = {0};
+  for (;;) {
+    i32 accept_socket = 0;
+    Ipv4Addr accept_addr = {0};
 
-      Error err_accept =
-          io->accept(ctx, listen_socket, &accept_socket, &accept_addr);
-      assert(ErrNone == err_accept);
+    const Error err_accept =
+        io->accept(ctx, listen_socket, &accept_socket, &accept_addr);
 
-      on_accept(io, ctx, accept_addr, accept_socket);
+    // The peer is allowed to vanish between the handshake and the `accept`.
+    // That is one dead connection, not a dead server.
+    if (ErrConnReset == err_accept) {
+      continue;
+    }
+
+    if (ErrNone != err_accept) {
+      // TODO: `ErrTooManyFiles` is transient and deserves a backoff instead
+      // of tearing the listener down, which needs a timer in `IO`.
+      (void)io->close(ctx, listen_socket);
+      return err_accept;
+    }
+
+    // `accept_socket` belongs to the callback from here on, including
+    // closing it when the callback itself fails.
+    const Error err_on_accept = on_accept(io, ctx, accept_addr, accept_socket);
+    if (ErrNone != err_on_accept) {
+      fprintf(stderr, "failed to handle connection: %d\n", err_on_accept);
     }
   }
-
-  return ErrNone;
 }
 
 // ---------- Misc ----------
@@ -4885,7 +4921,15 @@ torrent_client_on_accept(const IO *io, void *ctx, Ipv4Addr accept_addr,
   client_ctx->socket = accept_socket;
   client_ctx->io = io;
 
-  return io->thread_create(client_ctx, torrent_client_handle);
+  const Error err_thread = io->thread_create(client_ctx, torrent_client_handle);
+  if (ErrNone != err_thread) {
+    // The thread never started, so nothing else will free the context or hang
+    // up on the peer.
+    free(client_ctx);
+    (void)io->close(ctx, accept_socket);
+  }
+
+  return err_thread;
 }
 
 int main(i32 argc, char *argv[]) {
