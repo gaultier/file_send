@@ -177,11 +177,15 @@ __attribute((warn_unused_result)) static bool unix_vprotect_none(void *ptr,
   return true;
 }
 
+__attribute((warn_unused_result)) static bool is_power_of_two(usize value) {
+  return (value != 0) && ((value & (value - 1)) == 0);
+}
+
 // `multiple` must be a power of two, which every page size is.
 __attribute((warn_unused_result)) static usize
 usize_round_up_multiple_of(usize n, usize multiple) {
   assert(multiple != 0);
-  assert(0 == (multiple & (multiple - 1)) && "not a power of two");
+  assert(is_power_of_two(multiple));
 
   usize res = 0;
   assert(!__builtin_add_overflow(n, multiple - 1, &res));
@@ -191,10 +195,6 @@ usize_round_up_multiple_of(usize n, usize multiple) {
   assert(res >= n);
   assert(res - n < multiple);
   return res;
-}
-
-__attribute((warn_unused_result)) static bool is_power_of_two(usize value) {
-  return (value != 0) && ((value & (value - 1)) == 0);
 }
 
 __attribute((warn_unused_result)) static usize next_power_of_two(usize val) {
@@ -2890,9 +2890,9 @@ static void test_torrent_merkle_vectors(void) {
       PieceHash *pieces = NULL;
       usize pieces_count = 0;
       u8 root[SHA256_DIGEST_LENGTH] = {0};
-      assert(torrent_build_merkle_tree(
-          slice_u8_make(data.data, vectors[i].len), piece_lengths_in_bytes[p],
-          &pieces, &pieces_count, root, &arena));
+      assert(torrent_build_merkle_tree(slice_u8_make(data.data, vectors[i].len),
+                                       piece_lengths_in_bytes[p], &pieces,
+                                       &pieces_count, root, &arena));
 
       assert(0 == memcmp(root, expected, sizeof(expected)));
     }
@@ -3017,9 +3017,8 @@ static void test_torrent_merkle_padding(void) {
   // true length rather than zero extended to a full block.
   for (usize l = 0; l < 3; l++) {
     const usize offset = l * TORRENT_BLOCK_SIZE;
-    const usize block_len = len - offset < TORRENT_BLOCK_SIZE
-                                ? len - offset
-                                : TORRENT_BLOCK_SIZE;
+    const usize block_len =
+        len - offset < TORRENT_BLOCK_SIZE ? len - offset : TORRENT_BLOCK_SIZE;
     u8 expected[SHA256_DIGEST_LENGTH] = {0};
     sha256_digest(slice_u8_make(buf + offset, block_len), expected);
     assert(0 == memcmp(pieces[l].digest, expected, sizeof(expected)));
