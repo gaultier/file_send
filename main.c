@@ -102,6 +102,7 @@ isize_from_usize(usize magnitude, bool negative, isize *res) {
                   : !__builtin_add_overflow(magnitude, 0, res);
 }
 
+// ---------- Arena ----------
 __attribute__((warn_unused_result)) static void *
 arena_alloc(Arena *arena, usize align, usize elem_size, usize elem_count) {
   assert(arena != NULL);
@@ -149,112 +150,40 @@ arena_from_mem(u8 *mem, usize bytes_count) {
   return res;
 }
 
-__attribute__((warn_unused_result)) static u8 *
-unix_virtual_mem_alloc(usize bytes_count) {
-  assert(bytes_count > 0);
-  void *alloc = mmap(NULL, bytes_count, PROT_READ | PROT_WRITE,
-                     MAP_ANON | MAP_PRIVATE, -1, 0);
-
-  if ((void *)-1 == alloc) {
-    return NULL;
-  }
-
-  return alloc;
+// ---------- Slice_u8 ----------
+__attribute__((warn_unused_result)) static bool slice_u8_is_empty(Slice_u8 s) {
+  return NULL == s.data || 0 == s.len;
 }
 
-__attribute__((warn_unused_result)) static usize unix_get_page_size(void) {
-  const i64 res = sysconf(_SC_PAGE_SIZE);
-  assert(-1 != res && "unreachable");
-
-  return (usize)res;
-}
-
-__attribute__((warn_unused_result)) static bool unix_vprotect_none(void *ptr,
-                                                                   usize size) {
-  if (-1 == mprotect(ptr, size, PROT_NONE)) {
+__attribute__((warn_unused_result)) static bool
+slice_u8_contains_byte(Slice_u8 s, u8 byte) {
+  if (slice_u8_is_empty(s)) {
     return false;
   }
-  return true;
+
+  assert(s.data);
+
+  return NULL != memchr(s.data, byte, s.len);
 }
 
-__attribute__((warn_unused_result)) static bool is_power_of_two(usize value) {
-  return (value != 0) && ((value & (value - 1)) == 0);
-}
-
-// `multiple` must be a power of two, which every page size is.
-__attribute__((warn_unused_result)) static usize
-usize_round_up_multiple_of(usize n, usize multiple) {
-  assert(multiple != 0);
-  assert(is_power_of_two(multiple));
-
-  usize res = 0;
-  assert(!__builtin_add_overflow(n, multiple - 1, &res));
-  res &= ~(multiple - 1);
-
-  assert(0 == (res & (multiple - 1)));
-  assert(res >= n);
-  assert(res - n < multiple);
-  return res;
-}
-
-__attribute__((warn_unused_result)) static usize next_power_of_two(usize val) {
-  if (0 == val) {
-    return 1;
+__attribute__((warn_unused_result)) static bool
+slice_u8_eq_cstr(Slice_u8 s, const char *cstr) {
+  if (!cstr) {
+    return slice_u8_is_empty(s);
   }
 
-  val -= 1;
-  val |= val >> 1;
-  val |= val >> 2;
-  val |= val >> 4;
-  val |= val >> 8;
-  val |= val >> 16;
-  val |= val >> 32;
-  val += 1;
+  const usize cstr_len = strlen(cstr);
 
-  assert(0 != val);
-  assert(is_power_of_two(val));
-
-  return val;
-}
-
-__attribute__((warn_unused_result)) static usize ceil_usize(usize numerator,
-                                                            usize denominator) {
-  assert(denominator);
-
-  return numerator / denominator + (numerator % denominator != 0);
-}
-
-__attribute__((warn_unused_result)) static Arena
-arena_valloc(usize bytes_count) {
-  const usize page_size = unix_get_page_size();
-  assert(page_size > 0);
-
-  const usize usable_bytes = usize_round_up_multiple_of(bytes_count, page_size);
-  usize os_alloc_size = 0;
-  // Guard page.
-  assert(!__builtin_add_overflow(usable_bytes, page_size, &os_alloc_size));
-
-  u8 *const arena_memory = unix_virtual_mem_alloc(os_alloc_size);
-  const Arena res = {0};
-
-  if (arena_memory == NULL) {
-    return res;
+  if (cstr_len != s.len) {
+    return false;
   }
 
-  assert(unix_vprotect_none(arena_memory + usable_bytes, page_size));
+  assert(s.data);
+  assert(s.len > 0);
+  assert(cstr_len > 0);
+  assert(cstr_len == s.len);
 
-  // Right-align the arena against the guard page so that *any* write past
-  // `arena.end` faults immediately, then round the start down to the
-  // strictest alignment `arena_alloc` hands out. Rounding down can only make
-  // the arena slightly larger than requested, never smaller.
-  const usize max_align = 8;
-  usize start = (usize)arena_memory + usable_bytes - bytes_count;
-  start -= start % max_align;
-  assert(start >= (usize)arena_memory);
-  assert(0 == start % max_align);
-
-  return arena_from_mem((u8 *)start,
-                        (usize)arena_memory + usable_bytes - start);
+  return 0 == memcmp(s.data, cstr, s.len);
 }
 
 // Peek at the first byte of `slice`, leaving it in place.
@@ -343,6 +272,160 @@ slice_u8_consume(Slice_u8 *slice, u8 expected) {
   slice_u8_advance(slice, 1);
   return true;
 }
+// ---------- Unix ----------
+__attribute__((warn_unused_result)) static u8 *
+unix_virtual_mem_alloc(usize bytes_count) {
+  assert(bytes_count > 0);
+  void *alloc = mmap(NULL, bytes_count, PROT_READ | PROT_WRITE,
+                     MAP_ANON | MAP_PRIVATE, -1, 0);
+
+  if ((void *)-1 == alloc) {
+    return NULL;
+  }
+
+  return alloc;
+}
+
+__attribute__((warn_unused_result)) static usize unix_get_page_size(void) {
+  const i64 res = sysconf(_SC_PAGE_SIZE);
+  assert(-1 != res && "unreachable");
+
+  return (usize)res;
+}
+
+__attribute__((warn_unused_result)) static bool unix_vprotect_none(void *ptr,
+                                                                   usize size) {
+  if (-1 == mprotect(ptr, size, PROT_NONE)) {
+    return false;
+  }
+  return true;
+}
+
+// Matches https://pkg.go.dev/path/filepath#Base.
+//
+// The result may be "/", "." or "..": it is the last path element, not a
+// validated file name, so callers that need one must check it themselves.
+__attribute__((warn_unused_result)) static Slice_u8
+unix_path_last_component(Slice_u8 path) {
+  //  If the path is empty, Base returns ".".
+  if (slice_u8_is_empty(path)) {
+    return (Slice_u8){.data = (u8 *)".", .len = 1};
+  }
+
+  //  Trailing path separators are removed before extracting the last element.
+  while (!slice_u8_is_empty(path)) {
+    if ('/' == path.data[path.len - 1]) {
+      path.len -= 1;
+    } else {
+      break;
+    }
+  }
+
+  //  If the path consists entirely of separators, Base returns a single
+  //  separator.
+  if (slice_u8_is_empty(path)) {
+    return (Slice_u8){.data = (u8 *)"/", .len = 1};
+  }
+
+  // Counts down over one-past-the-byte so the whole walk stays in `usize`:
+  // `i` is the start of the component when `path.data[i - 1]` is the
+  // separator.
+  for (usize i = path.len; i > 0; i--) {
+    const u8 c = path.data[i - 1];
+    if ('/' == c) {
+      const Slice_u8 res = {.data = path.data + i, .len = path.len - i};
+      // The trailing separators are gone, so there is at least one byte left
+      // after the last one.
+      assert(!slice_u8_is_empty(res));
+      assert(!slice_u8_contains_byte(res, '/'));
+
+      return res;
+    }
+  }
+
+  assert(!slice_u8_contains_byte(path, '/'));
+  return path;
+}
+
+__attribute__((warn_unused_result)) static bool is_power_of_two(usize value) {
+  return (value != 0) && ((value & (value - 1)) == 0);
+}
+
+// `multiple` must be a power of two, which every page size is.
+__attribute__((warn_unused_result)) static usize
+usize_round_up_multiple_of(usize n, usize multiple) {
+  assert(multiple != 0);
+  assert(is_power_of_two(multiple));
+
+  usize res = 0;
+  assert(!__builtin_add_overflow(n, multiple - 1, &res));
+  res &= ~(multiple - 1);
+
+  assert(0 == (res & (multiple - 1)));
+  assert(res >= n);
+  assert(res - n < multiple);
+  return res;
+}
+
+__attribute__((warn_unused_result)) static usize next_power_of_two(usize val) {
+  if (0 == val) {
+    return 1;
+  }
+
+  val -= 1;
+  val |= val >> 1;
+  val |= val >> 2;
+  val |= val >> 4;
+  val |= val >> 8;
+  val |= val >> 16;
+  val |= val >> 32;
+  val += 1;
+
+  assert(0 != val);
+  assert(is_power_of_two(val));
+
+  return val;
+}
+
+__attribute__((warn_unused_result)) static usize ceil_usize(usize numerator,
+                                                            usize denominator) {
+  assert(denominator);
+
+  return numerator / denominator + (numerator % denominator != 0);
+}
+
+__attribute__((warn_unused_result)) static Arena
+arena_valloc(usize bytes_count) {
+  const usize page_size = unix_get_page_size();
+  assert(page_size > 0);
+
+  const usize usable_bytes = usize_round_up_multiple_of(bytes_count, page_size);
+  usize os_alloc_size = 0;
+  // Guard page.
+  assert(!__builtin_add_overflow(usable_bytes, page_size, &os_alloc_size));
+
+  u8 *const arena_memory = unix_virtual_mem_alloc(os_alloc_size);
+  const Arena res = {0};
+
+  if (arena_memory == NULL) {
+    return res;
+  }
+
+  assert(unix_vprotect_none(arena_memory + usable_bytes, page_size));
+
+  // Right-align the arena against the guard page so that *any* write past
+  // `arena.end` faults immediately, then round the start down to the
+  // strictest alignment `arena_alloc` hands out. Rounding down can only make
+  // the arena slightly larger than requested, never smaller.
+  const usize max_align = 8;
+  usize start = (usize)arena_memory + usable_bytes - bytes_count;
+  start -= start % max_align;
+  assert(start >= (usize)arena_memory);
+  assert(0 == start % max_align);
+
+  return arena_from_mem((u8 *)start,
+                        (usize)arena_memory + usable_bytes - start);
+}
 
 // Parse a run of ASCII digits from the front of `*data`, consuming them.
 //
@@ -408,86 +491,7 @@ __attribute__((warn_unused_result)) static bool ascii_num_parse(Slice_u8 *data,
   assert(0 && "unreachable");
 }
 
-__attribute__((warn_unused_result)) static bool slice_u8_is_empty(Slice_u8 s) {
-  return NULL == s.data || 0 == s.len;
-}
-
-__attribute__((warn_unused_result)) static bool
-slice_u8_contains_byte(Slice_u8 s, u8 byte) {
-  if (slice_u8_is_empty(s)) {
-    return false;
-  }
-
-  assert(s.data);
-
-  return NULL != memchr(s.data, byte, s.len);
-}
-
-__attribute__((warn_unused_result)) static bool
-slice_u8_eq_cstr(Slice_u8 s, const char *cstr) {
-  if (!cstr) {
-    return slice_u8_is_empty(s);
-  }
-
-  const usize cstr_len = strlen(cstr);
-
-  if (cstr_len != s.len) {
-    return false;
-  }
-
-  assert(s.data);
-  assert(s.len > 0);
-  assert(cstr_len > 0);
-  assert(cstr_len == s.len);
-
-  return 0 == memcmp(s.data, cstr, s.len);
-}
-
-// Matches https://pkg.go.dev/path/filepath#Base.
-//
-// The result may be "/", "." or "..": it is the last path element, not a
-// validated file name, so callers that need one must check it themselves.
-__attribute__((warn_unused_result)) static Slice_u8
-unix_path_last_component(Slice_u8 path) {
-  //  If the path is empty, Base returns ".".
-  if (slice_u8_is_empty(path)) {
-    return (Slice_u8){.data = (u8 *)".", .len = 1};
-  }
-
-  //  Trailing path separators are removed before extracting the last element.
-  while (!slice_u8_is_empty(path)) {
-    if ('/' == path.data[path.len - 1]) {
-      path.len -= 1;
-    } else {
-      break;
-    }
-  }
-
-  //  If the path consists entirely of separators, Base returns a single
-  //  separator.
-  if (slice_u8_is_empty(path)) {
-    return (Slice_u8){.data = (u8 *)"/", .len = 1};
-  }
-
-  // Counts down over one-past-the-byte so the whole walk stays in `usize`:
-  // `i` is the start of the component when `path.data[i - 1]` is the
-  // separator.
-  for (usize i = path.len; i > 0; i--) {
-    const u8 c = path.data[i - 1];
-    if ('/' == c) {
-      const Slice_u8 res = {.data = path.data + i, .len = path.len - i};
-      // The trailing separators are gone, so there is at least one byte left
-      // after the last one.
-      assert(!slice_u8_is_empty(res));
-      assert(!slice_u8_contains_byte(res, '/'));
-
-      return res;
-    }
-  }
-
-  assert(!slice_u8_contains_byte(path, '/'));
-  return path;
-}
+// ---------- Bencode ----------
 
 // `i123e`
 // `i-123e`
@@ -1243,6 +1247,8 @@ static void sha256_digest_pair(const u8 left[SHA256_DIGEST_LENGTH],
   sha256_update(&sha, right, SHA256_DIGEST_LENGTH);
   sha256_final(&sha, dst);
 }
+
+// ---------- Torrent ----------
 
 static const usize TORRENT_BLOCK_SIZE = 16 * KiB;
 
