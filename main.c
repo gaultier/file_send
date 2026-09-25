@@ -1076,6 +1076,11 @@ typedef struct {
   usize (*get_page_size)(void *ctx);
   Error (*valloc)(void *ctx, usize bytes_count, u8 **res);
   Error (*vprotect_none)(void *ctx, void *ptr, usize size);
+
+  // The implementation's own state, handed back to every slot above as their
+  // `ctx`. It is not the caller's: a callback's user data travels separately,
+  // because the two have different lifetimes and different owners.
+  void *ctx;
 } IO;
 
 __attribute__((warn_unused_result)) static IO io_unix_make(void) {
@@ -1096,14 +1101,18 @@ __attribute__((warn_unused_result)) static IO io_unix_make(void) {
       .get_page_size = unix_get_page_size,
       .valloc = unix_valloc,
       .vprotect_none = unix_vprotect_none,
+      // The Unix implementation is stateless; every slot ignores its `ctx`.
+      .ctx = NULL,
   };
 }
 
-typedef Error (*AcceptCallback)(const IO *io, void *ctx, Ipv4Addr accept_addr,
+typedef Error (*AcceptCallback)(const IO *io, void *cb_ctx,
+                                Ipv4Addr accept_addr,
                                 i32 accept_socket);
 
 __attribute__((warn_unused_result)) static Error
-io_listen_and_serve_tcp_ipv4(const IO *io, void *ctx, Ipv4Addr listen_addr,
+io_listen_and_serve_tcp_ipv4(const IO *io, void *cb_ctx,
+                             Ipv4Addr listen_addr,
                              AcceptCallback on_accept) {
   assert(io);
   assert(on_accept);
@@ -1111,14 +1120,14 @@ io_listen_and_serve_tcp_ipv4(const IO *io, void *ctx, Ipv4Addr listen_addr,
   i32 listen_socket = 0;
   {
     const Error err_socket =
-        io->socket(ctx, SocketDomainIpv4, SocketTypeTcp, &listen_socket);
+        io->socket(io->ctx, SocketDomainIpv4, SocketTypeTcp, &listen_socket);
     if (ErrKindNone != err_socket.kind) {
       return err_socket;
     }
     puts("opened socket");
   }
   {
-    const Error err_reuse = io->enable_socket_reuse(ctx, listen_socket);
+    const Error err_reuse = io->enable_socket_reuse(io->ctx, listen_socket);
 
     if (ErrKindNone != err_reuse.kind) {
       return err_reuse;
@@ -1128,18 +1137,18 @@ io_listen_and_serve_tcp_ipv4(const IO *io, void *ctx, Ipv4Addr listen_addr,
   {
     // A port left behind by a previous run is an ordinary answer, not a bug
     // in this process, so it travels back as an `Error`.
-    const Error err_bind = io->tcp_bind_ipv4(ctx, listen_socket, listen_addr);
+    const Error err_bind = io->tcp_bind_ipv4(io->ctx, listen_socket, listen_addr);
     if (ErrKindNone != err_bind.kind) {
-      (void)io->close(ctx, listen_socket);
+      (void)io->close(io->ctx, listen_socket);
       return err_bind;
     }
     puts("socket bound");
   }
 
   {
-    const Error err_listen = io->listen(ctx, listen_socket, 1024);
+    const Error err_listen = io->listen(io->ctx, listen_socket, 1024);
     if (ErrKindNone != err_listen.kind) {
-      (void)io->close(ctx, listen_socket);
+      (void)io->close(io->ctx, listen_socket);
       return err_listen;
     }
     puts("socket listening");
@@ -1150,7 +1159,7 @@ io_listen_and_serve_tcp_ipv4(const IO *io, void *ctx, Ipv4Addr listen_addr,
     Ipv4Addr accept_addr = {0};
 
     const Error err_accept =
-        io->accept(ctx, listen_socket, &accept_socket, &accept_addr);
+        io->accept(io->ctx, listen_socket, &accept_socket, &accept_addr);
 
     // The peer is allowed to vanish between the handshake and the `accept`.
     // That is one dead connection, not a dead server.
@@ -1161,13 +1170,13 @@ io_listen_and_serve_tcp_ipv4(const IO *io, void *ctx, Ipv4Addr listen_addr,
     if (ErrKindNone != err_accept.kind) {
       // TODO: `ErrTooManyFiles` is transient and deserves a backoff instead
       // of tearing the listener down, which needs a timer in `IO`.
-      (void)io->close(ctx, listen_socket);
+      (void)io->close(io->ctx, listen_socket);
       return err_accept;
     }
 
     // `accept_socket` belongs to the callback from here on, including
     // closing it when the callback itself fails.
-    const Error err_on_accept = on_accept(io, ctx, accept_addr, accept_socket);
+    const Error err_on_accept = on_accept(io, cb_ctx, accept_addr, accept_socket);
     if (ErrKindNone != err_on_accept.kind) {
       error_print("failed to handle connection", err_on_accept);
     }
@@ -1225,11 +1234,11 @@ __attribute__((warn_unused_result)) static usize ceil_usize(usize numerator,
 // On success `*res` is the arena; on failure it is left alone and the reason
 // `mmap` gave is passed through.
 __attribute__((warn_unused_result)) static Error
-arena_valloc(const IO *io, void *ctx, usize bytes_count, Arena *res) {
+arena_valloc(const IO *io, usize bytes_count, Arena *res) {
   assert(io);
   assert(res);
 
-  const usize page_size = io->get_page_size(ctx);
+  const usize page_size = io->get_page_size(io->ctx);
   assert(page_size > 0);
 
   const usize usable_bytes = usize_round_up_multiple_of(bytes_count, page_size);
@@ -1239,7 +1248,7 @@ arena_valloc(const IO *io, void *ctx, usize bytes_count, Arena *res) {
 
   u8 *arena_memory = NULL;
   {
-    const Error err = io->valloc(ctx, os_alloc_size, &arena_memory);
+    const Error err = io->valloc(io->ctx, os_alloc_size, &arena_memory);
     if (ErrKindNone != err.kind) {
       return err;
     }
@@ -1247,7 +1256,8 @@ arena_valloc(const IO *io, void *ctx, usize bytes_count, Arena *res) {
   assert(arena_memory);
 
   assert(ErrKindNone ==
-         io->vprotect_none(ctx, arena_memory + usable_bytes, page_size).kind);
+         io->vprotect_none(io->ctx, arena_memory + usable_bytes, page_size)
+             .kind);
 
   // Right-align the arena against the guard page so that *any* write past
   // `arena.end` faults immediately, then round the start down to the
@@ -2916,7 +2926,7 @@ torrent_gen_torrent_file_data(Slice_u8 file_path, Slice_u8 file_data,
 __attribute__((warn_unused_result)) static Arena test_arena(usize bytes_count) {
   const IO io = io_unix_make();
   Arena arena = {0};
-  assert(ErrKindNone == arena_valloc(&io, NULL, bytes_count, &arena).kind);
+  assert(ErrKindNone == arena_valloc(&io, bytes_count, &arena).kind);
   assert(arena.start);
   assert(arena.end);
   assert((usize)arena.end - (usize)arena.start >= bytes_count);
@@ -3220,7 +3230,7 @@ test_io_valloc(void *ctx, usize bytes_count, u8 **res) {
     return (Error){.kind = c->alloc_fails_with};
   }
 
-  return c->real.valloc(NULL, bytes_count, res);
+  return c->real.valloc(c->real.ctx, bytes_count, res);
 }
 
 __attribute__((warn_unused_result)) static Error
@@ -3232,16 +3242,19 @@ test_io_vprotect_none(void *ctx, void *ptr, usize size) {
   c->protect_ptr = ptr;
   c->protect_size = size;
 
-  return c->real.vprotect_none(NULL, ptr, size);
+  return c->real.vprotect_none(c->real.ctx, ptr, size);
 }
 
 // Only the slots `arena_valloc` reaches for; the rest stay null so that a
 // call to any of them crashes rather than silently doing something real.
-__attribute__((warn_unused_result)) static IO test_io_make(void) {
+__attribute__((warn_unused_result)) static IO test_io_make(TestIoCtx *ctx) {
+  assert(ctx);
+
   return (IO){
       .get_page_size = test_io_get_page_size,
       .valloc = test_io_valloc,
       .vprotect_none = test_io_vprotect_none,
+      .ctx = ctx,
   };
 }
 
@@ -3254,10 +3267,10 @@ static void test_arena_valloc_mocked(void) {
   // A single byte still costs a whole page, plus a whole page of guard.
   {
     TestIoCtx ctx = {.real = io_unix_make(), .page_size = page_size};
-    const IO io = test_io_make();
+    const IO io = test_io_make(&ctx);
     Arena arena = {0};
 
-    assert(ErrKindNone == arena_valloc(&io, &ctx, 1, &arena).kind);
+    assert(ErrKindNone == arena_valloc(&io, 1, &arena).kind);
 
     assert(1 == ctx.alloc_calls);
     assert(2 * page_size == ctx.alloc_bytes_count);
@@ -3276,10 +3289,10 @@ static void test_arena_valloc_mocked(void) {
   // One byte past a page rounds up to two, so three pages are mapped.
   {
     TestIoCtx ctx = {.real = io_unix_make(), .page_size = page_size};
-    const IO io = test_io_make();
+    const IO io = test_io_make(&ctx);
     Arena arena = {0};
 
-    assert(ErrKindNone == arena_valloc(&io, &ctx, page_size + 1, &arena).kind);
+    assert(ErrKindNone == arena_valloc(&io, page_size + 1, &arena).kind);
     assert(3 * page_size == ctx.alloc_bytes_count);
     assert((void *)arena.end == ctx.protect_ptr);
   }
@@ -3287,10 +3300,10 @@ static void test_arena_valloc_mocked(void) {
   // An exact multiple is not rounded up past itself.
   {
     TestIoCtx ctx = {.real = io_unix_make(), .page_size = page_size};
-    const IO io = test_io_make();
+    const IO io = test_io_make(&ctx);
     Arena arena = {0};
 
-    assert(ErrKindNone == arena_valloc(&io, &ctx, 2 * page_size, &arena).kind);
+    assert(ErrKindNone == arena_valloc(&io, 2 * page_size, &arena).kind);
     assert(3 * page_size == ctx.alloc_bytes_count);
   }
 
@@ -3300,10 +3313,10 @@ static void test_arena_valloc_mocked(void) {
     TestIoCtx ctx = {.real = io_unix_make(),
                      .page_size = page_size,
                      .alloc_fails_with = ErrKindOOM};
-    const IO io = test_io_make();
+    const IO io = test_io_make(&ctx);
     Arena arena = {.start = (u8 *)0xAA, .end = (u8 *)0xBB};
 
-    assert(ErrKindOOM == arena_valloc(&io, &ctx, 1, &arena).kind);
+    assert(ErrKindOOM == arena_valloc(&io, 1, &arena).kind);
     assert(1 == ctx.alloc_calls);
     assert(0 == ctx.protect_calls);
     assert((u8 *)0xAA == arena.start);
@@ -3317,10 +3330,10 @@ static void test_arena_valloc_mocked(void) {
     TestIoCtx ctx = {.real = io_unix_make(),
                      .page_size = page_size,
                      .alloc_fails_with = ErrOSKindPermission};
-    const IO io = test_io_make();
+    const IO io = test_io_make(&ctx);
     Arena arena = {0};
 
-    assert(ErrOSKindPermission == arena_valloc(&io, &ctx, 1, &arena).kind);
+    assert(ErrOSKindPermission == arena_valloc(&io, 1, &arena).kind);
     assert(NULL == arena.start);
   }
 }
@@ -3332,7 +3345,7 @@ static void test_arena_valloc(void) {
   // NULL, so this also pins down that conversion, and that the `ENOMEM` it
   // sets comes back as `ErrOOM` rather than a bare failure.
   Arena arena = {0};
-  assert(ErrKindOOM == arena_valloc(&io, NULL, (usize)1 << 62, &arena).kind);
+  assert(ErrKindOOM == arena_valloc(&io, (usize)1 << 62, &arena).kind);
 
   // A failed call leaves the caller's arena alone.
   assert(NULL == arena.start);
@@ -4630,7 +4643,7 @@ static void test_torrent_merkle_vectors(void) {
   Arena data_arena = {0};
   assert(
       ErrKindNone ==
-      arena_valloc(&io, NULL, TEST_MERKLE_MAX_LEN + 4 * KiB, &data_arena).kind);
+      arena_valloc(&io, TEST_MERKLE_MAX_LEN + 4 * KiB, &data_arena).kind);
   assert(data_arena.start);
   const Slice_u8 data = test_merkle_data(&data_arena);
 
@@ -4697,7 +4710,7 @@ static void test_torrent_merkle_piece_layer(void) {
   Arena data_arena = {0};
   assert(
       ErrKindNone ==
-      arena_valloc(&io, NULL, TEST_MERKLE_MAX_LEN + 4 * KiB, &data_arena).kind);
+      arena_valloc(&io, TEST_MERKLE_MAX_LEN + 4 * KiB, &data_arena).kind);
   assert(data_arena.start);
   const Slice_u8 data = test_merkle_data(&data_arena);
 
@@ -4790,7 +4803,7 @@ static void test_torrent_merkle_piece_layer(void) {
 static void test_torrent_merkle_padding(void) {
   const IO io = io_unix_make();
   Arena data_arena = {0};
-  assert(ErrKindNone == arena_valloc(&io, NULL, 64 * KiB, &data_arena).kind);
+  assert(ErrKindNone == arena_valloc(&io, 64 * KiB, &data_arena).kind);
   assert(data_arena.start);
 
   // Three blocks, so the tree pads to four leaves and the last leaf covers no
@@ -4891,7 +4904,7 @@ static void test_torrent_merkle_empty(void) {
 static void test_torrent_merkle_oom(void) {
   const IO io = io_unix_make();
   Arena data_arena = {0};
-  assert(ErrKindNone == arena_valloc(&io, NULL, 64 * KiB, &data_arena).kind);
+  assert(ErrKindNone == arena_valloc(&io, 64 * KiB, &data_arena).kind);
   assert(data_arena.start);
 
   // Two blocks, so at one block per piece the layer needs two hashes.
@@ -5821,9 +5834,9 @@ static void test_io_open_errors(void) {
   // An empty path is rejected before the syscall.
   assert(
       ErrKindInvalidData ==
-      io.open(NULL, slice_u8_make(NULL, 0), FileOpenOptionsReadOnly, &fd).kind);
+      io.open(io.ctx, slice_u8_make(NULL, 0), FileOpenOptionsReadOnly, &fd).kind);
   assert(ErrKindInvalidData ==
-         io.open(NULL, test_slice(""), FileOpenOptionsReadOnly, &fd).kind);
+         io.open(io.ctx, test_slice(""), FileOpenOptionsReadOnly, &fd).kind);
 
   // So is one too long for the fixed buffer, and the limit rides along in
   // `data` rather than an `errno` that was never set.
@@ -5832,7 +5845,7 @@ static void test_io_open_errors(void) {
     memset(long_path, 'a', sizeof(long_path) - 1);
     const Slice_u8 path = slice_u8_make((u8 *)long_path, sizeof(long_path) - 1);
 
-    const Error err = io.open(NULL, path, FileOpenOptionsReadOnly, &fd);
+    const Error err = io.open(io.ctx, path, FileOpenOptionsReadOnly, &fd);
     assert(ErrKindRange == err.kind);
     assert(4095 == err.data);
   }
@@ -5843,7 +5856,7 @@ static void test_io_open_errors(void) {
     const Slice_u8 path = test_tmp_path(buf, sizeof(buf), "does_not_exist");
     (void)unlink((const char *)path.data);
 
-    const Error err = io.open(NULL, path, FileOpenOptionsReadOnly, &fd);
+    const Error err = io.open(io.ctx, path, FileOpenOptionsReadOnly, &fd);
     // `ENOENT` has no kind of its own yet, so it lands in the catch-all;
     // `data` is what tells it apart.
     assert(ErrKindInvalidData == err.kind);
@@ -5865,12 +5878,12 @@ static void test_io_file_round_trip(void) {
   const u8 payload[] = {'d', '3', ':', 'a', 'b', 'c', 0x00, 'e'};
   const Slice_u8 data = slice_u8_make((u8 *)payload, sizeof(payload));
 
-  assert(ErrKindNone == io.write_all_to_file(NULL, path, data).kind);
+  assert(ErrKindNone == io.write_all_to_file(io.ctx, path, data).kind);
 
   {
     Slice_u8 got = {0};
     assert(ErrKindNone ==
-           io.map_file(NULL, path, FileOpenOptionsReadOnly, &got).kind);
+           io.map_file(io.ctx, path, FileOpenOptionsReadOnly, &got).kind);
     assert(data.len == got.len);
     assert(0 == memcmp(data.data, got.data, data.len));
   }
@@ -5880,11 +5893,11 @@ static void test_io_file_round_trip(void) {
   {
     const u8 shorter[] = {'i', '1', 'e'};
     const Slice_u8 data_shorter = slice_u8_make((u8 *)shorter, sizeof(shorter));
-    assert(ErrKindNone == io.write_all_to_file(NULL, path, data_shorter).kind);
+    assert(ErrKindNone == io.write_all_to_file(io.ctx, path, data_shorter).kind);
 
     Slice_u8 got = {0};
     assert(ErrKindNone ==
-           io.map_file(NULL, path, FileOpenOptionsReadOnly, &got).kind);
+           io.map_file(io.ctx, path, FileOpenOptionsReadOnly, &got).kind);
     assert(sizeof(shorter) == got.len);
     assert(0 == memcmp(shorter, got.data, sizeof(shorter)));
   }
@@ -5892,11 +5905,11 @@ static void test_io_file_round_trip(void) {
   // Writing nothing is a no-op, not a truncation: the file is left as it was.
   {
     assert(ErrKindNone ==
-           io.write_all_to_file(NULL, path, slice_u8_make(NULL, 0)).kind);
+           io.write_all_to_file(io.ctx, path, slice_u8_make(NULL, 0)).kind);
 
     Slice_u8 got = {0};
     assert(ErrKindNone ==
-           io.map_file(NULL, path, FileOpenOptionsReadOnly, &got).kind);
+           io.map_file(io.ctx, path, FileOpenOptionsReadOnly, &got).kind);
     assert(3 == got.len);
   }
 
@@ -5907,7 +5920,7 @@ static void test_io_file_round_trip(void) {
   {
     Slice_u8 got = {0};
     assert(ErrKindNone !=
-           io.map_file(NULL, path, FileOpenOptionsReadOnly, &got).kind);
+           io.map_file(io.ctx, path, FileOpenOptionsReadOnly, &got).kind);
   }
 
   // An empty file has nothing to map: `mmap` rejects a zero length, and that
@@ -5920,14 +5933,14 @@ static void test_io_file_round_trip(void) {
 
     i32 fd = -1;
     assert(ErrKindNone ==
-           io.open(NULL, empty_path,
+           io.open(io.ctx, empty_path,
                    FileOpenOptionsWriteOnly | FileOpenOptionsCreate, &fd)
                .kind);
-    assert(ErrKindNone == io.close(NULL, fd).kind);
+    assert(ErrKindNone == io.close(io.ctx, fd).kind);
 
     Slice_u8 got = {0};
     assert(ErrKindNone !=
-           io.map_file(NULL, empty_path, FileOpenOptionsReadOnly, &got).kind);
+           io.map_file(io.ctx, empty_path, FileOpenOptionsReadOnly, &got).kind);
     assert(slice_u8_is_empty(got));
 
     assert(0 == unlink((const char *)empty_path.data));
@@ -5938,7 +5951,7 @@ static void test_io_file_round_trip(void) {
   {
     Slice_u8 got = {0};
     assert(ErrKindNone !=
-           io.map_file(NULL, test_slice("/tmp"), FileOpenOptionsReadOnly, &got)
+           io.map_file(io.ctx, test_slice("/tmp"), FileOpenOptionsReadOnly, &got)
                .kind);
   }
 
@@ -5952,11 +5965,11 @@ static void test_io_file_round_trip(void) {
 
     Slice_u8 got = {0};
     assert(ErrKindRange ==
-           io.map_file(NULL, too_long, FileOpenOptionsReadOnly, &got).kind);
+           io.map_file(io.ctx, too_long, FileOpenOptionsReadOnly, &got).kind);
 
     const u8 byte = 'x';
     assert(ErrKindRange ==
-           io.write_all_to_file(NULL, too_long, slice_u8_make((u8 *)&byte, 1))
+           io.write_all_to_file(io.ctx, too_long, slice_u8_make((u8 *)&byte, 1))
                .kind);
   }
 }
@@ -6147,7 +6160,9 @@ static void test(const char *filter) {
 typedef struct TorrentNetworkCtx TorrentNetworkCtx;
 
 typedef struct {
-  void *ctx;
+  // The caller's, passed through `io_listen_and_serve_tcp_ipv4`. The vtable's
+  // own context lives in `io->ctx`.
+  void *cb_ctx;
   const IO *io;
   TorrentNetworkCtx *network_ctx;
   i32 socket;
@@ -6212,7 +6227,7 @@ torrent_client_ctx_pool_acquire(TorrentClientHandleCtxPool *pool) {
     assert(slot_idx < TORRENT_CLIENTS_MAX);
 
     TorrentClientHandleCtx *res = &pool->slots[slot_idx];
-    assert(0 == res->ctx);
+    assert(0 == res->cb_ctx);
     assert(0 == res->io);
     assert(0 == res->network_ctx);
     assert(0 == res->socket);
@@ -6263,7 +6278,7 @@ static void *torrent_client_handle(void *vctx) {
   u8 buf[4096] = {0};
   Slice_u8 slice_read = slice_u8_make(buf, sizeof(buf));
 
-  Error err = client_ctx->io->read(client_ctx->ctx, client_ctx->socket,
+  Error err = client_ctx->io->read(client_ctx->io->ctx, client_ctx->socket,
                                    slice_read, &read_count);
   if (ErrKindNone != err.kind) {
     goto end;
@@ -6273,7 +6288,7 @@ static void *torrent_client_handle(void *vctx) {
   printf("read: %.*s\n", (i32)slice_read_actual.len, slice_read_actual.data);
 
 end:
-  (void)client_ctx->io->close(client_ctx->ctx, client_ctx->socket);
+  (void)client_ctx->io->close(client_ctx->io->ctx, client_ctx->socket);
 
   puts("torrent_client_handle end");
 
@@ -6297,12 +6312,12 @@ torrent_client_on_accept(const IO *io, void *vctx, Ipv4Addr accept_addr,
       torrent_client_ctx_pool_acquire(&network_ctx->pool);
   if (!client_ctx) {
     fprintf(stderr, "backpressure: no available pool slot for client\n");
-    (void)io->close(vctx, accept_socket);
+    (void)io->close(io->ctx, accept_socket);
     return (Error){.kind = ErrKindOOM};
   }
 
   assert(client_ctx);
-  client_ctx->ctx = vctx;
+  client_ctx->cb_ctx = vctx;
   client_ctx->addr = accept_addr;
   client_ctx->socket = accept_socket;
   client_ctx->io = io;
@@ -6313,7 +6328,7 @@ torrent_client_on_accept(const IO *io, void *vctx, Ipv4Addr accept_addr,
     // The thread never started, so nothing else will free the context or hang
     // up on the peer.
     torrent_client_ctx_pool_release(&network_ctx->pool, client_ctx);
-    (void)io->close(vctx, accept_socket);
+    (void)io->close(io->ctx, accept_socket);
   }
 
   // Nothing to cleanup: the client handler finished successfully and is
@@ -6330,10 +6345,10 @@ int main(i32 argc, char *argv[]) {
   const char *const cmd = argc >= 2 ? argv[1] : "";
   const usize arena_cap = 32 * MiB;
   Arena arena = {0};
-  assert(ErrKindNone == arena_valloc(&io, NULL, arena_cap, &arena).kind);
+  assert(ErrKindNone == arena_valloc(&io, arena_cap, &arena).kind);
 
   Arena scratch = {0};
-  assert(ErrKindNone == arena_valloc(&io, NULL, 1 * MiB, &scratch).kind);
+  assert(ErrKindNone == arena_valloc(&io, 1 * MiB, &scratch).kind);
 
   if (0 == strcmp(cmd, "test")) {
     test(argc > 2 ? argv[2] : NULL);
@@ -6370,7 +6385,7 @@ int main(i32 argc, char *argv[]) {
     const Slice_u8 file_path = {.data = (u8 *)argv[2], .len = strlen(argv[2])};
     Slice_u8 input = {0};
 
-    Error err = io.map_file(NULL, file_path, FileOpenOptionsReadOnly, &input);
+    Error err = io.map_file(io.ctx, file_path, FileOpenOptionsReadOnly, &input);
     if (ErrKindNone != err.kind) {
       error_print("failed to open file", err);
       return 1;
@@ -6398,7 +6413,7 @@ int main(i32 argc, char *argv[]) {
       return 1;
     }
 
-    err = io.write_all_to_file(NULL, torrent_file_path, torrent_file_data);
+    err = io.write_all_to_file(io.ctx, torrent_file_path, torrent_file_data);
     if (ErrKindNone != err.kind) {
       error_print("failed to write torrent file", err);
       return 1;
@@ -6418,7 +6433,7 @@ int main(i32 argc, char *argv[]) {
 
     Slice_u8 input = {0};
 
-    Error err = io.map_file(NULL, file_path, FileOpenOptionsReadOnly, &input);
+    Error err = io.map_file(io.ctx, file_path, FileOpenOptionsReadOnly, &input);
     if (ErrKindNone != err.kind) {
       error_print("failed to open file", err);
       return 1;
