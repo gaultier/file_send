@@ -639,6 +639,7 @@ typedef enum {
   FileOpenOptionsReadOnly = 1,
   FileOpenOptionsWriteOnly = 2,
   FileOpenOptionsCreate = 4,
+  FileOpenOptionsTruncate = 8,
 } FileOpenOptions;
 
 __attribute__((warn_unused_result)) static Error
@@ -649,13 +650,21 @@ unix_open(void *ctx, Slice_u8 path, FileOpenOptions options, i32 *fd) {
 
   i32 unix_options = 0;
   if (FileOpenOptionsReadOnly & options) {
-    unix_options = O_RDONLY;
+    unix_options |= O_RDONLY;
   } else if (FileOpenOptionsWriteOnly & options) {
-    unix_options = O_WRONLY;
+    unix_options |= O_WRONLY;
   }
   if (FileOpenOptionsCreate & options) {
-    unix_options = O_CREAT;
+    unix_options |= O_CREAT;
   }
+  if (FileOpenOptionsTruncate & options) {
+    unix_options |= O_TRUNC;
+  }
+
+  // Only consulted when `O_CREAT` actually creates the file, and the process
+  // umask reduces it from there, so the usual outcome is `0644`. `0666` and
+  // not `0777`: nothing this opens is meant to be executable.
+  const mode_t unix_mode = 0666;
 
   // FILE_PATH_MAX
   char unix_path[4096] = {0};
@@ -666,14 +675,14 @@ unix_open(void *ctx, Slice_u8 path, FileOpenOptions options, i32 *fd) {
   }
 
   if (path.len > unix_path_max_len) {
-    return (Error){.kind = ErrKindRange, .data = sizeof(unix_path_max_len)};
+    return (Error){.kind = ErrKindRange, .data = unix_path_max_len};
   }
 
   memcpy(unix_path, path.data, path.len);
 
   i32 ret = 0;
   do {
-    ret = open(unix_path, unix_options);
+    ret = open(unix_path, unix_options, unix_mode);
   } while (-1 == ret && EINTR == errno);
 
   if (-1 == ret) {
@@ -800,14 +809,14 @@ unix_enable_socket_reuse(void *ctx, i32 fd) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_read(void *ctx, i32 fd, u8 *buf, usize len, usize *dst_read) {
+unix_read(void *ctx, i32 fd, Slice_u8 data, usize *dst_read) {
   (void)ctx;
 
   assert(dst_read);
 
   isize ret = 0;
   do {
-    ret = read(fd, buf, len);
+    ret = read(fd, data.data, data.len);
   } while (-1 == ret && EINTR == errno);
 
   if (-1 == ret) {
@@ -821,14 +830,14 @@ unix_read(void *ctx, i32 fd, u8 *buf, usize len, usize *dst_read) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_write(void *ctx, i32 fd, u8 *buf, usize len, usize *dst_written) {
+unix_write(void *ctx, i32 fd, Slice_u8 data, usize *dst_written) {
   (void)ctx;
 
   assert(dst_written);
 
   isize ret = 0;
   do {
-    ret = write(fd, buf, len);
+    ret = write(fd, data.data, data.len);
   } while (-1 == ret && EINTR == errno);
 
   if (-1 == ret) {
@@ -965,7 +974,9 @@ unix_write_all_to_file(void *ctx, Slice_u8 path, Slice_u8 data) {
   Error err = {0};
 
   i32 fd = 0;
-  err = unix_open(NULL, path, FileOpenOptionsReadOnly | FileOpenOptionsCreate,
+  err = unix_open(NULL, path,
+                  FileOpenOptionsWriteOnly | FileOpenOptionsCreate |
+                      FileOpenOptionsTruncate,
                   &fd);
   if (ErrKindNone != err.kind) {
     return unix_error_from_errno(errno);
@@ -1015,8 +1026,8 @@ typedef struct {
   Error (*thread_create)(void *ctx, ThreadCallback cb);
   Error (*close)(void *ctx, i32 fd);
   Error (*enable_socket_reuse)(void *ctx, i32 fd);
-  Error (*read)(void *ctx, i32 fd, u8 *buf, usize len, usize *dst_read);
-  Error (*write)(void *ctx, i32 fd, u8 *buf, usize len, usize *dst_written);
+  Error (*read)(void *ctx, i32 fd, Slice_u8 data, usize *dst_read);
+  Error (*write)(void *ctx, i32 fd, Slice_u8 data, usize *dst_written);
   Error (*file_size)(void *ctx, i32 fd, usize *dst_size);
   Error (*map_file)(void *ctx, Slice_u8 path, FileOpenOptions opts,
                     Slice_u8 *dst);
@@ -5619,11 +5630,10 @@ static void *torrent_client_handle(void *vctx) {
   printf("accepted: %u.%u.%u.%u:%hu\n", ip >> 24 & 0xff, ip >> 16 & 0xff,
          ip >> 8 & 0xff, ip >> 0 & 0xff, client_ctx->addr.port);
 
-  const char msg[] = "hello, world!";
   usize written = 0;
   const Error err_write =
-      client_ctx->io->write(client_ctx->ctx, client_ctx->socket, (u8 *)msg,
-                            sizeof(msg) - 1, &written);
+      client_ctx->io->write(client_ctx->ctx, client_ctx->socket,
+                            slice_u8_from_cstr((char *)"hello"), &written);
   if (ErrKindNone == err_write.kind) {
     goto end;
   }
