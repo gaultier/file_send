@@ -1204,7 +1204,7 @@ __attribute__((warn_unused_result)) static usize ceil_usize(usize numerator,
 // On success `*res` is the arena; on failure it is left alone and the reason
 // `mmap` gave is passed through.
 __attribute__((warn_unused_result)) static Error
-arena_valloc(IO *io, void *ctx, usize bytes_count, Arena *res) {
+arena_valloc(const IO *io, void *ctx, usize bytes_count, Arena *res) {
   assert(io);
   assert(res);
 
@@ -2838,8 +2838,9 @@ bencode_encode(BencodeValue b, Slice_u8 *dst, Arena *arena) {
 // struct. Poison it so such a read shows up as an obviously bogus value
 // instead.
 __attribute__((warn_unused_result)) static Arena test_arena(usize bytes_count) {
+  const IO io = io_unix_make();
   Arena arena = {0};
-  assert(ErrKindNone == arena_valloc(bytes_count, &arena).kind);
+  assert(ErrKindNone == arena_valloc(&io, NULL, bytes_count, &arena).kind);
   assert(arena.start);
   assert(arena.end);
   assert((usize)arena.end - (usize)arena.start >= bytes_count);
@@ -3102,11 +3103,14 @@ static void test_unix_error_from_errno(void) {
 }
 
 static void test_arena_valloc(void) {
+  const IO io = io_unix_make();
+
   // A request the kernel cannot satisfy. `mmap` reports `MAP_FAILED`, not
   // NULL, so this also pins down that conversion, and that the `ENOMEM` it
   // sets comes back as `ErrOOM` rather than a bare failure.
   Arena arena = {0};
-  assert(ErrKindOOM == arena_valloc((usize)1 << 62, &arena).kind);
+  assert(ErrKindOOM ==
+         arena_valloc(&io, NULL, (usize)1 << 62, &arena).kind);
 
   // A failed call leaves the caller's arena alone.
   assert(NULL == arena.start);
@@ -4393,9 +4397,11 @@ test_merkle_data(Arena *arena) {
 // power of two number of blocks, and block counts needing one or several
 // padding leaves.
 static void test_torrent_merkle_vectors(void) {
+  const IO io = io_unix_make();
   Arena data_arena = {0};
-  assert(ErrKindNone ==
-         arena_valloc(TEST_MERKLE_MAX_LEN + 4 * KiB, &data_arena).kind);
+  assert(ErrKindNone == arena_valloc(&io, NULL, TEST_MERKLE_MAX_LEN + 4 * KiB,
+                                     &data_arena)
+                            .kind);
   assert(data_arena.start);
   const Slice_u8 data = test_merkle_data(&data_arena);
 
@@ -4458,9 +4464,11 @@ static void test_torrent_merkle_vectors(void) {
 // info dictionary. Checked against an independently built tree rather than
 // against the implementation's own intermediate state.
 static void test_torrent_merkle_piece_layer(void) {
+  const IO io = io_unix_make();
   Arena data_arena = {0};
-  assert(ErrKindNone ==
-         arena_valloc(TEST_MERKLE_MAX_LEN + 4 * KiB, &data_arena).kind);
+  assert(ErrKindNone == arena_valloc(&io, NULL, TEST_MERKLE_MAX_LEN + 4 * KiB,
+                                     &data_arena)
+                            .kind);
   assert(data_arena.start);
   const Slice_u8 data = test_merkle_data(&data_arena);
 
@@ -4551,8 +4559,9 @@ static void test_torrent_merkle_piece_layer(void) {
 // is zeroed. Everything above it is hashed normally, so a node covering
 // nothing but padding is emphatically not zero.
 static void test_torrent_merkle_padding(void) {
+  const IO io = io_unix_make();
   Arena data_arena = {0};
-  assert(ErrKindNone == arena_valloc(64 * KiB, &data_arena).kind);
+  assert(ErrKindNone == arena_valloc(&io, NULL, 64 * KiB, &data_arena).kind);
   assert(data_arena.start);
 
   // Three blocks, so the tree pads to four leaves and the last leaf covers no
@@ -4651,8 +4660,9 @@ static void test_torrent_merkle_empty(void) {
 // The one failure path: an arena too small for the tree is reported, not
 // asserted, and leaves nothing half built behind.
 static void test_torrent_merkle_oom(void) {
+  const IO io = io_unix_make();
   Arena data_arena = {0};
-  assert(ErrKindNone == arena_valloc(64 * KiB, &data_arena).kind);
+  assert(ErrKindNone == arena_valloc(&io, NULL, 64 * KiB, &data_arena).kind);
   assert(data_arena.start);
 
   // Two blocks, so at one block per piece the layer needs two hashes.
@@ -5864,10 +5874,10 @@ int main(i32 argc, char *argv[]) {
   const char *const cmd = argc >= 2 ? argv[1] : "";
   const usize arena_cap = 32 * MiB;
   Arena arena = {0};
-  assert(ErrKindNone == arena_valloc(arena_cap, &arena).kind);
+  assert(ErrKindNone == arena_valloc(&io, NULL, arena_cap, &arena).kind);
 
   Arena scratch = {0};
-  assert(ErrKindNone == arena_valloc(1 * MiB, &scratch).kind);
+  assert(ErrKindNone == arena_valloc(&io, NULL, 1 * MiB, &scratch).kind);
 
   if (0 == strcmp(cmd, "test")) {
     test(argc > 2 ? argv[2] : NULL);
