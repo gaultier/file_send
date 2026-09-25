@@ -5038,6 +5038,7 @@ torrent_client_ctx_pool_release(TorrentClientHandleCtxPool *pool,
     }
 
     // Retry.
+    usleep(1);
   }
 
   return NULL;
