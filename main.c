@@ -147,9 +147,9 @@ int main(i32 argc, char *argv[]) {
     }
 
     Slice_u8 udp_msg = {0};
-    err = torrent_make_udp_broadcast_message(slice_u8_from_cstr("localhost"),
-                                             12345, info_hash_slice, &arena,
-                                             &udp_msg);
+    err = torrent_make_udp_broadcast_message(
+        slice_u8_from_cstr("(239.192.152.143"), 12345, info_hash_slice, &arena,
+        &udp_msg);
     if (ErrKindNone != err.kind) {
       error_print("failed to craft UDP multicast message", err);
       return 1;

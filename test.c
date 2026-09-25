@@ -2867,6 +2867,248 @@ static void test_encode_isize_base_10_round_trip(void) {
 }
 
 // ---------------------------------------------------------------------------
+// StringBuffer
+// ---------------------------------------------------------------------------
+
+// The bytes built so far. Every caller wants this and there is no accessor for
+// it, so the shape is spelled out once here instead of at each call site.
+__attribute__((warn_unused_result)) static Slice_u8 test_sb_built(StringBuffer sb) {
+  return slice_u8_take(sb.container, sb.len);
+}
+
+// A capacity of 0 is not tested: `sb_make` forwards it to `arena_alloc`, which
+// asserts `elem_count > 0`, so it aborts rather than failing.
+static void test_sb_make(void) {
+  // A fresh buffer owns its capacity and holds nothing.
+  {
+    Arena arena = test_arena(4 * KiB);
+    StringBuffer sb = {0};
+    assert(ErrKindNone == sb_make(16, &arena, &sb).kind);
+
+    assert(sb.container.data);
+    assert(16 == sb.container.len);
+    assert(0 == sb.len);
+    assert(16 == sb_space(sb));
+    assert(slice_u8_is_empty(test_sb_built(sb)));
+  }
+
+  // Out of arena: reported, and `*dst` is left exactly as the caller had it.
+  {
+    Arena arena = test_arena(8);
+    u8 poison[6] = {0};
+    StringBuffer sb = {.container = {.data = poison, .len = sizeof(poison)},
+                       .len = 3};
+    assert(ErrKindOOM == sb_make(4 * KiB, &arena, &sb).kind);
+
+    assert(poison == sb.container.data);
+    assert(sizeof(poison) == sb.container.len);
+    assert(3 == sb.len);
+  }
+
+  // Reusing a `StringBuffer` that already holds something: `sb_make` hands back
+  // a buffer that is empty, not one that looks part-filled.
+  {
+    Arena arena = test_arena(4 * KiB);
+    StringBuffer sb = {0};
+    assert(ErrKindNone == sb_make(8, &arena, &sb).kind);
+    assert(sb_extend_within_cap(&sb, test_slice("stale")));
+    assert(5 == sb.len);
+
+    assert(ErrKindNone == sb_make(8, &arena, &sb).kind);
+    assert(0 == sb.len);
+    assert(8 == sb_space(sb));
+    assert(slice_u8_is_empty(test_sb_built(sb)));
+  }
+
+  // Two buffers from one arena do not overlap.
+  {
+    Arena arena = test_arena(4 * KiB);
+    StringBuffer a = {0};
+    StringBuffer b = {0};
+    assert(ErrKindNone == sb_make(8, &arena, &a).kind);
+    assert(ErrKindNone == sb_make(8, &arena, &b).kind);
+
+    assert(a.container.data != b.container.data);
+    assert(a.container.data + 8 <= b.container.data ||
+           b.container.data + 8 <= a.container.data);
+  }
+}
+
+static void test_sb_extend_within_cap(void) {
+  // Appending in pieces is the same as appending the whole.
+  {
+    Arena arena = test_arena(4 * KiB);
+    StringBuffer sb = {0};
+    assert(ErrKindNone == sb_make(16, &arena, &sb).kind);
+
+    assert(sb_extend_within_cap(&sb, test_slice("ab")));
+    assert(2 == sb.len);
+    assert(14 == sb_space(sb));
+
+    assert(sb_extend_within_cap(&sb, test_slice("cde")));
+    assert(5 == sb.len);
+    assert(slice_u8_eq_cstr(test_sb_built(sb), "abcde"));
+  }
+
+  // Filling the capacity exactly is allowed; one byte more is not.
+  {
+    Arena arena = test_arena(4 * KiB);
+    StringBuffer sb = {0};
+    assert(ErrKindNone == sb_make(5, &arena, &sb).kind);
+
+    assert(sb_extend_within_cap(&sb, test_slice("abcde")));
+    assert(5 == sb.len);
+    assert(0 == sb_space(sb));
+
+    // Full: even one byte is refused, and nothing changes.
+    assert(!sb_extend_within_cap(&sb, test_slice("f")));
+    assert(5 == sb.len);
+    assert(slice_u8_eq_cstr(test_sb_built(sb), "abcde"));
+  }
+
+  // A refusal is all-or-nothing: no prefix of the input is written, and the
+  // bytes past `len` are left as they were.
+  {
+    Arena arena = test_arena(4 * KiB);
+    StringBuffer sb = {0};
+    assert(ErrKindNone == sb_make(8, &arena, &sb).kind);
+    memset(sb.container.data, '#', sb.container.len);
+
+    assert(sb_extend_within_cap(&sb, test_slice("abc")));
+    assert(!sb_extend_within_cap(&sb, test_slice("defghi")));
+
+    assert(3 == sb.len);
+    assert(slice_u8_eq_cstr(test_sb_built(sb), "abc"));
+    for (usize i = 3; i < sb.container.len; i++) {
+      assert('#' == sb.container.data[i]);
+    }
+  }
+
+  // Appending nothing always succeeds and moves nothing, on a full buffer too.
+  {
+    Arena arena = test_arena(4 * KiB);
+    StringBuffer sb = {0};
+    assert(ErrKindNone == sb_make(2, &arena, &sb).kind);
+
+    assert(sb_extend_within_cap(&sb, slice_u8_make(NULL, 0)));
+    assert(0 == sb.len);
+
+    assert(sb_extend_within_cap(&sb, test_slice("xy")));
+    assert(0 == sb_space(sb));
+    assert(sb_extend_within_cap(&sb, slice_u8_make(NULL, 0)));
+    assert(2 == sb.len);
+  }
+
+  // A body is bytes, not text: NUL and 0x80..0xff go through unchanged, and
+  // the NUL does not terminate anything.
+  {
+    Arena arena = test_arena(4 * KiB);
+    StringBuffer sb = {0};
+    assert(ErrKindNone == sb_make(8, &arena, &sb).kind);
+
+    const u8 raw[] = {'a', 0x00, 0x80, 0xff, 'b'};
+    assert(sb_extend_within_cap(&sb, slice_u8_make((u8 *)raw, sizeof(raw))));
+
+    assert(sizeof(raw) == sb.len);
+    assert(0 == memcmp(sb.container.data, raw, sizeof(raw)));
+  }
+}
+
+static void test_sb_append_usize_within_cap(void) {
+  // Width is the digit count, and the digits land where `len` points.
+  {
+    const struct {
+      usize n;
+      const char *expected;
+    } cases[] = {
+        {0, "0"},
+        {7, "7"},
+        {9, "9"},
+        {10, "10"},
+        {99, "99"},
+        {100, "100"},
+        {12345, "12345"},
+        {UINT64_MAX, "18446744073709551615"},
+    };
+
+    for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+      Arena arena = test_arena(4 * KiB);
+      StringBuffer sb = {0};
+      assert(ErrKindNone == sb_make(32, &arena, &sb).kind);
+
+      // A prefix first, so the digits are not written at offset 0.
+      assert(sb_extend_within_cap(&sb, test_slice("n=")));
+      assert(sb_append_usize_within_cap(&sb, cases[i].n));
+
+      assert(2 + strlen(cases[i].expected) == sb.len);
+      assert(0 == memcmp(sb.container.data + 2, cases[i].expected,
+                         strlen(cases[i].expected)));
+    }
+  }
+
+  // The digits fit exactly, and one digit short is refused whole.
+  {
+    Arena arena = test_arena(4 * KiB);
+    StringBuffer sb = {0};
+    assert(ErrKindNone == sb_make(3, &arena, &sb).kind);
+
+    assert(sb_append_usize_within_cap(&sb, 123));
+    assert(3 == sb.len);
+    assert(slice_u8_eq_cstr(test_sb_built(sb), "123"));
+  }
+  {
+    Arena arena = test_arena(4 * KiB);
+    StringBuffer sb = {0};
+    assert(ErrKindNone == sb_make(3, &arena, &sb).kind);
+    memset(sb.container.data, '#', sb.container.len);
+
+    // Four digits into three bytes: refused, and no digit is written.
+    assert(!sb_append_usize_within_cap(&sb, 1234));
+    assert(0 == sb.len);
+    for (usize i = 0; i < sb.container.len; i++) {
+      assert('#' == sb.container.data[i]);
+    }
+
+    // `0` is one digit wide, not zero, so it still needs room.
+    assert(sb_append_usize_within_cap(&sb, 0));
+    assert(1 == sb.len);
+  }
+
+  // A full buffer refuses even the narrowest number.
+  {
+    Arena arena = test_arena(4 * KiB);
+    StringBuffer sb = {0};
+    assert(ErrKindNone == sb_make(1, &arena, &sb).kind);
+
+    assert(sb_append_usize_within_cap(&sb, 5));
+    assert(0 == sb_space(sb));
+    assert(!sb_append_usize_within_cap(&sb, 0));
+    assert(1 == sb.len);
+    assert(slice_u8_eq_cstr(test_sb_built(sb), "5"));
+  }
+}
+
+// The two appends interleaved, against the exact bytes: this is the shape
+// `torrent_make_udp_broadcast_message` builds, at a capacity with room to
+// spare, so a refusal here would be a bug and not a bound.
+static void test_sb_build(void) {
+  Arena arena = test_arena(4 * KiB);
+  StringBuffer sb = {0};
+  assert(ErrKindNone == sb_make(64, &arena, &sb).kind);
+
+  assert(sb_extend_within_cap(&sb, test_slice("Host: ")));
+  assert(sb_extend_within_cap(&sb, test_slice("localhost")));
+  assert(sb_extend_within_cap(&sb, test_slice("\r\nPort: ")));
+  assert(sb_append_usize_within_cap(&sb, 12345));
+  assert(sb_extend_within_cap(&sb, test_slice("\r\n")));
+
+  const char *const expected = "Host: localhost\r\nPort: 12345\r\n";
+  assert(strlen(expected) == sb.len);
+  assert(slice_u8_eq_cstr(test_sb_built(sb), expected));
+  assert(64 - strlen(expected) == sb_space(sb));
+}
+
+// ---------------------------------------------------------------------------
 // bencode_encode
 // ---------------------------------------------------------------------------
 
@@ -4188,6 +4430,10 @@ static void test(const char *filter) {
       {"encode_isize_base_10", test_encode_isize_base_10},
       {"encode_isize_base_10_exact_fit", test_encode_isize_base_10_exact_fit},
       {"encode_isize_base_10_round_trip", test_encode_isize_base_10_round_trip},
+      {"sb_make", test_sb_make},
+      {"sb_extend_within_cap", test_sb_extend_within_cap},
+      {"sb_append_usize_within_cap", test_sb_append_usize_within_cap},
+      {"sb_build", test_sb_build},
       {"bencode_encode_leaves", test_bencode_encode_leaves},
       {"bencode_encode_binary_string", test_bencode_encode_binary_string},
       {"bencode_encode_containers", test_bencode_encode_containers},

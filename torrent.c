@@ -1326,7 +1326,7 @@ torrent_make_udp_broadcast_message(Slice_u8 url, u16 port, Slice_u8 info_hash,
   assert(dst);
 
   StringBuffer sb = {0};
-  Error err = sb_make(100, arena, &sb);
+  Error err = sb_make(100 + url.len, arena, &sb);
   if (ErrKindNone != err.kind) {
     return err;
   }
@@ -1344,7 +1344,7 @@ torrent_make_udp_broadcast_message(Slice_u8 url, u16 port, Slice_u8 info_hash,
   assert(sb_extend_within_cap(&sb, info_hash));
 
   assert(sb_extend_within_cap(&sb, slice_u8_from_cstr("\r\n"
-                                                      "\r\n"
+                                                      "cookie: fixme\r\n"
                                                       "\r\n")));
 
   *dst = slice_u8_take(sb.container, sb.len);
