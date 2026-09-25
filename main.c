@@ -59,6 +59,9 @@ typedef enum {
   ErrKindConnReset,
   // The process or the system is out of file descriptors.
   ErrKindTooManyFiles,
+  // No route to the destination. On macOS this is also how a denied Local
+  // Network privacy grant surfaces, so it is not always a routing problem.
+  ErrKindHostUnreachable,
 } ErrorKind;
 
 typedef struct {
@@ -93,6 +96,8 @@ error_kind_to_cstr(ErrorKind kind) {
     return "connection reset";
   case ErrKindTooManyFiles:
     return "too many open files";
+  case ErrKindHostUnreachable:
+    return "host unreachable";
   }
 
   assert(0 && "unreachable");
@@ -387,6 +392,10 @@ unix_error_from_errno(i32 e) {
   case EMFILE: // Per process limit.
   case ENFILE: // System wide limit.
     kind = ErrKindTooManyFiles;
+    break;
+
+  case EHOSTUNREACH:
+    kind = ErrKindHostUnreachable;
     break;
 
   default:
@@ -2787,6 +2796,10 @@ static void test_unix_error_from_errno(void) {
       // Descriptor exhaustion, per process and system wide.
       {EMFILE, ErrKindTooManyFiles},
       {ENFILE, ErrKindTooManyFiles},
+
+      // Unreachable is its own answer: the call was well formed, the
+      // destination just could not be reached.
+      {EHOSTUNREACH, ErrKindHostUnreachable},
 
       // Calling the kernel wrong, from every syscall in use: bad descriptor,
       // not a socket, wrong family or protocol, unsupported operation,
