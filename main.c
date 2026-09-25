@@ -5734,15 +5734,18 @@ static void *torrent_client_handle(void *vctx) {
   printf("accepted: %u.%u.%u.%u:%hu\n", ip >> 24 & 0xff, ip >> 16 & 0xff,
          ip >> 8 & 0xff, ip >> 0 & 0xff, client_ctx->addr.port);
 
-  usize written = 0;
-  const Error err_write =
-      client_ctx->io->write(client_ctx->ctx, client_ctx->socket,
-                            slice_u8_from_cstr((char *)"hello"), &written);
-  if (ErrKindNone == err_write.kind) {
+  usize read_count = 0;
+  u8 buf[4096] = {0};
+  Slice_u8 slice_read = slice_u8_make(buf, sizeof(buf));
+
+  Error err = client_ctx->io->read(client_ctx->ctx, client_ctx->socket,
+                                   slice_read, &read_count);
+  if (ErrKindNone != err.kind) {
     goto end;
   }
 
-  // Some more logic here...
+  const Slice_u8 slice_read_actual = slice_u8_take(slice_read, read_count);
+  printf("read: %.*s\n", (i32)slice_read_actual.len, slice_read_actual.data);
 
 end:
   (void)client_ctx->io->close(client_ctx->ctx, client_ctx->socket);
