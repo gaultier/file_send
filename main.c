@@ -108,6 +108,14 @@ error_kind_to_cstr(ErrorKind kind) {
   assert(0 && "unreachable");
 }
 
+// Writes the operating system's own description of `os_error` into `dst`, and
+// answers whether there was one to write. Declared here and defined by the
+// platform file, which the unity build reaches only much further down: what it
+// takes to render a system error is per system, but wanting to render one is
+// not.
+__attribute__((warn_unused_result)) static bool
+platform_error_describe(u64 os_error, char *dst, usize dst_len);
+
 // Renders `err` to stderr, appending the operating system's own description
 // when the error carries an `errno`.
 static void error_print(const char *context, Error err) {
@@ -118,14 +126,11 @@ static void error_print(const char *context, Error err) {
     return;
   }
 
-  // `strerror_r` and not `strerror`: a thread is spawned per client, and
-  // `strerror` hands back a buffer shared by the whole process.
   char os_msg[256] = {0};
-  const i32 ret = strerror_r((i32)err.data, os_msg, sizeof(os_msg));
 
-  if (0 != ret) {
-    // The description did not fit or the number is not a known `errno`; the
-    // number itself is still worth printing.
+  if (!platform_error_describe(err.data, os_msg, sizeof(os_msg))) {
+    // The description did not fit or the number is not one the system knows;
+    // the number itself is still worth printing.
     fprintf(stderr, "%s: %s (errno %" PRIu64 ")\n", context,
             error_kind_to_cstr(err.kind), err.data);
     return;
@@ -535,6 +540,9 @@ struct IO {
   Error (*thread_create)(const IO *io, ThreadCallback cb, void *data);
   Error (*close)(const IO *io, i32 fd);
   Error (*enable_socket_reuse)(const IO *io, i32 fd);
+  Error (*udp_multicast_open_ipv4)(const IO *io, u32 ipv4, i32 *dst_fd);
+  Error (*udp_send_to_ipv4)(const IO *io, i32 fd, Ipv4Addr addr, const u8 *buf,
+                            usize len, usize *dst_sent);
   Error (*read)(const IO *io, i32 fd, Slice_u8 data, usize *dst_read);
   Error (*write)(const IO *io, i32 fd, Slice_u8 data, usize *dst_written);
   Error (*file_size)(const IO *io, i32 fd, usize *dst_size);
@@ -563,6 +571,14 @@ struct IO {
 };
 
 #include "unix.c"
+#include "win32.c"
+
+// Exactly one of the files above supplies `io_platform_make`; each one guards
+// itself on the system it is for. Catching it here beats the pile of implicit
+// declarations a missing implementation would otherwise produce.
+#if !defined(PLATFORM_UNIX) && !defined(PLATFORM_WIN32)
+#error "no IO implementation for this platform"
+#endif
 
 typedef Error (*AcceptCallback)(const IO *io, void *cb_ctx,
                                 Ipv4Addr accept_addr, i32 accept_socket);
@@ -2572,7 +2588,7 @@ int main(i32 argc, char *argv[]) {
   } else if (0 == strcmp(cmd, "broadcast")) {
     i32 udp_socket = 0;
     {
-      Error err_udp = unix_udp_multicast_open_ipv4(NULL, 0, &udp_socket);
+      Error err_udp = io.udp_multicast_open_ipv4(&io, 0, &udp_socket);
       if (ErrKindNone != err_udp.kind) {
         error_print("failed to open UDP multicast socket", err_udp);
         return 1;
@@ -2586,8 +2602,8 @@ int main(i32 argc, char *argv[]) {
           .port = 6771,
       };
 
-      Error err_sendto = unix_udp_send_to_ipv4(NULL, udp_socket, lsd_addr, msg,
-                                               sizeof(msg), &sent);
+      Error err_sendto = io.udp_send_to_ipv4(&io, udp_socket, lsd_addr, msg,
+                                             sizeof(msg), &sent);
       if (ErrKindNone != err_sendto.kind) {
         error_print("failed to send UDP multicast message", err_sendto);
         return 1;

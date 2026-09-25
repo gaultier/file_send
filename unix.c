@@ -10,6 +10,7 @@
 // has to be named on its own; `defined()` and not a bare macro because
 // `-Wundef` is an error.
 #if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
+#define PLATFORM_UNIX 1
 
 // Inside the guard, so a system that is not this one never sees them. The
 // feature-test macros that decide what these expose are set on the command
@@ -22,6 +23,18 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+// `strerror_r` and not `strerror`: a thread is spawned per client, and
+// `strerror` hands back a buffer shared by the whole process. This is the XSI
+// spelling, the one `_POSIX_C_SOURCE` selects, which answers with 0 or an
+// error number rather than with a `char *`.
+__attribute__((warn_unused_result)) static bool
+platform_error_describe(u64 os_error, char *dst, usize dst_len) {
+  assert(dst);
+  assert(dst_len > 0);
+
+  return 0 == strerror_r((i32)os_error, dst, dst_len);
+}
 
 // Map an `errno` onto our own errors. Shared by every syscall wrapper: an
 // `errno` means the same thing whichever call produced it, so the mapping
@@ -669,6 +682,8 @@ __attribute__((warn_unused_result)) static IO io_platform_make(void) {
       .thread_create = unix_thread_create,
       .close = unix_close,
       .enable_socket_reuse = unix_enable_socket_reuse,
+      .udp_multicast_open_ipv4 = unix_udp_multicast_open_ipv4,
+      .udp_send_to_ipv4 = unix_udp_send_to_ipv4,
       .read = unix_read,
       .write = unix_write,
       .file_size = unix_file_size,

@@ -202,10 +202,15 @@ static void test_arena_alloc(void) {
   }
 }
 
+#if defined(PLATFORM_UNIX)
 // Every `errno` the syscalls this program makes are documented to set, and
 // what each one is supposed to come back as. A value landing in the
 // `ErrInvalidData` default by accident rather than on purpose is exactly the
 // kind of thing that goes unnoticed, so list them explicitly.
+//
+// Unlike every other test here this one names a platform function rather than
+// a vtable slot, because the mapping is what it is checking, so it exists only
+// on the platform that has one.
 static void test_unix_error_from_errno(void) {
   const struct {
     i32 errno_value;
@@ -272,6 +277,7 @@ static void test_unix_error_from_errno(void) {
   assert(ErrKindAgain == unix_error_from_errno(EAGAIN).kind);
   assert(ErrKindAgain == unix_error_from_errno(EWOULDBLOCK).kind);
 }
+#endif // PLATFORM_UNIX
 
 // A fake `IO` for the arena. It records what `arena_valloc` asked the OS for,
 // answers with a page size the host does not have, and can make the mapping
@@ -3811,9 +3817,10 @@ test_io_file_make(TestFileCtx *ctx) {
   assert(ctx);
 
   return (IO){
-      // The operations under test, real.
-      .map_file = unix_map_file,
-      .write_all_to_file = unix_write_all_to_file,
+      // The operations under test, real: the platform's own, so this checks
+      // whichever composites the build actually has.
+      .map_file = ctx->real.map_file,
+      .write_all_to_file = ctx->real.write_all_to_file,
       // The primitives beneath them, faked.
       .open = test_file_open,
       .close = test_file_close,
@@ -3953,7 +3960,9 @@ static void test(const char *filter) {
       {"usize_round_up_multiple_of", test_usize_round_up_multiple_of},
       {"next_power_of_two", test_next_power_of_two},
       {"arena_alloc", test_arena_alloc},
+#if defined(PLATFORM_UNIX)
       {"unix_error_from_errno", test_unix_error_from_errno},
+#endif
       {"arena_valloc", test_arena_valloc},
       {"arena_valloc_mocked", test_arena_valloc_mocked},
       {"io_listen_and_serve_setup_failures",
