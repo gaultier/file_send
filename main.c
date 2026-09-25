@@ -1444,8 +1444,8 @@ static void bencode_print_indent(usize indent) {
 // the value starts on begins at, which is what the children and the closing
 // bracket are aligned against. Nothing is written after the value either: a
 // trailing newline is the caller's to add.
-__attribute__(maybe_unused))
-static void bencode_print(BencodeValue v, usize indent) {
+__attribute__((unused)) static void bencode_print(BencodeValue v,
+                                                  usize indent) {
   switch (v.kind) {
   case BencodeKindInteger:
     printf("%zd", v.v.num);
@@ -5378,7 +5378,7 @@ int main(i32 argc, char *argv[]) {
 
   const IO io = io_unix_make();
 
-  const char *const cmd = 2 == argc ? argv[1] : "";
+  const char *const cmd = argc >= 2 ? argv[1] : "";
   const usize arena_cap = 32 * MiB;
   Arena arena = {0};
   assert(ErrKindNone == arena_valloc(arena_cap, &arena).kind);
