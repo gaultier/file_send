@@ -8,6 +8,7 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+
 #include <windows.h>
 
 // The CRT's own `errno` table, not `GetLastError`: what an `Error` carries is
@@ -26,5 +27,3 @@ __attribute__((warn_unused_result)) static IO io_platform_make(void) {
       0 // TODO
   };
 }
-
-#endif // Win32
