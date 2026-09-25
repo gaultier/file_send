@@ -10,10 +10,10 @@ LLVM_PROFILE_FILE="$OUT/cov-%p.profraw" "$OUT/cov" test >/dev/null 2>&1
 LLVM_PROFILE_FILE="$OUT/cov-%p.profraw" "$OUT/cov" test slice_u8 >/dev/null 2>&1
 xcrun llvm-profdata merge -sparse "$OUT"/cov-*.profraw -o "$OUT/cov.profdata"
 
-xcrun llvm-cov report "$OUT/cov" -instr-profile="$OUT/cov.profdata" main.c
+xcrun llvm-cov report "$OUT/cov" -instr-profile="$OUT/cov.profdata" main.c unix.c test.c
 
 # Uncovered lines, if any.
 echo
 echo "Uncovered lines:"
-xcrun llvm-cov show "$OUT/cov" -instr-profile="$OUT/cov.profdata" main.c \
+xcrun llvm-cov show "$OUT/cov" -instr-profile="$OUT/cov.profdata" main.c unix.c test.c \
   | awk '{ if (match($0, /^ *[0-9]+\| *0\|/)) print }' | sed 's/|.*0|/|/'
