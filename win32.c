@@ -1,4 +1,5 @@
 #pragma once
+#include "lib.c"
 
 // The Windows implementation of the `IO` vtable. Included by `main.c` next to
 // `unix.c`; whichever one matches the system supplies `io_platform_make` and

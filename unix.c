@@ -1,5 +1,7 @@
 #pragma once
 
+#include "lib.c"
+
 // The Unix implementation of the `IO` vtable, plus the `errno` mapping every
 // wrapper here shares. Included by `main.c` after `struct IO` is complete, so
 // the composites below can reach the other slots through `io`.
