@@ -4981,12 +4981,21 @@ torrent_client_ctx_pool_acquire(TorrentClientHandleCtxPool *pool) {
     const PoolSlotGroup slot_group =
         __atomic_load_n(&pool->occupied[i], __ATOMIC_RELAXED);
 
-    const u64 slot_full = ~0ULL;
+    const i32 first_unset_bit = __builtin_ffsll((i64)~slot_group);
 
     // Slot full, keep scanning to find a free slot?
-    if (slot_full == slot_group) {
+    if (0 == first_unset_bit) {
       continue;
     }
+
+    const u32 bit = (u32)(first_unset_bit - 1);
+    const u64 mask = 1ULL << bit;
+    const u64 prev =
+        __atomic_fetch_or(&pool->occupied[i], mask, __ATOMIC_ACQUIRE);
+
+    const usize slot_idx = i * sizeof(PoolSlotGroup) + bit;
+    assert(slot_idx < TORRENT_CLIENTS_MAX);
+    return &pool->slots[slot_idx];
   }
 
   return NULL;
