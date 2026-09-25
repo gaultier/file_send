@@ -143,6 +143,7 @@ int main(i32 argc, char *argv[]) {
     }
     fwrite(info_hash_hex_trunc_slice.data, 1, info_hash_hex_trunc_slice.len,
            stdout);
+    puts("");
 
     i32 udp_socket = 0;
     {
