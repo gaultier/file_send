@@ -6680,6 +6680,133 @@ static void test_error_kind_to_cstr(void) {
   }
 }
 
+// The one-line failure paths of the syscall wrappers. No mock: a descriptor
+// that was never open is a cheaper way to make the OS say no than faking it,
+// and it exercises the real `errno` mapping rather than a fake's idea of it.
+static void test_io_syscall_failures(void) {
+  const IO io = io_unix_make();
+
+  // `fstat` on a descriptor that was never open.
+  {
+    usize size = 0xAA;
+    const Error err = io.file_size(io.ctx, -1, &size);
+    assert(ErrKindNone != err.kind);
+    assert(EBADF == (i32)err.data);
+    // Nothing is written when there is nothing to report.
+    assert(0xAA == size);
+  }
+
+  // `close` of the same.
+  {
+    const Error err = io.close(io.ctx, -1);
+    assert(ErrKindNone != err.kind);
+    assert(EBADF == (i32)err.data);
+  }
+
+  // `mprotect` wants a page aligned address, so an odd one is rejected
+  // without having to find an unmapped page first.
+  {
+    const Error err = io.vprotect_none(io.ctx, (void *)1, 4096);
+    assert(ErrKindNone != err.kind);
+  }
+
+  // An empty slice contains nothing, without reading through a null pointer.
+  assert(!slice_u8_contains_byte(slice_u8_make(NULL, 0), 'x'));
+
+  // Mapping for writing takes the other protection branch. The file is still
+  // opened read only and the mapping is private, so the bytes on disk are
+  // safe either way.
+  {
+    char buf[256] = {0};
+    const Slice_u8 path = test_tmp_path(buf, sizeof(buf), "map_write");
+    const u8 payload[] = {'a', 'b', 'c'};
+
+    assert(ErrKindNone ==
+           io.write_all_to_file(io.ctx, path,
+                                slice_u8_make((u8 *)payload, sizeof(payload)))
+               .kind);
+
+    Slice_u8 got = {0};
+    assert(ErrKindNone ==
+           io.map_file(io.ctx, path, FileOpenOptionsWriteOnly, &got).kind);
+    assert(sizeof(payload) == got.len);
+
+    assert(0 == unlink((const char *)path.data));
+  }
+}
+
+// The allocation failures inside the two dictionary builders. Sweeping the
+// arena a few bytes at a time walks each early return in turn; which size
+// trips which is not the point, only that every one reports instead of
+// aborting or half building something.
+static void test_torrent_make_dicts_oom(void) {
+  const Slice_u8 name = test_slice("payload.bin");
+  const Slice_u8 announce = test_slice("http://localhost:12345");
+
+  Arena data_arena = test_arena(2 * MiB);
+  // More than one 256 KiB piece, so there is a piece layer to allocate and
+  // not just a root: the layer is the largest allocation of the two.
+  const usize data_len = 1 * MiB;
+  u8 *const bytes = arena_alloc(&data_arena, 1, sizeof(u8), data_len);
+  assert(bytes);
+  for (usize i = 0; i < data_len; i++) {
+    bytes[i] = (u8)(i * 31);
+  }
+  const Slice_u8 file_data = slice_u8_make(bytes, data_len);
+
+  // One run with room to spare, to build what the metainfo builder needs.
+  Arena big = test_arena(1 * MiB);
+  BencodeValue info_dict = {0};
+  Slice_u8 pieces_root = {0};
+  PieceHash *piece_hashes = NULL;
+  usize piece_hashes_count = 0;
+  assert(ErrKindNone == torrent_make_info_dict_v2(
+                            name, TORRENT_BLOCK_SIZE * 16, file_data, name,
+                            &info_dict, &pieces_root, &piece_hashes,
+                            &piece_hashes_count, &big)
+                            .kind);
+  assert(piece_hashes_count > 1);
+
+  usize info_ooms = 0;
+  for (usize cap = 64; cap < 6 * KiB; cap += 64) {
+    Arena arena = test_arena(cap);
+    BencodeValue dict = {0};
+    Slice_u8 root = {0};
+    PieceHash *hashes = NULL;
+    usize hashes_count = 0;
+
+    const Error err =
+        torrent_make_info_dict_v2(name, TORRENT_BLOCK_SIZE * 16, file_data,
+                                  name, &dict, &root, &hashes, &hashes_count,
+                                  &arena);
+    if (ErrKindNone != err.kind) {
+      assert(ErrKindOOM == err.kind);
+      info_ooms += 1;
+    }
+  }
+  assert(info_ooms > 0);
+
+  usize metainfo_ooms = 0;
+  usize metainfo_oks = 0;
+  for (usize cap = 64; cap < 6 * KiB; cap += 64) {
+    Arena arena = test_arena(cap);
+    BencodeValue metainfo = {0};
+
+    const Error err = torrent_make_metainfo_dict_v2(
+        pieces_root, announce, info_dict.v.list, piece_hashes,
+        piece_hashes_count, &metainfo, &arena);
+    if (ErrKindNone != err.kind) {
+      assert(ErrKindOOM == err.kind);
+      metainfo_ooms += 1;
+    } else {
+      metainfo_oks += 1;
+    }
+  }
+  // Both sides of the boundary, so the sweep is known to have crossed it.
+  assert(metainfo_ooms > 0);
+  assert(metainfo_oks > 0);
+}
+
 static void test(const char *filter) {
   const struct {
     const char *name;
@@ -6698,6 +6825,8 @@ static void test(const char *filter) {
       {"io_listen_and_serve_accept", test_io_listen_and_serve_accept},
       {"torrent_client_pool_exhaustion",
        test_torrent_client_pool_exhaustion},
+      {"io_syscall_failures", test_io_syscall_failures},
+      {"torrent_make_dicts_oom", test_torrent_make_dicts_oom},
       {"error_kind_to_cstr", test_error_kind_to_cstr},
       {"io_open_errors", test_io_open_errors},
       {"io_file_round_trip", test_io_file_round_trip},
