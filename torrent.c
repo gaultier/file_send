@@ -201,7 +201,12 @@ bencode_validate_dict(BencodeList list) {
 // parse leaves the caller with neither consumed input nor consumed memory.
 //
 // `scratch` is taken by value and is not consumed by the call.
-__attribute__((warn_unused_result)) static Error
+//
+// Nothing calls this yet, which is why it is marked unused: `share` maps the
+// `.torrent` it is handed and then ignores the bytes, so the one caller this is
+// waiting for does not exist. It is kept, and tested, because that is the gap
+// to close and not a reason to throw the parser away.
+__attribute__((unused, warn_unused_result)) static Error
 bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
   assert(input);
   assert(arena);

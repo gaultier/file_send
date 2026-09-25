@@ -883,33 +883,6 @@ static void test_slice_u8(void) {
     assert(ErrKindNone == slice_u8_first(slice, &first).kind);
     assert(sizeof(data) == slice.len);
   }
-  // slice_u8_skip.
-  {
-    Slice_u8 empty = slice_u8_make(NULL, 0);
-    assert(ErrKindNone != slice_u8_skip(&empty, 1).kind);
-
-    Slice_u8 slice = slice_u8_make(data, sizeof(data));
-
-    // Past the end: refused, and the slice is unchanged.
-    assert(ErrKindNone != slice_u8_skip(&slice, sizeof(data) + 1).kind);
-    assert(sizeof(data) == slice.len);
-    assert(data == slice.data);
-
-    assert(ErrKindNone == slice_u8_skip(&slice, 0).kind);
-    assert(sizeof(data) == slice.len);
-
-    assert(ErrKindNone == slice_u8_skip(&slice, 2).kind);
-    assert(1 == slice.len);
-
-    u8 first = 0;
-    assert(ErrKindNone == slice_u8_first(slice, &first).kind);
-    assert('c' == first);
-
-    // Skipping exactly to the end is legal.
-    assert(ErrKindNone == slice_u8_skip(&slice, 1).kind);
-    assert(0 == slice.len);
-    assert(ErrKindNone != slice_u8_first(slice, &first).kind);
-  }
   // slice_u8_take.
   {
     const Slice_u8 slice = slice_u8_make(data, sizeof(data));
@@ -1710,6 +1683,198 @@ static void test_bencode_parse(void) {
     assert(arena_start == arena.start);
     assert(strlen(input) == data.len);
     assert(BencodeKindString == value.kind);
+  }
+}
+
+// `bencode_parse` again, for the three things the table above cannot express.
+//
+// Its corpus is built with `test_slice`, which measures with `strlen`, so every
+// case in it is NUL-free seven-bit ASCII. Bencode strings are arbitrary bytes,
+// and it is precisely the bytes `strlen` and a signed `char` cannot carry that
+// break a parser.
+static void test_bencode_parse_binary(void) {
+  // A string body is arbitrary bytes, NUL and 0x80..0xff included, and it
+  // borrows from the input rather than being copied or terminated.
+  {
+    Arena arena = test_arena(4 * KiB);
+    Arena scratch = test_arena(4 * KiB);
+
+    // `l` `5:` <a NUL b 0x80 0xff> `e`
+    const u8 input[] = {'l', '5', ':', 'a', 0x00, 'b', 0x80, 0xff, 'e'};
+    Slice_u8 data = slice_u8_make((u8 *)input, sizeof(input));
+
+    BencodeValue value = {0};
+    assert(ErrKindNone == bencode_parse(&data, &arena, scratch, &value).kind);
+    assert(0 == data.len);
+    assert(BencodeKindList == value.kind);
+    assert(1 == value.v.list.len);
+
+    const BencodeValue str = value.v.list.data[0];
+    assert(BencodeKindString == str.kind);
+    assert(5 == str.v.s.len);
+    // Borrowed, so the body is the input's own bytes and not a copy.
+    assert(input + 3 == str.v.s.data);
+    assert(0 == memcmp(str.v.s.data, input + 3, 5));
+  }
+
+  // A NUL inside a *key* is a byte like any other: it neither terminates the
+  // key nor makes two different keys compare equal.
+  {
+    Arena arena = test_arena(4 * KiB);
+    Arena scratch = test_arena(4 * KiB);
+
+    // `d` `2:a\0` `1:x` `2:ab` `1:y` `e`, in order: "a\0" < "ab".
+    const u8 input[] = {'d',  '2', ':', 'a', 0x00, '1', ':', 'x',
+                        '2',  ':', 'a', 'b', '1',  ':', 'y', 'e'};
+    Slice_u8 data = slice_u8_make((u8 *)input, sizeof(input));
+
+    BencodeValue value = {0};
+    assert(ErrKindNone == bencode_parse(&data, &arena, scratch, &value).kind);
+    assert(BencodeKindDict == value.kind);
+    assert(4 == value.v.list.len);
+    assert(2 == value.v.list.data[0].v.s.len);
+    assert(0 == memcmp(value.v.list.data[0].v.s.data, "a\0", 2));
+  }
+
+  // Dict keys are ordered by raw byte value, so 0x01 comes before 0x80. A
+  // signed `char` comparison reads 0x80 as -128 and puts it first, which would
+  // accept the reversed pair and reject this one; `bytes_cmp` is checked on its
+  // own, this checks that `bencode_parse` actually routes dict keys through it.
+  {
+    const struct {
+      u8 first_key;
+      u8 second_key;
+      bool ok;
+    } cases[] = {
+        {0x01, 0x80, true},
+        {0x80, 0x01, false},
+        {0x00, 0xff, true},
+        {0xff, 0x00, false},
+        // Equal keys are duplicates whatever their value.
+        {0x80, 0x80, false},
+    };
+
+    for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+      Arena arena = test_arena(4 * KiB);
+      Arena scratch = test_arena(4 * KiB);
+
+      const u8 input[] = {'d', '1', ':', cases[i].first_key,  '1', ':', 'x',
+                          '1', ':', cases[i].second_key, '1', ':', 'y', 'e'};
+      Slice_u8 data = slice_u8_make((u8 *)input, sizeof(input));
+
+      BencodeValue value = {0};
+      assert((ErrKindNone ==
+              bencode_parse(&data, &arena, scratch, &value).kind) ==
+             cases[i].ok);
+    }
+  }
+}
+
+// The remaining shapes of a dict key: empty ones, and one that is a prefix of
+// the next. Both are legal bencode and both are easy to get wrong, a prefix
+// because a length-blind compare calls "aa" smaller than "a".
+static void test_bencode_parse_dict_keys(void) {
+  const struct {
+    const char *input;
+    bool ok;
+    usize children_len;
+  } cases[] = {
+      // An empty key is a key.
+      {"d0:0:e", true, 2},
+      {"d0:1:ae", true, 2},
+      // And two of them are duplicates.
+      {"d0:1:a0:1:be", false, 0},
+      // The empty key sorts before every other one.
+      {"d0:1:x1:a1:ye", true, 4},
+      {"d1:a1:x0:1:ye", false, 0},
+      // A prefix sorts before what extends it, whatever the lengths say.
+      {"d1:a1:x2:aa1:ye", true, 4},
+      {"d2:aa1:x1:a1:ye", false, 0},
+      {"d2:aa1:x3:aaa1:ye", true, 4},
+      {"d3:aaa1:x2:aa1:ye", false, 0},
+  };
+
+  for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    Arena arena = test_arena(4 * KiB);
+    Arena scratch = test_arena(4 * KiB);
+
+    Slice_u8 data = test_slice(cases[i].input);
+
+    BencodeValue value = {0};
+    assert((ErrKindNone == bencode_parse(&data, &arena, scratch, &value).kind) ==
+           cases[i].ok);
+
+    if (!cases[i].ok) {
+      continue;
+    }
+
+    assert(BencodeKindDict == value.kind);
+    assert(cases[i].children_len == value.v.list.len);
+  }
+}
+
+// The depth bound again, but reached through dicts and through the two kinds
+// alternating. The existing case nests lists only, and a list is the one
+// container that closes without its contents having to pair up.
+static void test_bencode_parse_deep_dicts(void) {
+  // `d1:a` * (depth - 1), then an empty `de` at the bottom, then the closing
+  // `e`s: every dict holds one key and one dict, so the innermost open count
+  // reaches exactly `depth`.
+  for (usize depth = BENCODE_MAX_DEPTH; depth <= BENCODE_MAX_DEPTH + 1;
+       depth++) {
+    Arena arena = test_arena(64 * KiB);
+    Arena scratch = test_arena(64 * KiB);
+
+    u8 input[5 * (BENCODE_MAX_DEPTH + 1)] = {0};
+    usize len = 0;
+    for (usize i = 0; i + 1 < depth; i++) {
+      memcpy(input + len, "d1:a", 4);
+      len += 4;
+    }
+    memcpy(input + len, "de", 2);
+    len += 2;
+    for (usize i = 0; i + 1 < depth; i++) {
+      input[len++] = 'e';
+    }
+    assert(len <= sizeof(input));
+
+    Slice_u8 data = slice_u8_make(input, len);
+    BencodeValue value = {0};
+    const bool ok =
+        ErrKindNone == bencode_parse(&data, &arena, scratch, &value).kind;
+
+    assert(ok == (depth <= BENCODE_MAX_DEPTH));
+    if (ok) {
+      assert(BencodeKindDict == value.kind);
+      // The key and the dict below it.
+      assert(2 == value.v.list.len);
+    }
+  }
+
+  // Lists and dicts alternating, so a dict closes with a list as its value and
+  // a list closes with a dict as its only item.
+  {
+    Arena arena = test_arena(4 * KiB);
+    Arena scratch = test_arena(4 * KiB);
+
+    Slice_u8 data = test_slice("ld1:ali1eeee");
+    BencodeValue value = {0};
+    assert(ErrKindNone == bencode_parse(&data, &arena, scratch, &value).kind);
+    assert(0 == data.len);
+
+    assert(BencodeKindList == value.kind);
+    assert(1 == value.v.list.len);
+
+    const BencodeValue dict = value.v.list.data[0];
+    assert(BencodeKindDict == dict.kind);
+    assert(2 == dict.v.list.len);
+    assert(test_bencode_is_string(dict.v.list.data[0], "a"));
+
+    const BencodeValue list = dict.v.list.data[1];
+    assert(BencodeKindList == list.kind);
+    assert(1 == list.v.list.len);
+    assert(BencodeKindInteger == list.v.list.data[0].kind);
+    assert(1 == list.v.list.data[0].v.num);
   }
 }
 
@@ -3999,6 +4164,9 @@ static void test(const char *filter) {
       {"bencode_parse_num", test_bencode_parse_num},
       {"bencode_parse_string", test_bencode_parse_string},
       {"bencode_parse", test_bencode_parse},
+      {"bencode_parse_binary", test_bencode_parse_binary},
+      {"bencode_parse_dict_keys", test_bencode_parse_dict_keys},
+      {"bencode_parse_deep_dicts", test_bencode_parse_deep_dicts},
       {"bytes_cmp", test_bytes_cmp},
       {"bencode_validate_dict", test_bencode_validate_dict},
       {"sha256_vectors", test_sha256_vectors},

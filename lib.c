@@ -277,9 +277,10 @@ __attribute__((warn_unused_result)) static Error slice_u8_first(Slice_u8 slice,
 }
 
 // Advance past `count` bytes. The caller must have already established that
-// they are available, which is why this cannot fail; use `slice_u8_skip` when
-// the input may be short. Unlike an `assert(ErrNone == slice_u8_skip(...))`,
-// the advance still happens when asserts are compiled out.
+// they are available, which is why this cannot fail: every parser here has to
+// know the length before it advances anyway, either to `slice_u8_take` the
+// bytes or to pick which error a short input deserves, so a checking variant
+// would only ever re-check what the caller just established.
 static void slice_u8_advance(Slice_u8 *slice, usize count) {
   assert(slice);
   assert(slice->data);
@@ -287,21 +288,6 @@ static void slice_u8_advance(Slice_u8 *slice, usize count) {
 
   slice->len -= count;
   slice->data += count;
-}
-
-__attribute__((warn_unused_result)) static Error slice_u8_skip(Slice_u8 *slice,
-                                                               usize count) {
-  assert(slice);
-  if (!slice->data) {
-    return (Error){.kind = ErrKindInvalidData};
-  }
-
-  if (slice->len < count) {
-    return (Error){.kind = ErrKindInvalidData};
-  }
-
-  slice_u8_advance(slice, count);
-  return (Error){.kind = ErrKindNone};
 }
 
 // The caller must have already established that `count` bytes are available:
