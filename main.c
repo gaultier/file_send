@@ -450,6 +450,12 @@ path_with_ext(Slice_u8 path, Slice_u8 ext, u8 separator, Slice_u8 *dst,
 
   return (Error){.kind = ErrKindNone};
 }
+// Declared here so the syscall wrappers below can take the vtable they belong
+// to: a slot that composes other slots calls them through `io`, which is what
+// lets one platform implement an operation out of its own primitives without
+// the vtable having to agree on what those primitives are.
+typedef struct IO IO;
+
 // ---------- Unix ----------
 
 // Map an `errno` onto our own errors. Shared by every syscall wrapper: an
@@ -524,8 +530,8 @@ __attribute__((warn_unused_result)) static Error unix_error_from_errno(i32 e) {
 // On success `*res` is the mapping; on failure it is left alone and the
 // `errno` `mmap` set is mapped onto an `Error`.
 __attribute__((warn_unused_result)) static Error
-unix_valloc(void *ctx, usize bytes_count, u8 **res) {
-  (void)ctx;
+unix_valloc(const IO *io, usize bytes_count, u8 **res) {
+  (void)io;
 
   assert(bytes_count > 0);
   assert(res);
@@ -541,8 +547,8 @@ unix_valloc(void *ctx, usize bytes_count, u8 **res) {
   return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static usize unix_get_page_size(void *ctx) {
-  (void)ctx;
+__attribute__((warn_unused_result)) static usize unix_get_page_size(const IO *io) {
+  (void)io;
 
   const i64 res = sysconf(_SC_PAGE_SIZE);
   assert(-1 != res && "unreachable");
@@ -551,8 +557,8 @@ __attribute__((warn_unused_result)) static usize unix_get_page_size(void *ctx) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_vprotect_none(void *ctx, void *ptr, usize size) {
-  (void)ctx;
+unix_vprotect_none(const IO *io, void *ptr, usize size) {
+  (void)io;
 
   if (-1 == mprotect(ptr, size, PROT_NONE)) {
     return unix_error_from_errno(errno);
@@ -617,8 +623,8 @@ typedef enum {
 typedef enum { SocketTypeUdp, SocketTypeTcp } SocketType;
 
 __attribute__((warn_unused_result)) static Error
-unix_socket(void *ctx, SocketDomain domain, SocketType type, i32 *fd) {
-  (void)ctx;
+unix_socket(const IO *io, SocketDomain domain, SocketType type, i32 *fd) {
+  (void)io;
 
   assert(fd);
 
@@ -654,9 +660,9 @@ unix_socket(void *ctx, SocketDomain domain, SocketType type, i32 *fd) {
   return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static Error unix_listen(void *ctx, i32 fd,
+__attribute__((warn_unused_result)) static Error unix_listen(const IO *io, i32 fd,
                                                              i32 backlog) {
-  (void)ctx;
+  (void)io;
 
   const i32 ret = listen(fd, backlog);
 
@@ -675,8 +681,8 @@ typedef enum {
 } FileOpenOptions;
 
 __attribute__((warn_unused_result)) static Error
-unix_open(void *ctx, Slice_u8 path, FileOpenOptions options, i32 *fd) {
-  (void)ctx;
+unix_open(const IO *io, Slice_u8 path, FileOpenOptions options, i32 *fd) {
+  (void)io;
 
   assert(fd);
 
@@ -732,9 +738,9 @@ typedef struct {
 } Ipv4Addr;
 
 __attribute__((warn_unused_result)) static Error
-unix_tcp_bind_ipv4(void *ctx, i32 listen_socket, Ipv4Addr addr) {
+unix_tcp_bind_ipv4(const IO *io, i32 listen_socket, Ipv4Addr addr) {
 
-  (void)ctx;
+  (void)io;
 
   struct sockaddr_in sock_addr_in = {
       .sin_family = AF_INET,
@@ -756,10 +762,10 @@ unix_tcp_bind_ipv4(void *ctx, i32 listen_socket, Ipv4Addr addr) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_accept(void *ctx, i32 listen_socket, i32 *dst_accept_socket,
+unix_accept(const IO *io, i32 listen_socket, i32 *dst_accept_socket,
             Ipv4Addr *dst_accept_addr) {
 
-  (void)ctx;
+  (void)io;
 
   assert(dst_accept_socket);
   assert(dst_accept_addr);
@@ -787,8 +793,8 @@ unix_accept(void *ctx, i32 listen_socket, i32 *dst_accept_socket,
 typedef void *(*ThreadCallback)(void *data);
 
 __attribute__((warn_unused_result)) static Error
-unix_thread_create(void *ctx, ThreadCallback cb, void *data) {
-  (void)ctx;
+unix_thread_create(const IO *io, ThreadCallback cb, void *data) {
+  (void)io;
 
   assert(cb);
 
@@ -816,8 +822,8 @@ unix_thread_create(void *ctx, ThreadCallback cb, void *data) {
   return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static Error unix_close(void *ctx, i32 fd) {
-  (void)ctx;
+__attribute__((warn_unused_result)) static Error unix_close(const IO *io, i32 fd) {
+  (void)io;
 
   const i32 ret = close(fd);
 
@@ -829,8 +835,8 @@ __attribute__((warn_unused_result)) static Error unix_close(void *ctx, i32 fd) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_enable_socket_reuse(void *ctx, i32 fd) {
-  (void)ctx;
+unix_enable_socket_reuse(const IO *io, i32 fd) {
+  (void)io;
 
   int val = 1;
   const int ret = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val));
@@ -843,8 +849,8 @@ unix_enable_socket_reuse(void *ctx, i32 fd) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_read(void *ctx, i32 fd, Slice_u8 data, usize *dst_read) {
-  (void)ctx;
+unix_read(const IO *io, i32 fd, Slice_u8 data, usize *dst_read) {
+  (void)io;
 
   assert(dst_read);
 
@@ -864,8 +870,8 @@ unix_read(void *ctx, i32 fd, Slice_u8 data, usize *dst_read) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_write(void *ctx, i32 fd, Slice_u8 data, usize *dst_written) {
-  (void)ctx;
+unix_write(const IO *io, i32 fd, Slice_u8 data, usize *dst_written) {
+  (void)io;
 
   assert(dst_written);
 
@@ -884,8 +890,8 @@ unix_write(void *ctx, i32 fd, Slice_u8 data, usize *dst_written) {
   return (Error){.kind = ErrKindNone};
 }
 __attribute__((warn_unused_result)) static Error
-unix_udp_multicast_open_ipv4(void *ctx, u32 ipv4, i32 *dst_fd) {
-  (void)ctx;
+unix_udp_multicast_open_ipv4(const IO *io, u32 ipv4, i32 *dst_fd) {
+  (void)io;
 
   assert(dst_fd);
 
@@ -915,9 +921,9 @@ unix_udp_multicast_open_ipv4(void *ctx, u32 ipv4, i32 *dst_fd) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_udp_send_to_ipv4(void *ctx, i32 fd, Ipv4Addr addr, const u8 *buf,
+unix_udp_send_to_ipv4(const IO *io, i32 fd, Ipv4Addr addr, const u8 *buf,
                       usize len, usize *dst_sent) {
-  (void)ctx;
+  (void)io;
   assert(buf);
   assert(dst_sent);
 
@@ -943,8 +949,8 @@ unix_udp_send_to_ipv4(void *ctx, i32 fd, Ipv4Addr addr, const u8 *buf,
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_file_size(void *ctx, i32 fd, usize *dst_size) {
-  (void)ctx;
+unix_file_size(const IO *io, i32 fd, usize *dst_size) {
+  (void)io;
   assert(dst_size);
 
   struct stat st = {0};
@@ -959,23 +965,55 @@ unix_file_size(void *ctx, i32 fd, usize *dst_size) {
   return (Error){.kind = ErrKindNone};
 }
 
+// ---------- IO ----------
+
+struct IO {
+  Error (*socket)(const IO *io, SocketDomain domain, SocketType type, i32 *fd);
+  Error (*listen)(const IO *io, i32 fd, i32 backlog);
+  Error (*open)(const IO *io, Slice_u8 path, FileOpenOptions options, i32 *fd);
+  Error (*tcp_bind_ipv4)(const IO *io, i32 listen_socket, Ipv4Addr addr);
+  Error (*accept)(const IO *io, i32 listen_socket, i32 *dst_accept_socket,
+                  Ipv4Addr *dst_accept_addr);
+  Error (*thread_create)(const IO *io, ThreadCallback cb, void *data);
+  Error (*close)(const IO *io, i32 fd);
+  Error (*enable_socket_reuse)(const IO *io, i32 fd);
+  Error (*read)(const IO *io, i32 fd, Slice_u8 data, usize *dst_read);
+  Error (*write)(const IO *io, i32 fd, Slice_u8 data, usize *dst_written);
+  Error (*file_size)(const IO *io, i32 fd, usize *dst_size);
+  Error (*map_file)(const IO *io, Slice_u8 path, FileOpenOptions opts,
+                    Slice_u8 *dst);
+  Error (*write_all_to_file)(const IO *io, Slice_u8 path, Slice_u8 data);
+  usize (*get_page_size)(const IO *io);
+  Error (*valloc)(const IO *io, usize bytes_count, u8 **res);
+  Error (*vprotect_none)(const IO *io, void *ptr, usize size);
+
+  // The implementation's own state, reached by every slot above as
+  // `io->ctx`. It is not the caller's: a callback's user data travels
+  // separately, because the two have different lifetimes and owners.
+  void *ctx;
+};
+
+// Composites: one operation to the program, several to Unix. They go
+// through `io` so another platform can implement the same operation out
+// of entirely different primitives, and so the primitives can be faked
+// underneath them in a test.
 __attribute__((warn_unused_result)) static Error
-unix_map_file(void *ctx, Slice_u8 path, FileOpenOptions opts, Slice_u8 *dst) {
-  (void)ctx;
+unix_map_file(const IO *io, Slice_u8 path, FileOpenOptions opts, Slice_u8 *dst) {
+  (void)io;
   assert(dst);
 
   Error err = {0};
 
   i32 fd = 0;
-  err = unix_open(NULL, path, FileOpenOptionsReadOnly, &fd);
+  err = io->open(io, path, FileOpenOptionsReadOnly, &fd);
   if (ErrKindNone != err.kind) {
     return err;
   }
 
   usize file_size = 0;
-  err = unix_file_size(NULL, fd, &file_size);
+  err = io->file_size(io, fd, &file_size);
   if (ErrKindNone != err.kind) {
-    (void)unix_close(NULL, fd);
+    (void)io->close(io, fd);
     return err;
   }
 
@@ -993,7 +1031,7 @@ unix_map_file(void *ctx, Slice_u8 path, FileOpenOptions opts, Slice_u8 *dst) {
 
   // The mapping holds its own reference to the file, so the descriptor has
   // done its job either way.
-  (void)unix_close(NULL, fd);
+  (void)io->close(io, fd);
 
   if (ErrKindNone != err_mmap.kind) {
     return err_mmap;
@@ -1006,8 +1044,8 @@ unix_map_file(void *ctx, Slice_u8 path, FileOpenOptions opts, Slice_u8 *dst) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_write_all_to_file(void *ctx, Slice_u8 path, Slice_u8 data) {
-  (void)ctx;
+unix_write_all_to_file(const IO *io, Slice_u8 path, Slice_u8 data) {
+  (void)io;
 
   // TODO: Should we still 'touch' the file?
   if (!data.data || data.len == 0) {
@@ -1017,10 +1055,10 @@ unix_write_all_to_file(void *ctx, Slice_u8 path, Slice_u8 data) {
   Error err = {0};
 
   i32 fd = 0;
-  err = unix_open(NULL, path,
-                  FileOpenOptionsWriteOnly | FileOpenOptionsCreate |
-                      FileOpenOptionsTruncate,
-                  &fd);
+  err = io->open(io, path,
+                 FileOpenOptionsWriteOnly | FileOpenOptionsCreate |
+                     FileOpenOptionsTruncate,
+                 &fd);
   if (ErrKindNone != err.kind) {
     return err;
   }
@@ -1028,62 +1066,32 @@ unix_write_all_to_file(void *ctx, Slice_u8 path, Slice_u8 data) {
   Slice_u8 remaining = data;
 
   for (; remaining.len > 0;) {
-    const isize ret = write(fd, remaining.data, remaining.len);
+    usize written = 0;
+    err = io->write(io, fd, remaining, &written);
 
-    // Retry?
-    if (-1 == ret && EINTR == errno) {
+    // A signal before any progress is not a failure: reissue the call.
+    if (ErrKindInterrupted == err.kind) {
       continue;
     }
 
-    if (-1 == ret) {
-      err = unix_error_from_errno(errno);
+    if (ErrKindNone != err.kind) {
       goto end;
     }
 
-    assert(ret >= 0);
-    if (0 == ret) {
+    // A short write is ordinary; a write of nothing would loop forever.
+    if (0 == written) {
       err = (Error){.kind = ErrKindConnReset};
       goto end;
     }
 
-    assert(ret > 0);
-
-    slice_u8_advance(&remaining, (usize)ret);
+    slice_u8_advance(&remaining, written);
   }
 
 end:
-  close(fd);
+  (void)io->close(io, fd);
 
   return err;
 }
-
-// ---------- IO ----------
-
-typedef struct {
-  Error (*socket)(void *ctx, SocketDomain domain, SocketType type, i32 *fd);
-  Error (*listen)(void *ctx, i32 fd, i32 backlog);
-  Error (*open)(void *ctx, Slice_u8 path, FileOpenOptions options, i32 *fd);
-  Error (*tcp_bind_ipv4)(void *ctx, i32 listen_socket, Ipv4Addr addr);
-  Error (*accept)(void *ctx, i32 listen_socket, i32 *dst_accept_socket,
-                  Ipv4Addr *dst_accept_addr);
-  Error (*thread_create)(void *ctx, ThreadCallback cb, void *data);
-  Error (*close)(void *ctx, i32 fd);
-  Error (*enable_socket_reuse)(void *ctx, i32 fd);
-  Error (*read)(void *ctx, i32 fd, Slice_u8 data, usize *dst_read);
-  Error (*write)(void *ctx, i32 fd, Slice_u8 data, usize *dst_written);
-  Error (*file_size)(void *ctx, i32 fd, usize *dst_size);
-  Error (*map_file)(void *ctx, Slice_u8 path, FileOpenOptions opts,
-                    Slice_u8 *dst);
-  Error (*write_all_to_file)(void *ctx, Slice_u8 path, Slice_u8 data);
-  usize (*get_page_size)(void *ctx);
-  Error (*valloc)(void *ctx, usize bytes_count, u8 **res);
-  Error (*vprotect_none)(void *ctx, void *ptr, usize size);
-
-  // The implementation's own state, handed back to every slot above as their
-  // `ctx`. It is not the caller's: a callback's user data travels separately,
-  // because the two have different lifetimes and different owners.
-  void *ctx;
-} IO;
 
 __attribute__((warn_unused_result)) static IO io_unix_make(void) {
   return (IO){
@@ -1122,17 +1130,17 @@ io_listen_and_serve_tcp_ipv4(const IO *io, void *cb_ctx,
   i32 listen_socket = 0;
   {
     const Error err_socket =
-        io->socket(io->ctx, SocketDomainIpv4, SocketTypeTcp, &listen_socket);
+        io->socket(io, SocketDomainIpv4, SocketTypeTcp, &listen_socket);
     if (ErrKindNone != err_socket.kind) {
       return err_socket;
     }
     puts("opened socket");
   }
   {
-    const Error err_reuse = io->enable_socket_reuse(io->ctx, listen_socket);
+    const Error err_reuse = io->enable_socket_reuse(io, listen_socket);
 
     if (ErrKindNone != err_reuse.kind) {
-      (void)io->close(io->ctx, listen_socket);
+      (void)io->close(io, listen_socket);
       return err_reuse;
     }
   }
@@ -1140,18 +1148,18 @@ io_listen_and_serve_tcp_ipv4(const IO *io, void *cb_ctx,
   {
     // A port left behind by a previous run is an ordinary answer, not a bug
     // in this process, so it travels back as an `Error`.
-    const Error err_bind = io->tcp_bind_ipv4(io->ctx, listen_socket, listen_addr);
+    const Error err_bind = io->tcp_bind_ipv4(io, listen_socket, listen_addr);
     if (ErrKindNone != err_bind.kind) {
-      (void)io->close(io->ctx, listen_socket);
+      (void)io->close(io, listen_socket);
       return err_bind;
     }
     puts("socket bound");
   }
 
   {
-    const Error err_listen = io->listen(io->ctx, listen_socket, 1024);
+    const Error err_listen = io->listen(io, listen_socket, 1024);
     if (ErrKindNone != err_listen.kind) {
-      (void)io->close(io->ctx, listen_socket);
+      (void)io->close(io, listen_socket);
       return err_listen;
     }
     puts("socket listening");
@@ -1162,7 +1170,7 @@ io_listen_and_serve_tcp_ipv4(const IO *io, void *cb_ctx,
     Ipv4Addr accept_addr = {0};
 
     const Error err_accept =
-        io->accept(io->ctx, listen_socket, &accept_socket, &accept_addr);
+        io->accept(io, listen_socket, &accept_socket, &accept_addr);
 
     // The peer is allowed to vanish between the handshake and the `accept`.
     // That is one dead connection, not a dead server.
@@ -1173,7 +1181,7 @@ io_listen_and_serve_tcp_ipv4(const IO *io, void *cb_ctx,
     if (ErrKindNone != err_accept.kind) {
       // TODO: `ErrTooManyFiles` is transient and deserves a backoff instead
       // of tearing the listener down, which needs a timer in `IO`.
-      (void)io->close(io->ctx, listen_socket);
+      (void)io->close(io, listen_socket);
       return err_accept;
     }
 
@@ -1241,7 +1249,7 @@ arena_valloc(const IO *io, usize bytes_count, Arena *res) {
   assert(io);
   assert(res);
 
-  const usize page_size = io->get_page_size(io->ctx);
+  const usize page_size = io->get_page_size(io);
   assert(page_size > 0);
 
   const usize usable_bytes = usize_round_up_multiple_of(bytes_count, page_size);
@@ -1251,7 +1259,7 @@ arena_valloc(const IO *io, usize bytes_count, Arena *res) {
 
   u8 *arena_memory = NULL;
   {
-    const Error err = io->valloc(io->ctx, os_alloc_size, &arena_memory);
+    const Error err = io->valloc(io, os_alloc_size, &arena_memory);
     if (ErrKindNone != err.kind) {
       return err;
     }
@@ -1259,7 +1267,7 @@ arena_valloc(const IO *io, usize bytes_count, Arena *res) {
   assert(arena_memory);
 
   assert(ErrKindNone ==
-         io->vprotect_none(io->ctx, arena_memory + usable_bytes, page_size)
+         io->vprotect_none(io, arena_memory + usable_bytes, page_size)
              .kind);
 
   // Right-align the arena against the guard page so that *any* write past
@@ -3039,7 +3047,7 @@ static void *torrent_client_handle(void *vctx) {
   u8 buf[4096] = {0};
   Slice_u8 slice_read = slice_u8_make(buf, sizeof(buf));
 
-  Error err = client_ctx->io->read(client_ctx->io->ctx, client_ctx->socket,
+  Error err = client_ctx->io->read(client_ctx->io, client_ctx->socket,
                                    slice_read, &read_count);
   if (ErrKindNone != err.kind) {
     goto end;
@@ -3049,7 +3057,7 @@ static void *torrent_client_handle(void *vctx) {
   printf("read: %.*s\n", (i32)slice_read_actual.len, slice_read_actual.data);
 
 end:
-  (void)client_ctx->io->close(client_ctx->io->ctx, client_ctx->socket);
+  (void)client_ctx->io->close(client_ctx->io, client_ctx->socket);
 
   puts("torrent_client_handle end");
 
@@ -3073,7 +3081,7 @@ torrent_client_on_accept(const IO *io, void *vctx, Ipv4Addr accept_addr,
       torrent_client_ctx_pool_acquire(&network_ctx->pool);
   if (!client_ctx) {
     fprintf(stderr, "backpressure: no available pool slot for client\n");
-    (void)io->close(io->ctx, accept_socket);
+    (void)io->close(io, accept_socket);
     return (Error){.kind = ErrKindOOM};
   }
 
@@ -3084,12 +3092,12 @@ torrent_client_on_accept(const IO *io, void *vctx, Ipv4Addr accept_addr,
   client_ctx->io = io;
   client_ctx->network_ctx = network_ctx;
 
-  err = io->thread_create(io->ctx, torrent_client_handle, client_ctx);
+  err = io->thread_create(io, torrent_client_handle, client_ctx);
   if (ErrKindNone != err.kind) {
     // The thread never started, so nothing else will free the context or hang
     // up on the peer.
     torrent_client_ctx_pool_release(&network_ctx->pool, client_ctx);
-    (void)io->close(io->ctx, accept_socket);
+    (void)io->close(io, accept_socket);
   }
 
   // Nothing to cleanup: the client handler finished successfully and is
@@ -3394,16 +3402,16 @@ typedef struct {
 } TestIoCtx;
 
 __attribute__((warn_unused_result)) static usize
-test_io_get_page_size(void *ctx) {
-  TestIoCtx *const c = ctx;
+test_io_get_page_size(const IO *io) {
+  TestIoCtx *const c = io->ctx;
   assert(c);
 
   return c->page_size;
 }
 
 __attribute__((warn_unused_result)) static Error
-test_io_valloc(void *ctx, usize bytes_count, u8 **res) {
-  TestIoCtx *const c = ctx;
+test_io_valloc(const IO *io, usize bytes_count, u8 **res) {
+  TestIoCtx *const c = io->ctx;
   assert(c);
 
   c->alloc_calls += 1;
@@ -3413,19 +3421,19 @@ test_io_valloc(void *ctx, usize bytes_count, u8 **res) {
     return (Error){.kind = c->alloc_fails_with};
   }
 
-  return c->real.valloc(c->real.ctx, bytes_count, res);
+  return c->real.valloc(&c->real, bytes_count, res);
 }
 
 __attribute__((warn_unused_result)) static Error
-test_io_vprotect_none(void *ctx, void *ptr, usize size) {
-  TestIoCtx *const c = ctx;
+test_io_vprotect_none(const IO *io, void *ptr, usize size) {
+  TestIoCtx *const c = io->ctx;
   assert(c);
 
   c->protect_calls += 1;
   c->protect_ptr = ptr;
   c->protect_size = size;
 
-  return c->real.vprotect_none(c->real.ctx, ptr, size);
+  return c->real.vprotect_none(&c->real, ptr, size);
 }
 
 // Only the slots `arena_valloc` reaches for; the rest stay null so that a
@@ -3584,8 +3592,8 @@ typedef struct {
 } TestServerCtx;
 
 __attribute__((warn_unused_result)) static Error
-test_server_socket(void *ctx, SocketDomain domain, SocketType type, i32 *fd) {
-  TestServerCtx *const c = ctx;
+test_server_socket(const IO *io, SocketDomain domain, SocketType type, i32 *fd) {
+  TestServerCtx *const c = io->ctx;
   assert(c);
   assert(fd);
   assert(SocketDomainIpv4 == domain);
@@ -3602,8 +3610,8 @@ test_server_socket(void *ctx, SocketDomain domain, SocketType type, i32 *fd) {
 }
 
 __attribute__((warn_unused_result)) static Error
-test_server_enable_socket_reuse(void *ctx, i32 fd) {
-  TestServerCtx *const c = ctx;
+test_server_enable_socket_reuse(const IO *io, i32 fd) {
+  TestServerCtx *const c = io->ctx;
   assert(c);
   assert(4242 == fd);
 
@@ -3612,8 +3620,8 @@ test_server_enable_socket_reuse(void *ctx, i32 fd) {
 }
 
 __attribute__((warn_unused_result)) static Error
-test_server_tcp_bind_ipv4(void *ctx, i32 fd, Ipv4Addr addr) {
-  TestServerCtx *const c = ctx;
+test_server_tcp_bind_ipv4(const IO *io, i32 fd, Ipv4Addr addr) {
+  TestServerCtx *const c = io->ctx;
   assert(c);
   assert(4242 == fd);
 
@@ -3623,8 +3631,8 @@ test_server_tcp_bind_ipv4(void *ctx, i32 fd, Ipv4Addr addr) {
 }
 
 __attribute__((warn_unused_result)) static Error
-test_server_listen(void *ctx, i32 fd, i32 backlog) {
-  TestServerCtx *const c = ctx;
+test_server_listen(const IO *io, i32 fd, i32 backlog) {
+  TestServerCtx *const c = io->ctx;
   assert(c);
   assert(4242 == fd);
 
@@ -3634,9 +3642,9 @@ test_server_listen(void *ctx, i32 fd, i32 backlog) {
 }
 
 __attribute__((warn_unused_result)) static Error
-test_server_accept(void *ctx, i32 listen_socket, i32 *dst_accept_socket,
+test_server_accept(const IO *io, i32 listen_socket, i32 *dst_accept_socket,
                    Ipv4Addr *dst_accept_addr) {
-  TestServerCtx *const c = ctx;
+  TestServerCtx *const c = io->ctx;
   assert(c);
   assert(4242 == listen_socket);
   assert(dst_accept_socket);
@@ -3659,9 +3667,8 @@ test_server_accept(void *ctx, i32 listen_socket, i32 *dst_accept_socket,
   return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static Error test_server_close(void *ctx,
-                                                                   i32 fd) {
-  TestServerCtx *const c = ctx;
+__attribute__((warn_unused_result)) static Error test_server_close(const IO *io, i32 fd) {
+  TestServerCtx *const c = io->ctx;
   assert(c);
   assert(fd > 0);
 
@@ -3670,8 +3677,8 @@ __attribute__((warn_unused_result)) static Error test_server_close(void *ctx,
 }
 
 __attribute__((warn_unused_result)) static Error
-test_server_thread_create(void *ctx, ThreadCallback cb, void *data) {
-  TestServerCtx *const c = ctx;
+test_server_thread_create(const IO *io, ThreadCallback cb, void *data) {
+  TestServerCtx *const c = io->ctx;
   assert(c);
   assert(cb);
   assert(data);
@@ -3688,8 +3695,8 @@ test_server_thread_create(void *ctx, ThreadCallback cb, void *data) {
 }
 
 __attribute__((warn_unused_result)) static Error
-test_server_read(void *ctx, i32 fd, Slice_u8 data, usize *dst_read) {
-  TestServerCtx *const c = ctx;
+test_server_read(const IO *io, i32 fd, Slice_u8 data, usize *dst_read) {
+  TestServerCtx *const c = io->ctx;
   assert(c);
   assert(fd > 0);
   assert(dst_read);
@@ -6427,9 +6434,9 @@ static void test_io_open_errors(void) {
   // An empty path is rejected before the syscall.
   assert(
       ErrKindInvalidData ==
-      io.open(io.ctx, slice_u8_make(NULL, 0), FileOpenOptionsReadOnly, &fd).kind);
+      io.open(&io, slice_u8_make(NULL, 0), FileOpenOptionsReadOnly, &fd).kind);
   assert(ErrKindInvalidData ==
-         io.open(io.ctx, test_slice(""), FileOpenOptionsReadOnly, &fd).kind);
+         io.open(&io, test_slice(""), FileOpenOptionsReadOnly, &fd).kind);
 
   // So is one too long for the fixed buffer, and the limit rides along in
   // `data` rather than an `errno` that was never set.
@@ -6438,7 +6445,7 @@ static void test_io_open_errors(void) {
     memset(long_path, 'a', sizeof(long_path) - 1);
     const Slice_u8 path = slice_u8_make((u8 *)long_path, sizeof(long_path) - 1);
 
-    const Error err = io.open(io.ctx, path, FileOpenOptionsReadOnly, &fd);
+    const Error err = io.open(&io, path, FileOpenOptionsReadOnly, &fd);
     assert(ErrKindRange == err.kind);
     assert(4095 == err.data);
   }
@@ -6449,7 +6456,7 @@ static void test_io_open_errors(void) {
     const Slice_u8 path = test_tmp_path(buf, sizeof(buf), "does_not_exist");
     (void)unlink((const char *)path.data);
 
-    const Error err = io.open(io.ctx, path, FileOpenOptionsReadOnly, &fd);
+    const Error err = io.open(&io, path, FileOpenOptionsReadOnly, &fd);
     // `ENOENT` has no kind of its own yet, so it lands in the catch-all;
     // `data` is what tells it apart.
     assert(ErrKindInvalidData == err.kind);
@@ -6471,12 +6478,12 @@ static void test_io_file_round_trip(void) {
   const u8 payload[] = {'d', '3', ':', 'a', 'b', 'c', 0x00, 'e'};
   const Slice_u8 data = slice_u8_make((u8 *)payload, sizeof(payload));
 
-  assert(ErrKindNone == io.write_all_to_file(io.ctx, path, data).kind);
+  assert(ErrKindNone == io.write_all_to_file(&io, path, data).kind);
 
   {
     Slice_u8 got = {0};
     assert(ErrKindNone ==
-           io.map_file(io.ctx, path, FileOpenOptionsReadOnly, &got).kind);
+           io.map_file(&io, path, FileOpenOptionsReadOnly, &got).kind);
     assert(data.len == got.len);
     assert(0 == memcmp(data.data, got.data, data.len));
   }
@@ -6486,11 +6493,11 @@ static void test_io_file_round_trip(void) {
   {
     const u8 shorter[] = {'i', '1', 'e'};
     const Slice_u8 data_shorter = slice_u8_make((u8 *)shorter, sizeof(shorter));
-    assert(ErrKindNone == io.write_all_to_file(io.ctx, path, data_shorter).kind);
+    assert(ErrKindNone == io.write_all_to_file(&io, path, data_shorter).kind);
 
     Slice_u8 got = {0};
     assert(ErrKindNone ==
-           io.map_file(io.ctx, path, FileOpenOptionsReadOnly, &got).kind);
+           io.map_file(&io, path, FileOpenOptionsReadOnly, &got).kind);
     assert(sizeof(shorter) == got.len);
     assert(0 == memcmp(shorter, got.data, sizeof(shorter)));
   }
@@ -6498,11 +6505,11 @@ static void test_io_file_round_trip(void) {
   // Writing nothing is a no-op, not a truncation: the file is left as it was.
   {
     assert(ErrKindNone ==
-           io.write_all_to_file(io.ctx, path, slice_u8_make(NULL, 0)).kind);
+           io.write_all_to_file(&io, path, slice_u8_make(NULL, 0)).kind);
 
     Slice_u8 got = {0};
     assert(ErrKindNone ==
-           io.map_file(io.ctx, path, FileOpenOptionsReadOnly, &got).kind);
+           io.map_file(&io, path, FileOpenOptionsReadOnly, &got).kind);
     assert(3 == got.len);
   }
 
@@ -6513,7 +6520,7 @@ static void test_io_file_round_trip(void) {
   {
     Slice_u8 got = {0};
     assert(ErrKindNone !=
-           io.map_file(io.ctx, path, FileOpenOptionsReadOnly, &got).kind);
+           io.map_file(&io, path, FileOpenOptionsReadOnly, &got).kind);
   }
 
   // An empty file has nothing to map: `mmap` rejects a zero length, and that
@@ -6526,14 +6533,14 @@ static void test_io_file_round_trip(void) {
 
     i32 fd = -1;
     assert(ErrKindNone ==
-           io.open(io.ctx, empty_path,
+           io.open(&io, empty_path,
                    FileOpenOptionsWriteOnly | FileOpenOptionsCreate, &fd)
                .kind);
-    assert(ErrKindNone == io.close(io.ctx, fd).kind);
+    assert(ErrKindNone == io.close(&io, fd).kind);
 
     Slice_u8 got = {0};
     assert(ErrKindNone !=
-           io.map_file(io.ctx, empty_path, FileOpenOptionsReadOnly, &got).kind);
+           io.map_file(&io, empty_path, FileOpenOptionsReadOnly, &got).kind);
     assert(slice_u8_is_empty(got));
 
     assert(0 == unlink((const char *)empty_path.data));
@@ -6544,7 +6551,7 @@ static void test_io_file_round_trip(void) {
   {
     Slice_u8 got = {0};
     assert(ErrKindNone !=
-           io.map_file(io.ctx, test_slice("/tmp"), FileOpenOptionsReadOnly, &got)
+           io.map_file(&io, test_slice("/tmp"), FileOpenOptionsReadOnly, &got)
                .kind);
   }
 
@@ -6558,11 +6565,11 @@ static void test_io_file_round_trip(void) {
 
     Slice_u8 got = {0};
     assert(ErrKindRange ==
-           io.map_file(io.ctx, too_long, FileOpenOptionsReadOnly, &got).kind);
+           io.map_file(&io, too_long, FileOpenOptionsReadOnly, &got).kind);
 
     const u8 byte = 'x';
     assert(ErrKindRange ==
-           io.write_all_to_file(io.ctx, too_long, slice_u8_make((u8 *)&byte, 1))
+           io.write_all_to_file(&io, too_long, slice_u8_make((u8 *)&byte, 1))
                .kind);
   }
 }
@@ -6689,7 +6696,7 @@ static void test_io_syscall_failures(void) {
   // `fstat` on a descriptor that was never open.
   {
     usize size = 0xAA;
-    const Error err = io.file_size(io.ctx, -1, &size);
+    const Error err = io.file_size(&io, -1, &size);
     assert(ErrKindNone != err.kind);
     assert(EBADF == (i32)err.data);
     // Nothing is written when there is nothing to report.
@@ -6698,7 +6705,7 @@ static void test_io_syscall_failures(void) {
 
   // `close` of the same.
   {
-    const Error err = io.close(io.ctx, -1);
+    const Error err = io.close(&io, -1);
     assert(ErrKindNone != err.kind);
     assert(EBADF == (i32)err.data);
   }
@@ -6706,7 +6713,7 @@ static void test_io_syscall_failures(void) {
   // `mprotect` wants a page aligned address, so an odd one is rejected
   // without having to find an unmapped page first.
   {
-    const Error err = io.vprotect_none(io.ctx, (void *)1, 4096);
+    const Error err = io.vprotect_none(&io, (void *)1, 4096);
     assert(ErrKindNone != err.kind);
   }
 
@@ -6722,13 +6729,13 @@ static void test_io_syscall_failures(void) {
     const u8 payload[] = {'a', 'b', 'c'};
 
     assert(ErrKindNone ==
-           io.write_all_to_file(io.ctx, path,
+           io.write_all_to_file(&io, path,
                                 slice_u8_make((u8 *)payload, sizeof(payload)))
                .kind);
 
     Slice_u8 got = {0};
     assert(ErrKindNone ==
-           io.map_file(io.ctx, path, FileOpenOptionsWriteOnly, &got).kind);
+           io.map_file(&io, path, FileOpenOptionsWriteOnly, &got).kind);
     assert(sizeof(payload) == got.len);
 
     assert(0 == unlink((const char *)path.data));
@@ -6807,6 +6814,234 @@ static void test_torrent_make_dicts_oom(void) {
   assert(metainfo_oks > 0);
 }
 
+// A partial override: the real `map_file` and `write_all_to_file` run against
+// faked primitives. That is the whole reason a slot is handed the vtable --
+// the composites are the program's operations, the primitives underneath them
+// are the platform's, and only the second kind is worth faking.
+//
+// Anything not faked is delegated to `real`, so `open` still yields a
+// descriptor the rest of the code can use. A fake never invents one: it
+// either fails or hands back a genuine one.
+typedef struct {
+  IO real;
+
+  ErrorKind open_fails_with;
+  ErrorKind file_size_fails_with;
+  ErrorKind write_fails_with;
+
+  // Report at most this many bytes per `write`, so the loop has to go around
+  // more than once. Zero means "as many as asked".
+  usize write_chunk;
+  // The call at this index (1-based, 0 for never) is interrupted, or reports
+  // that it wrote nothing.
+  usize write_interrupted_at;
+  usize write_zero_at;
+
+  usize open_calls;
+  usize close_calls;
+  usize write_calls;
+  usize file_size_calls;
+} TestFileCtx;
+
+__attribute__((warn_unused_result)) static Error
+test_file_open(const IO *io, Slice_u8 path, FileOpenOptions opts, i32 *fd) {
+  TestFileCtx *const c = io->ctx;
+  assert(c);
+
+  c->open_calls += 1;
+  if (ErrKindNone != c->open_fails_with) {
+    return (Error){.kind = c->open_fails_with};
+  }
+
+  return c->real.open(&c->real, path, opts, fd);
+}
+
+__attribute__((warn_unused_result)) static Error test_file_close(const IO *io,
+                                                                 i32 fd) {
+  TestFileCtx *const c = io->ctx;
+  assert(c);
+
+  c->close_calls += 1;
+  return c->real.close(&c->real, fd);
+}
+
+__attribute__((warn_unused_result)) static Error
+test_file_file_size(const IO *io, i32 fd, usize *dst_size) {
+  TestFileCtx *const c = io->ctx;
+  assert(c);
+
+  c->file_size_calls += 1;
+  if (ErrKindNone != c->file_size_fails_with) {
+    return (Error){.kind = c->file_size_fails_with};
+  }
+
+  return c->real.file_size(&c->real, fd, dst_size);
+}
+
+__attribute__((warn_unused_result)) static Error
+test_file_write(const IO *io, i32 fd, Slice_u8 data, usize *dst_written) {
+  TestFileCtx *const c = io->ctx;
+  assert(c);
+  assert(dst_written);
+
+  c->write_calls += 1;
+
+  if (c->write_calls == c->write_interrupted_at) {
+    return (Error){.kind = ErrKindInterrupted};
+  }
+  if (ErrKindNone != c->write_fails_with) {
+    return (Error){.kind = c->write_fails_with};
+  }
+  if (c->write_calls == c->write_zero_at) {
+    *dst_written = 0;
+    return (Error){.kind = ErrKindNone};
+  }
+
+  const usize chunk =
+      (0 != c->write_chunk && c->write_chunk < data.len) ? c->write_chunk
+                                                         : data.len;
+  return c->real.write(&c->real, fd, slice_u8_take(data, chunk), dst_written);
+}
+
+__attribute__((warn_unused_result)) static IO
+test_io_file_make(TestFileCtx *ctx) {
+  assert(ctx);
+
+  return (IO){
+      // The operations under test, real.
+      .map_file = unix_map_file,
+      .write_all_to_file = unix_write_all_to_file,
+      // The primitives beneath them, faked.
+      .open = test_file_open,
+      .close = test_file_close,
+      .file_size = test_file_file_size,
+      .write = test_file_write,
+      .ctx = ctx,
+  };
+}
+
+// The error paths inside the composites, which no real file can produce: a
+// `open` that fails after the path was fine, an `fstat` that fails on a
+// descriptor that just opened, a short write, an interrupted one.
+static void test_io_composites_mocked(void) {
+  char buf[256] = {0};
+  const Slice_u8 path = test_tmp_path(buf, sizeof(buf), "composites");
+  const u8 payload[] = {'d', '3', ':', 'a', 'b', 'c', 0x00, 'e'};
+  const Slice_u8 data = slice_u8_make((u8 *)payload, sizeof(payload));
+
+  // A failed `open` stops `map_file` before anything else is tried.
+  {
+    TestFileCtx ctx = {.real = io_unix_make(),
+                       .open_fails_with = ErrKindTooManyFiles};
+    const IO io = test_io_file_make(&ctx);
+    Slice_u8 got = {0};
+
+    assert(ErrKindTooManyFiles ==
+           io.map_file(&io, path, FileOpenOptionsReadOnly, &got).kind);
+    assert(1 == ctx.open_calls);
+    assert(0 == ctx.file_size_calls);
+    // Nothing was opened, so nothing is closed.
+    assert(0 == ctx.close_calls);
+    assert(slice_u8_is_empty(got));
+  }
+
+  // The same for `write_all_to_file`.
+  {
+    TestFileCtx ctx = {.real = io_unix_make(),
+                       .open_fails_with = ErrOSKindPermission};
+    const IO io = test_io_file_make(&ctx);
+
+    assert(ErrOSKindPermission == io.write_all_to_file(&io, path, data).kind);
+    assert(0 == ctx.write_calls);
+    assert(0 == ctx.close_calls);
+  }
+
+  // Write the file for real, so there is something to map.
+  {
+    TestFileCtx ctx = {.real = io_unix_make()};
+    const IO io = test_io_file_make(&ctx);
+
+    assert(ErrKindNone == io.write_all_to_file(&io, path, data).kind);
+    assert(1 == ctx.write_calls);
+    assert(1 == ctx.close_calls);
+  }
+
+  // A failed `fstat` on a descriptor that just opened: unreachable with a
+  // real file, and it is the path that has to hand the descriptor back.
+  {
+    TestFileCtx ctx = {.real = io_unix_make(),
+                       .file_size_fails_with = ErrKindRange};
+    const IO io = test_io_file_make(&ctx);
+    Slice_u8 got = {0};
+
+    assert(ErrKindRange ==
+           io.map_file(&io, path, FileOpenOptionsReadOnly, &got).kind);
+    assert(1 == ctx.file_size_calls);
+    assert(1 == ctx.close_calls);
+    assert(slice_u8_is_empty(got));
+  }
+
+  // A short write keeps its place and goes around again until everything has
+  // landed. One byte at a time is the extreme case of it.
+  {
+    TestFileCtx ctx = {.real = io_unix_make(), .write_chunk = 1};
+    const IO io = test_io_file_make(&ctx);
+
+    assert(ErrKindNone == io.write_all_to_file(&io, path, data).kind);
+    assert(sizeof(payload) == ctx.write_calls);
+
+    const IO real = io_unix_make();
+    Slice_u8 got = {0};
+    assert(ErrKindNone ==
+           real.map_file(&real, path, FileOpenOptionsReadOnly, &got).kind);
+    assert(data.len == got.len);
+    assert(0 == memcmp(data.data, got.data, data.len));
+  }
+
+  // A signal before any progress is not a failure: the call is reissued and
+  // the same bytes go out.
+  {
+    TestFileCtx ctx = {
+        .real = io_unix_make(), .write_chunk = 2, .write_interrupted_at = 2};
+    const IO io = test_io_file_make(&ctx);
+
+    assert(ErrKindNone == io.write_all_to_file(&io, path, data).kind);
+    // Four chunks of two, plus the interrupted call that carried nothing.
+    assert(5 == ctx.write_calls);
+
+    const IO real = io_unix_make();
+    Slice_u8 got = {0};
+    assert(ErrKindNone ==
+           real.map_file(&real, path, FileOpenOptionsReadOnly, &got).kind);
+    assert(data.len == got.len);
+    assert(0 == memcmp(data.data, got.data, data.len));
+  }
+
+  // A write that reports no progress and no error would spin forever, so it
+  // is treated as the peer hanging up.
+  {
+    TestFileCtx ctx = {.real = io_unix_make(), .write_zero_at = 1};
+    const IO io = test_io_file_make(&ctx);
+
+    assert(ErrKindConnReset == io.write_all_to_file(&io, path, data).kind);
+    assert(1 == ctx.write_calls);
+    // The descriptor is handed back even on the way out.
+    assert(1 == ctx.close_calls);
+  }
+
+  // A failed write reports, and still closes.
+  {
+    TestFileCtx ctx = {.real = io_unix_make(),
+                       .write_fails_with = ErrKindConnReset};
+    const IO io = test_io_file_make(&ctx);
+
+    assert(ErrKindConnReset == io.write_all_to_file(&io, path, data).kind);
+    assert(1 == ctx.close_calls);
+  }
+
+  assert(0 == unlink((const char *)path.data));
+}
+
 static void test(const char *filter) {
   const struct {
     const char *name;
@@ -6827,6 +7062,7 @@ static void test(const char *filter) {
        test_torrent_client_pool_exhaustion},
       {"io_syscall_failures", test_io_syscall_failures},
       {"torrent_make_dicts_oom", test_torrent_make_dicts_oom},
+      {"io_composites_mocked", test_io_composites_mocked},
       {"error_kind_to_cstr", test_error_kind_to_cstr},
       {"io_open_errors", test_io_open_errors},
       {"io_file_round_trip", test_io_file_round_trip},
@@ -6932,7 +7168,7 @@ int main(i32 argc, char *argv[]) {
     const Slice_u8 file_path = {.data = (u8 *)argv[2], .len = strlen(argv[2])};
     Slice_u8 input = {0};
 
-    Error err = io.map_file(io.ctx, file_path, FileOpenOptionsReadOnly, &input);
+    Error err = io.map_file(&io, file_path, FileOpenOptionsReadOnly, &input);
     if (ErrKindNone != err.kind) {
       error_print("failed to open file", err);
       return 1;
@@ -6960,7 +7196,7 @@ int main(i32 argc, char *argv[]) {
       return 1;
     }
 
-    err = io.write_all_to_file(io.ctx, torrent_file_path, torrent_file_data);
+    err = io.write_all_to_file(&io, torrent_file_path, torrent_file_data);
     if (ErrKindNone != err.kind) {
       error_print("failed to write torrent file", err);
       return 1;
@@ -6980,7 +7216,7 @@ int main(i32 argc, char *argv[]) {
 
     Slice_u8 input = {0};
 
-    Error err = io.map_file(io.ctx, file_path, FileOpenOptionsReadOnly, &input);
+    Error err = io.map_file(&io, file_path, FileOpenOptionsReadOnly, &input);
     if (ErrKindNone != err.kind) {
       error_print("failed to open file", err);
       return 1;
