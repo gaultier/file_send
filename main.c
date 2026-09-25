@@ -360,7 +360,7 @@ slice_u8_consume(Slice_u8 *slice, u8 expected) {
 
 __attribute__((warn_unused_result)) static Error
 path_with_ext(Slice_u8 path, Slice_u8 ext, Slice_u8 *dst, Arena *arena) {
-  if (!path.data || path.len) {
+  if (!path.data || 0 == path.len) {
     return (Error){.kind = ErrKindInvalidData};
   }
 
