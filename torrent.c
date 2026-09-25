@@ -1385,8 +1385,8 @@ torrent_validate_info_dict(BencodeValue info_dict) {
     return (Error){.kind = ErrKindInvalidData};
   }
 
-  for (usize i = 1; i < l.len; i += 2) {
-    const BencodeValue k = l.data[i * 2];
+  for (usize i = 0; i < l.len; i += 2) {
+    const BencodeValue k = l.data[i];
     // BencodeValue v = l.data[i * 2 + 1];
 
     if (BencodeKindString != k.kind) {
@@ -1394,7 +1394,7 @@ torrent_validate_info_dict(BencodeValue info_dict) {
     }
 
     if (i > 2) {
-      const BencodeValue prev_k = l.data[(i - 1) * 2];
+      const BencodeValue prev_k = l.data[i - 2];
       assert(BencodeKindString == prev_k.kind);
 
       if (slice_u8_cmp(prev_k.v.s, k.v.s) >= 0) {
