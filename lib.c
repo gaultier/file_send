@@ -845,3 +845,49 @@ encode_isize_base_10(isize n, Slice_u8 dst) {
 
   return 1 + digits;
 }
+
+typedef struct {
+  Slice_u8 container;
+  usize len;
+} StringBuffer;
+
+__attribute__((warn_unused_result)) static Error
+sb_make(usize cap, Arena *arena, StringBuffer *dst) {
+  assert(arena);
+  assert(dst);
+
+  u8 *alloc = arena_alloc(arena, __alignof__(u8), sizeof(u8), cap);
+  if (!alloc) {
+    return (Error){.kind = ErrKindOOM};
+  }
+
+  dst->container.data = alloc;
+  dst->container.len = cap;
+  dst->len = 0;
+
+  return (Error){.kind = ErrKindNone};
+}
+
+__attribute__((warn_unused_result)) static usize sb_space(StringBuffer sb) {
+  assert(sb.len <= sb.container.len);
+
+  return sb.container.len - sb.len;
+}
+
+__attribute__((warn_unused_result)) static bool
+sb_extend_within_cap(StringBuffer *sb, Slice_u8 s) {
+  assert(sb);
+
+  if (!s.data || 0 == s.len) {
+    return true;
+  }
+
+  if (sb_space(*sb) < s.len) {
+    return false;
+  }
+
+  memcpy(sb->container.data + sb->len, s.data, s.len);
+  assert(!__builtin_add_overflow(sb->len, s.len, &sb->len));
+
+  return true;
+}

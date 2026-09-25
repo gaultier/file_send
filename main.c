@@ -42,7 +42,14 @@ int main(i32 argc, char *argv[]) {
       }
     }
     {
-      const u8 msg[] = "Hello!";
+
+      const u8 msg[] = "BT-SEARCH * HTTP/1.1\r\n"
+                       "Host: <host>\r\n"
+                       "Port: <port>\r\n"
+                       "Infohash: <ihash>\r\n"
+                       "cookie: <cookie (optional)>\r\n"
+                       "\r\n"
+                       "\r\n";
       usize sent = 0;
       const Ipv4Addr lsd_addr = {
           .ip = 0xefc0988fUL, // 239.192.152.143
