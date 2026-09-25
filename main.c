@@ -5358,10 +5358,12 @@ end:
 __attribute__((warn_unused_result)) static Error
 torrent_gen_torrent_file_data(Slice_u8 file_path, Slice_u8 file_data,
                               Slice_u8 announce_url, Slice_u8 *dst_torrent,
-                              Arena *arena) {
+                              u8 dst_info_hash[SHA256_DIGEST_LENGTH],
+                              Arena scratch, Arena *arena) {
   // TODO: Consider passing a scratch arena for some allocations.
 
   assert(dst_torrent);
+  assert(dst_info_hash);
   assert(arena);
 
   Error err = {0};
@@ -5374,22 +5376,24 @@ torrent_gen_torrent_file_data(Slice_u8 file_path, Slice_u8 file_data,
   Slice_u8 pieces_root = {0};
   err = torrent_make_info_dict_v2(file_name, TORRENT_BLOCK_SIZE * 16, file_data,
                                   file_name, &info_dict, &pieces_root,
-                                  &piece_hashes, &piece_hashes_count, arena);
+                                  &piece_hashes, &piece_hashes_count, &scratch);
 
   if (ErrKindNone != err.kind) {
     return err;
   }
 
   Slice_u8 info_dict_encoded = {0};
-  err = bencode_encode(info_dict, &info_dict_encoded, arena);
+  err = bencode_encode(info_dict, &info_dict_encoded, &scratch);
   if (ErrKindNone != err.kind) {
     return err;
   }
 
+  sha256_digest(info_dict_encoded, dst_info_hash);
+
   BencodeValue metainfo_dict = {0};
   err = torrent_make_metainfo_dict_v2(
       pieces_root, announce_url, info_dict.v.list, piece_hashes,
-      piece_hashes_count, &metainfo_dict, arena);
+      piece_hashes_count, &metainfo_dict, &scratch);
   if (ErrKindNone != err.kind) {
     return err;
   }
@@ -5454,6 +5458,9 @@ int main(i32 argc, char *argv[]) {
   Arena arena = {0};
   assert(ErrKindNone == arena_valloc(arena_cap, &arena).kind);
 
+  Arena scratch = {0};
+  assert(ErrKindNone == arena_valloc(1 * MiB, &scratch).kind);
+
   if (0 == strcmp(cmd, "test")) {
     test(argc > 2 ? argv[2] : NULL);
   } else if (0 == strcmp(cmd, "broadcast")) {
@@ -5497,8 +5504,10 @@ int main(i32 argc, char *argv[]) {
         slice_u8_make(announce_url_cstr, sizeof(announce_url_cstr) - 1);
 
     Slice_u8 torrent_file_data = {0};
+    u8 info_hash[SHA256_DIGEST_LENGTH] = {0};
     err = torrent_gen_torrent_file_data(file_path, input, announce_url,
-                                        &torrent_file_data, &arena);
+                                        &torrent_file_data, info_hash, scratch,
+                                        &arena);
     if (ErrKindNone != err.kind) {
       error_print("failed to generate torrent file data", err);
       return 1;
