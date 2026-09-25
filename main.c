@@ -4950,9 +4950,9 @@ static void test(const char *filter) {
 
 typedef struct {
   void *ctx;
-  Ipv4Addr addr;
-  i32 socket;
   const IO *io;
+  i32 socket;
+  Ipv4Addr addr;
   // More: torrent, etc.
 } TorrentClientHandleCtx;
 
@@ -4962,12 +4962,14 @@ typedef u64 PoolSlotGroup;
 
 // Unit is bits.
 #define POOL_SLOTS_PER_GROUP (sizeof(PoolSlotGroup) * 8)
+_Static_assert(0 == (TORRENT_CLIENTS_MAX % POOL_SLOTS_PER_GROUP),
+               "must be a multiple");
 
 #define POOL_SLOT_GROUPS (TORRENT_CLIENTS_MAX / POOL_SLOTS_PER_GROUP)
 
 typedef struct {
   // Bitset.
-  // Bit `i` of group `g` means: `slots[g & POOL_SLOTS_PER_GROUP + i]` is
+  // Bit `i` of group `g` means: `slots[g * POOL_SLOTS_PER_GROUP + i]` is
   // occupied.
   PoolSlotGroup occupied[POOL_SLOT_GROUPS];
   TorrentClientHandleCtx slots[TORRENT_CLIENTS_MAX];
@@ -4978,6 +4980,8 @@ torrent_client_ctx_pool_acquire(TorrentClientHandleCtxPool *pool) {
   assert(pool);
 
   for (usize i = 0; i < POOL_SLOT_GROUPS; i++) {
+    // 'Relaxed' means that we sometimes can report the slot group as full when
+    // it's not.
     const PoolSlotGroup slot_group =
         __atomic_load_n(&pool->occupied[i], __ATOMIC_RELAXED);
 
@@ -4989,10 +4993,10 @@ torrent_client_ctx_pool_acquire(TorrentClientHandleCtxPool *pool) {
     }
 
     const u32 bit_idx = (u32)(first_unset_bit - 1);
-    const u64 mask = 1ULL << bit_idx;
+    const PoolSlotGroup mask = 1ULL << bit_idx;
 
     // Mark the slot as occupied.
-    const u64 prev =
+    const PoolSlotGroup prev =
         __atomic_fetch_or(&pool->occupied[i], mask, __ATOMIC_ACQUIRE);
 
     // Since there is only one concurrent caller of 'pool_acquire' no
@@ -5000,17 +5004,23 @@ torrent_client_ctx_pool_acquire(TorrentClientHandleCtxPool *pool) {
     // of this loop iteration.
     assert(0 == (prev & mask));
 
-    const usize slot_idx = i * sizeof(PoolSlotGroup) + bit_idx;
+    const usize slot_idx = i * POOL_SLOTS_PER_GROUP + bit_idx;
     assert(slot_idx < TORRENT_CLIENTS_MAX);
-    return &pool->slots[slot_idx];
+
+    TorrentClientHandleCtx *res = &pool->slots[slot_idx];
+    assert(0 == res->ctx);
+    assert(0 == res->io);
+    assert(0 == res->socket);
+    assert(0 == res->addr.ip);
+    assert(0 == res->addr.port);
+    return res;
   }
 
   return NULL;
 }
 
-__attribute__((warn_unused_result)) static TorrentClientHandleCtx *
-torrent_client_ctx_pool_release(TorrentClientHandleCtxPool *pool,
-                                TorrentClientHandleCtx *slot) {
+static void torrent_client_ctx_pool_release(TorrentClientHandleCtxPool *pool,
+                                            TorrentClientHandleCtx *slot) {
   assert(pool);
   assert(slot);
 
@@ -5018,30 +5028,19 @@ torrent_client_ctx_pool_release(TorrentClientHandleCtxPool *pool,
   const usize slot_idx = (usize)(slot - pool->slots);
   assert(slot_idx < TORRENT_CLIENTS_MAX);
 
-  const u64 slot_group_idx = slot_idx * POOL_SLOTS_PER_GROUP;
+  const usize slot_group_idx = slot_idx / POOL_SLOTS_PER_GROUP;
   assert(slot_group_idx < POOL_SLOT_GROUPS);
   const u32 bit_idx = slot_idx % POOL_SLOTS_PER_GROUP;
 
   // We are still the owner so we are responsible for zeroing it.
   memset(slot, 0, sizeof(*slot));
 
-  for (;;) {
-    const u64 mask = ~(1ULL << bit_idx);
-    const u64 prev = __atomic_fetch_and(&pool->occupied[slot_group_idx], mask,
-                                        __ATOMIC_RELEASE);
+  const PoolSlotGroup mask = ~(1ULL << bit_idx);
+  const PoolSlotGroup prev = __atomic_fetch_and(&pool->occupied[slot_group_idx],
+                                                mask, __ATOMIC_RELEASE);
 
-    const bool concurrently_written = 0 == (prev & mask);
-
-    // Done?
-    if (!concurrently_written) {
-      break;
-    }
-
-    // Retry.
-    usleep(1);
-  }
-
-  return NULL;
+  // Sanity check: the slot was indeed marked as not occupied.
+  assert(prev & mask);
 }
 
 static void *torrent_client_handle(void *vctx) {
