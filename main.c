@@ -366,7 +366,6 @@ path_with_ext(Slice_u8 path, Slice_u8 ext, Slice_u8 *dst, Arena *arena) {
 
   assert(ext.data);
   assert(ext.len > 0);
-  assert(dst->data);
 
   for (usize i = path.len; i > 0; i--) {
     u8 c = path.data[i - 1];
