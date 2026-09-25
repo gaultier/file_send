@@ -5937,7 +5937,7 @@ int main(i32 argc, char *argv[]) {
     const Slice_u8 file_path = slice_u8_from_cstr(argv[2]);
 
     const Slice_u8 file_ext = path_get_ext(file_path);
-    if (!slice_u8_eq_cstr(file_ext, "torrent")) {
+    if (!slice_u8_eq_cstr(file_ext, ".torrent")) {
       fprintf(stderr, "provided file is not a .torrent file: %s\n", argv[2]);
       return 1;
     }
