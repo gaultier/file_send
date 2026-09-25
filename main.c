@@ -4990,8 +4990,15 @@ torrent_client_ctx_pool_acquire(TorrentClientHandleCtxPool *pool) {
 
     const u32 bit = (u32)(first_unset_bit - 1);
     const u64 mask = 1ULL << bit;
+
+    // Mark the slot as occupied.
     const u64 prev =
         __atomic_fetch_or(&pool->occupied[i], mask, __ATOMIC_ACQUIRE);
+
+    // Since there is only one concurrent caller of 'pool_acquire' no
+    // one could have concurrently acquired the slot that was free at the start
+    // of this loop iteration.
+    assert(0 == (prev & mask));
 
     const usize slot_idx = i * sizeof(PoolSlotGroup) + bit;
     assert(slot_idx < TORRENT_CLIENTS_MAX);
@@ -5007,7 +5014,9 @@ torrent_client_ctx_pool_release(TorrentClientHandleCtxPool *pool,
   assert(pool);
   assert(slot);
 
-  // TODO
+  assert(slot >= pool->slots);
+  const usize slot_idx = (usize)(slot - pool->slots);
+  assert(slot_idx < TORRENT_CLIENTS_MAX);
 
   return NULL;
 }
