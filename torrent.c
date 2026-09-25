@@ -1343,11 +1343,30 @@ torrent_make_udp_broadcast_message(Slice_u8 url, u16 port, Slice_u8 info_hash,
 
   assert(sb_extend_within_cap(&sb, info_hash));
 
+  // Three CRLFs after the cookie value, not two: the one that ends the header
+  // line, then the blank line that ends the block, then one more. That is what
+  // libtorrent 2.1 puts on the wire, captured from the group:
+  //
+  //   ...Infohash: 363b69d6...\r\ncookie: 58eac522\r\n\r\n\r\n
   assert(sb_extend_within_cap(&sb, slice_u8_from_cstr("\r\n"
                                                       "cookie: fixme\r\n"
+                                                      "\r\n"
                                                       "\r\n")));
 
   *dst = slice_u8_take(sb.container, sb.len);
 
   return (Error){.kind = ErrKindNone};
+}
+
+__attribute__((warn_unused_result)) static BencodeList /* Actually a dict */ *
+torrent_find_info_dict_in_metainfo(BencodeValue metainfo) {
+  for (usize i = 1; i < metainfo.v.list.len; i += 2) {
+    BencodeValue *const k = &metainfo.v.list.data[i - 1];
+    BencodeValue *const v = &metainfo.v.list.data[i];
+    if (BencodeKindString == k->kind && slice_u8_eq_cstr(k->v.s, "info") &&
+        BencodeKindDict == v->kind) {
+      return &v->v.list;
+    }
+  }
+  return NULL;
 }

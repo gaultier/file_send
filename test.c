@@ -37,6 +37,25 @@ test_slice(const char *input) {
   return slice_u8_make((u8 *)input, strlen(input));
 }
 
+// Is `needle` present in `haystack`? `memmem` is not C99, and an empty needle
+// is not a question this asks.
+__attribute__((warn_unused_result)) static bool
+test_slice_contains(Slice_u8 haystack, Slice_u8 needle) {
+  assert(!slice_u8_is_empty(needle));
+
+  if (needle.len > haystack.len) {
+    return false;
+  }
+
+  for (usize i = 0; i + needle.len <= haystack.len; i++) {
+    if (0 == memcmp(haystack.data + i, needle.data, needle.len)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 static void test_char_is_digit_ascii(void) {
   assert(char_is_digit_ascii('0'));
   assert(char_is_digit_ascii('5'));
@@ -2867,6 +2886,168 @@ static void test_encode_isize_base_10_round_trip(void) {
 }
 
 // ---------------------------------------------------------------------------
+// torrent_make_udp_broadcast_message
+// ---------------------------------------------------------------------------
+
+// The 40 hex characters of a truncated v2 info hash. This one is real: it is
+// the digest of the info dict of a torrent this program generated, and
+// libtorrent reports the same string for that file.
+#define TEST_LSD_INFOHASH "363b69d66ad2d57cbd51c2f27156aef8d0e68a70"
+
+static void test_torrent_make_udp_broadcast_message(void) {
+  // The exact bytes. The expected message is not invented here: it is the shape
+  // libtorrent 2.1 sends, captured off the 239.192.152.143:6771 group, with
+  // only the cookie value differing.
+  //
+  //   BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nPort: 6881\r\n
+  //   Infohash: 363b69d6...\r\ncookie: 58eac522\r\n\r\n\r\n
+  //
+  // `Host` carries the multicast group the datagram goes to, `Port` the port
+  // this peer listens on, so the two port numbers are different on purpose.
+  {
+    Arena arena = test_arena(4 * KiB);
+
+    Slice_u8 msg = {0};
+    assert(ErrKindNone ==
+           torrent_make_udp_broadcast_message(
+               test_slice("239.192.152.143:6771"), 6881,
+               test_slice(TEST_LSD_INFOHASH), &arena, &msg)
+               .kind);
+
+    const char *const expected = "BT-SEARCH * HTTP/1.1\r\n"
+                                 "Host: 239.192.152.143:6771\r\n"
+                                 "Port: 6881\r\n"
+                                 "Infohash: " TEST_LSD_INFOHASH "\r\n"
+                                 "cookie: fixme\r\n"
+                                 "\r\n"
+                                 "\r\n";
+    assert(slice_u8_eq_cstr(msg, expected));
+    assert(strlen(expected) == msg.len);
+  }
+
+  // The header block ends with three CRLFs after the cookie value, and the
+  // request line is a `BT-SEARCH`, not a `GET`. Spelled out separately so a
+  // change to either fails with an obvious reason rather than as one long
+  // string mismatch.
+  {
+    Arena arena = test_arena(4 * KiB);
+
+    Slice_u8 msg = {0};
+    assert(ErrKindNone == torrent_make_udp_broadcast_message(
+                              test_slice("239.192.152.143:6771"), 6881,
+                              test_slice(TEST_LSD_INFOHASH), &arena, &msg)
+                              .kind);
+
+    const Slice_u8 first_line = slice_u8_take(msg, 22);
+    assert(slice_u8_eq_cstr(first_line, "BT-SEARCH * HTTP/1.1\r\n"));
+
+    assert(msg.len >= 6);
+    const Slice_u8 tail = {.data = msg.data + msg.len - 6, .len = 6};
+    assert(slice_u8_eq_cstr(tail, "\r\n\r\n\r\n"));
+  }
+
+  // The port is written as decimal digits, at both ends of a `u16`.
+  {
+    const struct {
+      u16 port;
+      const char *expected_line;
+    } cases[] = {
+        {0, "\r\nPort: 0\r\n"},
+        {1, "\r\nPort: 1\r\n"},
+        {6881, "\r\nPort: 6881\r\n"},
+        // The widest a `u16` gets, which is what the capacity has to allow for.
+        {65535, "\r\nPort: 65535\r\n"},
+    };
+
+    for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+      Arena arena = test_arena(4 * KiB);
+
+      Slice_u8 msg = {0};
+      assert(ErrKindNone == torrent_make_udp_broadcast_message(
+                                test_slice("host"), cases[i].port,
+                                test_slice(TEST_LSD_INFOHASH), &arena, &msg)
+                                .kind);
+
+      assert(test_slice_contains(msg, test_slice(cases[i].expected_line)));
+    }
+  }
+
+  // The capacity is `128 + url.len`, so a long host has to fit rather than trip
+  // one of the `assert`s inside: every append is asserted, so an overflow would
+  // abort the process instead of coming back as an error.
+  {
+    Arena arena = test_arena(64 * KiB);
+
+    u8 long_url[512] = {0};
+    memset(long_url, 'h', sizeof(long_url));
+    const Slice_u8 url = slice_u8_make(long_url, sizeof(long_url));
+
+    Slice_u8 msg = {0};
+    assert(ErrKindNone == torrent_make_udp_broadcast_message(
+                              url, 65535, test_slice(TEST_LSD_INFOHASH),
+                              &arena, &msg)
+                              .kind);
+
+    assert(test_slice_contains(msg, url));
+    // Everything the message holds besides the host name.
+    assert(msg.len == sizeof(long_url) + strlen("BT-SEARCH * HTTP/1.1\r\n"
+                                                "Host: \r\nPort: 65535\r\n"
+                                                "Infohash: " TEST_LSD_INFOHASH
+                                                "\r\ncookie: fixme\r\n\r\n\r\n"));
+  }
+
+  // An empty host and an empty info hash: `sb_extend_within_cap` takes an empty
+  // slice as a no-op, so the message is still well formed, just missing those
+  // two values.
+  {
+    Arena arena = test_arena(4 * KiB);
+
+    Slice_u8 msg = {0};
+    assert(ErrKindNone == torrent_make_udp_broadcast_message(
+                              slice_u8_make(NULL, 0), 6881,
+                              slice_u8_make(NULL, 0), &arena, &msg)
+                              .kind);
+
+    assert(slice_u8_eq_cstr(msg, "BT-SEARCH * HTTP/1.1\r\n"
+                                 "Host: \r\n"
+                                 "Port: 6881\r\n"
+                                 "Infohash: \r\n"
+                                 "cookie: fixme\r\n"
+                                 "\r\n"
+                                 "\r\n"));
+  }
+
+  // Out of arena: reported, and `*dst` is left as the caller had it.
+  {
+    Arena arena = test_arena(8);
+
+    Slice_u8 msg = {.data = (u8 *)&arena, .len = 123};
+    assert(ErrKindOOM == torrent_make_udp_broadcast_message(
+                             test_slice("239.192.152.143:6771"), 6881,
+                             test_slice(TEST_LSD_INFOHASH), &arena, &msg)
+                             .kind);
+
+    assert((u8 *)&arena == msg.data);
+    assert(123 == msg.len);
+  }
+
+  // The message is built in the arena it was handed, and the arena advanced.
+  {
+    Arena arena = test_arena(4 * KiB);
+    const u8 *const before = arena.start;
+
+    Slice_u8 msg = {0};
+    assert(ErrKindNone == torrent_make_udp_broadcast_message(
+                              test_slice("host"), 1, test_slice("aa"), &arena,
+                              &msg)
+                              .kind);
+
+    assert(msg.data >= before);
+    assert(arena.start > before);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // StringBuffer
 // ---------------------------------------------------------------------------
 
@@ -3397,25 +3578,6 @@ static void test_digests_from_hex(const char *hex, Slice_u8 dst) {
     memcpy(one, hex + i * 2 * SHA256_DIGEST_LENGTH, 2 * SHA256_DIGEST_LENGTH);
     test_digest_from_hex(one, dst.data + i * SHA256_DIGEST_LENGTH);
   }
-}
-
-// Is `needle` present in `haystack`? `memmem` is not C99, and an empty needle
-// is not a question this asks.
-__attribute__((warn_unused_result)) static bool
-test_slice_contains(Slice_u8 haystack, Slice_u8 needle) {
-  assert(!slice_u8_is_empty(needle));
-
-  if (needle.len > haystack.len) {
-    return false;
-  }
-
-  for (usize i = 0; i + needle.len <= haystack.len; i++) {
-    if (0 == memcmp(haystack.data + i, needle.data, needle.len)) {
-      return true;
-    }
-  }
-
-  return false;
 }
 
 // One case of `torrent_make_metainfo_dict_v2`: build the info dict for a file
@@ -4430,6 +4592,8 @@ static void test(const char *filter) {
       {"encode_isize_base_10", test_encode_isize_base_10},
       {"encode_isize_base_10_exact_fit", test_encode_isize_base_10_exact_fit},
       {"encode_isize_base_10_round_trip", test_encode_isize_base_10_round_trip},
+      {"torrent_make_udp_broadcast_message",
+       test_torrent_make_udp_broadcast_message},
       {"sb_make", test_sb_make},
       {"sb_extend_within_cap", test_sb_extend_within_cap},
       {"sb_append_usize_within_cap", test_sb_append_usize_within_cap},
