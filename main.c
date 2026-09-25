@@ -153,21 +153,24 @@ int main(i32 argc, char *argv[]) {
       }
     }
 
+    const usize peer_port = 12346;
+
     Slice_u8 udp_msg = {0};
     err = torrent_make_udp_broadcast_message(
-        slice_u8_from_cstr("239.192.152.143"), 12345, info_hash_hex_trunc_slice,
-        &arena, &udp_msg);
+        slice_u8_from_cstr("239.192.152.143:12345" /* tracker port */),
+        peer_port, info_hash_hex_trunc_slice, &arena, &udp_msg);
     if (ErrKindNone != err.kind) {
       error_print("failed to craft UDP multicast message", err);
       return 1;
     }
 
     fwrite(udp_msg.data, 1, udp_msg.len, stdout);
+    puts("");
 
     usize sent = 0;
     const Ipv4Addr lsd_addr = {
         .ip = 0xefc0988fUL, // 239.192.152.143
-        .port = 6771,
+        .port = 6771,       // Broadcast port.
     };
 
     Error err_sendto =
@@ -177,7 +180,7 @@ int main(i32 argc, char *argv[]) {
       return 1;
     }
 
-    const Ipv4Addr listen_addr = {.port = 12345, .ip = 0};
+    const Ipv4Addr listen_addr = {.port = peer_port, .ip = 0};
     TorrentNetworkCtx ctx = {0};
     Error err_listen = io_listen_and_serve_tcp_ipv4(&io, &ctx, listen_addr,
                                                     torrent_client_on_accept);
