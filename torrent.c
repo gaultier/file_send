@@ -1387,7 +1387,6 @@ torrent_validate_info_dict(BencodeValue info_dict) {
 
   for (usize i = 0; i < l.len; i += 2) {
     const BencodeValue k = l.data[i];
-    // BencodeValue v = l.data[i * 2 + 1];
 
     if (BencodeKindString != k.kind) {
       return (Error){.kind = ErrKindInvalidData};
