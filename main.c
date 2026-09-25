@@ -4958,18 +4958,36 @@ typedef struct {
 
 #define TORRENT_CLIENTS_MAX 1024
 
+typedef u64 PoolSlotGroup;
+
+// Unit is bits.
+#define POOL_SLOTS_PER_GROUP (sizeof(PoolSlotGroup) * 8)
+
+#define POOL_SLOT_GROUPS (TORRENT_CLIENTS_MAX / POOL_SLOTS_PER_GROUP)
+
 typedef struct {
   // Bitset.
-  u64 occupied[TORRENT_CLIENTS_MAX / 64];
-
+  // Bit `i` of group `g` means: `slots[g & POOL_SLOTS_PER_GROUP + i]` is
+  // occupied.
+  PoolSlotGroup occupied[POOL_SLOT_GROUPS];
   TorrentClientHandleCtx slots[TORRENT_CLIENTS_MAX];
 } TorrentClientHandleCtxPool;
 
 __attribute__((warn_unused_result)) static TorrentClientHandleCtx *
-torrent_client_ctx_pool_alloc(TorrentClientHandleCtxPool *pool) {
+torrent_client_ctx_pool_acquire(TorrentClientHandleCtxPool *pool) {
   assert(pool);
 
-  // TODO
+  for (usize i = 0; i < POOL_SLOT_GROUPS; i++) {
+    const PoolSlotGroup slot_group =
+        __atomic_load_n(&pool->occupied[i], __ATOMIC_RELAXED);
+
+    const u64 slot_full = ~0ULL;
+
+    // Slot full, keep scanning to find a free slot?
+    if (slot_full == slot_group) {
+      continue;
+    }
+  }
 
   return NULL;
 }
