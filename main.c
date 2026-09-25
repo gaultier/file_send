@@ -5230,7 +5230,7 @@ int main(i32 argc, char *argv[]) {
     Error err_listen = io_listen_and_serve_tcp_ipv4(&io, &ctx, listen_addr,
                                                     torrent_client_on_accept);
     if (ErrNone != err_listen) {
-      fprintf(stderr, "failed to lsiten and serve: %d\n", err_listen);
+      fprintf(stderr, "failed to listen and serve: %d\n", err_listen);
     }
 
     const usize unused_bytes = (usize)arena.end - (usize)arena.start;
