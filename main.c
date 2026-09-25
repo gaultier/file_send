@@ -5183,15 +5183,41 @@ torrent_client_on_accept(const IO *io, void *vctx, Ipv4Addr accept_addr,
 }
 
 int main(i32 argc, char *argv[]) {
-  assert(argc >= 2);
   assert(argv);
 
   const IO io = io_unix_make();
 
-  const char *const cmd = argv[1];
+  const char *const cmd = 2 == argc ? argv[1] : "";
   const usize arena_cap = 32 * MiB;
   Arena arena = {0};
   assert(ErrNone == arena_valloc(arena_cap, &arena));
+
+  {
+    i32 udp_socket = 0;
+    {
+      Error err_udp = unix_udp_multicast_open_ipv4(NULL, 0, &udp_socket);
+      if (ErrNone != err_udp) {
+        fprintf(stderr, "failed to open UDP multicast socket: %d\n", err_udp);
+        return 1;
+      }
+    }
+    {
+      const u8 msg[] = "Hello!";
+      usize sent = 0;
+      const Ipv4Addr lsd_addr = {
+          .ip = 0xefc0988fUL, // 239.192.152.143
+          .port = 6771,
+      };
+
+      Error err_sendto = unix_udp_send_to_ipv4(NULL, udp_socket, lsd_addr, msg,
+                                               sizeof(msg), &sent);
+      if (ErrNone != err_sendto) {
+        fprintf(stderr, "failed to send UDP multicast message: %d\n",
+                err_sendto);
+        return 1;
+      }
+    }
+  }
 
   if (0 == strcmp(cmd, "test")) {
     test(argc > 2 ? argv[2] : NULL);
@@ -5282,31 +5308,6 @@ int main(i32 argc, char *argv[]) {
                                                metainfo_dict_encoded.len,
                                                stdout));
     puts("");
-
-    i32 udp_socket = 0;
-    {
-      Error err_udp = unix_udp_multicast_open_ipv4(NULL, 0, &udp_socket);
-      if (ErrNone != err_udp) {
-        fprintf(stderr, "failed to open UDP multicast socket: %d\n", err_udp);
-        return 1;
-      }
-    }
-    {
-      const u8 msg[] = "Hello!";
-      usize sent = 0;
-      const Ipv4Addr lsd_addr = {
-          .ip = 0xefc0988fUL, // 239.192.152.143
-          .port = 6771,
-      };
-
-      Error err_sendto = unix_udp_send_to_ipv4(NULL, udp_socket, lsd_addr, msg,
-                                               sizeof(msg), &sent);
-      if (ErrNone != err_sendto) {
-        fprintf(stderr, "failed to send UDP multicast message: %d\n",
-                err_sendto);
-        return 1;
-      }
-    }
 
     const Ipv4Addr listen_addr = {.port = 12345, .ip = 0};
     TorrentNetworkCtx ctx = {0};
