@@ -565,12 +565,10 @@ struct IO {
 #include "unix.c"
 
 typedef Error (*AcceptCallback)(const IO *io, void *cb_ctx,
-                                Ipv4Addr accept_addr,
-                                i32 accept_socket);
+                                Ipv4Addr accept_addr, i32 accept_socket);
 
 __attribute__((warn_unused_result)) static Error
-io_listen_and_serve_tcp_ipv4(const IO *io, void *cb_ctx,
-                             Ipv4Addr listen_addr,
+io_listen_and_serve_tcp_ipv4(const IO *io, void *cb_ctx, Ipv4Addr listen_addr,
                              AcceptCallback on_accept) {
   assert(io);
   assert(on_accept);
@@ -635,7 +633,8 @@ io_listen_and_serve_tcp_ipv4(const IO *io, void *cb_ctx,
 
     // `accept_socket` belongs to the callback from here on, including
     // closing it when the callback itself fails.
-    const Error err_on_accept = on_accept(io, cb_ctx, accept_addr, accept_socket);
+    const Error err_on_accept =
+        on_accept(io, cb_ctx, accept_addr, accept_socket);
     if (ErrKindNone != err_on_accept.kind) {
       error_print("failed to handle connection", err_on_accept);
     }
@@ -715,8 +714,7 @@ arena_valloc(const IO *io, usize bytes_count, Arena *res) {
   assert(arena_memory);
 
   assert(ErrKindNone ==
-         io->vprotect_none(io, arena_memory + usable_bytes, page_size)
-             .kind);
+         io->vprotect_none(io, arena_memory + usable_bytes, page_size).kind);
 
   // Right-align the arena against the guard page so that *any* write past
   // `arena.end` faults immediately, then round the start down to the
@@ -2559,7 +2557,7 @@ torrent_client_on_accept(const IO *io, void *vctx, Ipv4Addr accept_addr,
 int main(i32 argc, char *argv[]) {
   assert(argv);
 
-  const IO io = io_unix_make();
+  const IO io = io_make();
 
   const char *const cmd = argc >= 2 ? argv[1] : "";
   const usize arena_cap = 32 * MiB;

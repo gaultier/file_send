@@ -9,7 +9,7 @@
 // struct. Poison it so such a read shows up as an obviously bogus value
 // instead.
 __attribute__((warn_unused_result)) static Arena test_arena(usize bytes_count) {
-  const IO io = io_unix_make();
+  const IO io = io_make();
   Arena arena = {0};
   assert(ErrKindNone == arena_valloc(&io, bytes_count, &arena).kind);
   assert(arena.start);
@@ -351,7 +351,7 @@ static void test_arena_valloc_mocked(void) {
 
   // A single byte still costs a whole page, plus a whole page of guard.
   {
-    TestIoCtx ctx = {.real = io_unix_make(), .page_size = page_size};
+    TestIoCtx ctx = {.real = io_make(), .page_size = page_size};
     const IO io = test_io_make(&ctx);
     Arena arena = {0};
 
@@ -373,7 +373,7 @@ static void test_arena_valloc_mocked(void) {
 
   // One byte past a page rounds up to two, so three pages are mapped.
   {
-    TestIoCtx ctx = {.real = io_unix_make(), .page_size = page_size};
+    TestIoCtx ctx = {.real = io_make(), .page_size = page_size};
     const IO io = test_io_make(&ctx);
     Arena arena = {0};
 
@@ -384,7 +384,7 @@ static void test_arena_valloc_mocked(void) {
 
   // An exact multiple is not rounded up past itself.
   {
-    TestIoCtx ctx = {.real = io_unix_make(), .page_size = page_size};
+    TestIoCtx ctx = {.real = io_make(), .page_size = page_size};
     const IO io = test_io_make(&ctx);
     Arena arena = {0};
 
@@ -395,7 +395,7 @@ static void test_arena_valloc_mocked(void) {
   // A failed mapping is reported, not asserted, and leaves the caller's arena
   // untouched. Nothing is protected either: there is no mapping to protect.
   {
-    TestIoCtx ctx = {.real = io_unix_make(),
+    TestIoCtx ctx = {.real = io_make(),
                      .page_size = page_size,
                      .alloc_fails_with = ErrKindOOM};
     const IO io = test_io_make(&ctx);
@@ -412,7 +412,7 @@ static void test_arena_valloc_mocked(void) {
   // real `mmap` can only be provoked into `ENOMEM`, so this is the only way
   // to check that the error travels verbatim.
   {
-    TestIoCtx ctx = {.real = io_unix_make(),
+    TestIoCtx ctx = {.real = io_make(),
                      .page_size = page_size,
                      .alloc_fails_with = ErrOSKindPermission};
     const IO io = test_io_make(&ctx);
@@ -431,7 +431,7 @@ static void test_arena_valloc_mocked(void) {
 // want quiet are exactly the ones running against a mock, and redirecting this
 // process's output is the harness's own business either way.
 __attribute__((warn_unused_result)) static i32 test_stdout_silence(void) {
-  const IO io = io_unix_make();
+  const IO io = io_make();
 
   i32 saved = -1;
   assert(ErrKindNone == io.stdout_silence(&io, &saved).kind);
@@ -440,7 +440,7 @@ __attribute__((warn_unused_result)) static i32 test_stdout_silence(void) {
 }
 
 static void test_stdout_restore(i32 saved) {
-  const IO io = io_unix_make();
+  const IO io = io_make();
 
   assert(ErrKindNone == io.stdout_restore(&io, saved).kind);
 }
@@ -484,7 +484,8 @@ typedef struct {
 } TestServerCtx;
 
 __attribute__((warn_unused_result)) static Error
-test_server_socket(const IO *io, SocketDomain domain, SocketType type, i32 *fd) {
+test_server_socket(const IO *io, SocketDomain domain, SocketType type,
+                   i32 *fd) {
   TestServerCtx *const c = io->ctx;
   assert(c);
   assert(fd);
@@ -559,7 +560,8 @@ test_server_accept(const IO *io, i32 listen_socket, i32 *dst_accept_socket,
   return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static Error test_server_close(const IO *io, i32 fd) {
+__attribute__((warn_unused_result)) static Error test_server_close(const IO *io,
+                                                                   i32 fd) {
   TestServerCtx *const c = io->ctx;
   assert(c);
   assert(fd > 0);
@@ -831,7 +833,7 @@ static void test_torrent_client_pool_exhaustion(void) {
 }
 
 static void test_arena_valloc(void) {
-  const IO io = io_unix_make();
+  const IO io = io_make();
 
   // A request the kernel cannot satisfy. `mmap` reports `MAP_FAILED`, not
   // NULL, so this also pins down that conversion, and that the `ENOMEM` it
@@ -2131,11 +2133,10 @@ test_merkle_data(Arena *arena) {
 // power of two number of blocks, and block counts needing one or several
 // padding leaves.
 static void test_torrent_merkle_vectors(void) {
-  const IO io = io_unix_make();
+  const IO io = io_make();
   Arena data_arena = {0};
-  assert(
-      ErrKindNone ==
-      arena_valloc(&io, TEST_MERKLE_MAX_LEN + 4 * KiB, &data_arena).kind);
+  assert(ErrKindNone ==
+         arena_valloc(&io, TEST_MERKLE_MAX_LEN + 4 * KiB, &data_arena).kind);
   assert(data_arena.start);
   const Slice_u8 data = test_merkle_data(&data_arena);
 
@@ -2198,11 +2199,10 @@ static void test_torrent_merkle_vectors(void) {
 // info dictionary. Checked against an independently built tree rather than
 // against the implementation's own intermediate state.
 static void test_torrent_merkle_piece_layer(void) {
-  const IO io = io_unix_make();
+  const IO io = io_make();
   Arena data_arena = {0};
-  assert(
-      ErrKindNone ==
-      arena_valloc(&io, TEST_MERKLE_MAX_LEN + 4 * KiB, &data_arena).kind);
+  assert(ErrKindNone ==
+         arena_valloc(&io, TEST_MERKLE_MAX_LEN + 4 * KiB, &data_arena).kind);
   assert(data_arena.start);
   const Slice_u8 data = test_merkle_data(&data_arena);
 
@@ -2293,7 +2293,7 @@ static void test_torrent_merkle_piece_layer(void) {
 // is zeroed. Everything above it is hashed normally, so a node covering
 // nothing but padding is emphatically not zero.
 static void test_torrent_merkle_padding(void) {
-  const IO io = io_unix_make();
+  const IO io = io_make();
   Arena data_arena = {0};
   assert(ErrKindNone == arena_valloc(&io, 64 * KiB, &data_arena).kind);
   assert(data_arena.start);
@@ -2394,7 +2394,7 @@ static void test_torrent_merkle_empty(void) {
 // The one failure path: an arena too small for the tree is reported, not
 // asserted, and leaves nothing half built behind.
 static void test_torrent_merkle_oom(void) {
-  const IO io = io_unix_make();
+  const IO io = io_make();
   Arena data_arena = {0};
   assert(ErrKindNone == arena_valloc(&io, 64 * KiB, &data_arena).kind);
   assert(data_arena.start);
@@ -3309,7 +3309,7 @@ static void test_sha256_neon_lengths(void) {
 // real filesystem whatever `io` the test under it happens to be driving.
 __attribute__((warn_unused_result)) static Error
 test_remove_file(Slice_u8 path) {
-  const IO io = io_unix_make();
+  const IO io = io_make();
 
   return io.remove_file(&io, path);
 }
@@ -3318,7 +3318,7 @@ test_remove_file(Slice_u8 path) {
 // collide with a stale file or with another run.
 __attribute__((warn_unused_result)) static Slice_u8
 test_tmp_path(char *buf, usize buf_len, const char *name) {
-  const IO io = io_unix_make();
+  const IO io = io_make();
 
   const char *const dir = getenv("TMPDIR");
   const i32 n = snprintf(buf, buf_len, "%s/file_send_test_%zu_%s",
@@ -3332,7 +3332,7 @@ test_tmp_path(char *buf, usize buf_len, const char *name) {
 // The failure paths of `open`, which are the ones a caller actually has to
 // handle: they are reached through the vtable like any other caller would.
 static void test_io_open_errors(void) {
-  const IO io = io_unix_make();
+  const IO io = io_make();
   i32 fd = -1;
 
   // An empty path is rejected before the syscall.
@@ -3372,7 +3372,7 @@ static void test_io_open_errors(void) {
 // are checked as one: against a real file, because a fake filesystem would
 // only be testing itself.
 static void test_io_file_round_trip(void) {
-  const IO io = io_unix_make();
+  const IO io = io_make();
 
   char buf[256] = {0};
   const Slice_u8 path = test_tmp_path(buf, sizeof(buf), "round_trip");
@@ -3595,7 +3595,7 @@ static void test_error_kind_to_cstr(void) {
 // that was never open is a cheaper way to make the OS say no than faking it,
 // and it exercises the real `errno` mapping rather than a fake's idea of it.
 static void test_io_syscall_failures(void) {
-  const IO io = io_unix_make();
+  const IO io = io_make();
 
   // `fstat` on a descriptor that was never open.
   {
@@ -3671,10 +3671,10 @@ static void test_torrent_make_dicts_oom(void) {
   Slice_u8 pieces_root = {0};
   PieceHash *piece_hashes = NULL;
   usize piece_hashes_count = 0;
-  assert(ErrKindNone == torrent_make_info_dict_v2(
-                            name, TORRENT_BLOCK_SIZE * 16, file_data, name,
-                            &info_dict, &pieces_root, &piece_hashes,
-                            &piece_hashes_count, &big)
+  assert(ErrKindNone == torrent_make_info_dict_v2(name, TORRENT_BLOCK_SIZE * 16,
+                                                  file_data, name, &info_dict,
+                                                  &pieces_root, &piece_hashes,
+                                                  &piece_hashes_count, &big)
                             .kind);
   assert(piece_hashes_count > 1);
 
@@ -3686,10 +3686,9 @@ static void test_torrent_make_dicts_oom(void) {
     PieceHash *hashes = NULL;
     usize hashes_count = 0;
 
-    const Error err =
-        torrent_make_info_dict_v2(name, TORRENT_BLOCK_SIZE * 16, file_data,
-                                  name, &dict, &root, &hashes, &hashes_count,
-                                  &arena);
+    const Error err = torrent_make_info_dict_v2(name, TORRENT_BLOCK_SIZE * 16,
+                                                file_data, name, &dict, &root,
+                                                &hashes, &hashes_count, &arena);
     if (ErrKindNone != err.kind) {
       assert(ErrKindOOM == err.kind);
       info_ooms += 1;
@@ -3801,9 +3800,9 @@ test_file_write(const IO *io, i32 fd, Slice_u8 data, usize *dst_written) {
     return (Error){.kind = ErrKindNone};
   }
 
-  const usize chunk =
-      (0 != c->write_chunk && c->write_chunk < data.len) ? c->write_chunk
-                                                         : data.len;
+  const usize chunk = (0 != c->write_chunk && c->write_chunk < data.len)
+                          ? c->write_chunk
+                          : data.len;
   return c->real.write(&c->real, fd, slice_u8_take(data, chunk), dst_written);
 }
 
@@ -3835,7 +3834,7 @@ static void test_io_composites_mocked(void) {
 
   // A failed `open` stops `map_file` before anything else is tried.
   {
-    TestFileCtx ctx = {.real = io_unix_make(),
+    TestFileCtx ctx = {.real = io_make(),
                        .open_fails_with = ErrKindTooManyFiles};
     const IO io = test_io_file_make(&ctx);
     Slice_u8 got = {0};
@@ -3851,7 +3850,7 @@ static void test_io_composites_mocked(void) {
 
   // The same for `write_all_to_file`.
   {
-    TestFileCtx ctx = {.real = io_unix_make(),
+    TestFileCtx ctx = {.real = io_make(),
                        .open_fails_with = ErrOSKindPermission};
     const IO io = test_io_file_make(&ctx);
 
@@ -3862,7 +3861,7 @@ static void test_io_composites_mocked(void) {
 
   // Write the file for real, so there is something to map.
   {
-    TestFileCtx ctx = {.real = io_unix_make()};
+    TestFileCtx ctx = {.real = io_make()};
     const IO io = test_io_file_make(&ctx);
 
     assert(ErrKindNone == io.write_all_to_file(&io, path, data).kind);
@@ -3873,8 +3872,7 @@ static void test_io_composites_mocked(void) {
   // A failed `fstat` on a descriptor that just opened: unreachable with a
   // real file, and it is the path that has to hand the descriptor back.
   {
-    TestFileCtx ctx = {.real = io_unix_make(),
-                       .file_size_fails_with = ErrKindRange};
+    TestFileCtx ctx = {.real = io_make(), .file_size_fails_with = ErrKindRange};
     const IO io = test_io_file_make(&ctx);
     Slice_u8 got = {0};
 
@@ -3888,13 +3886,13 @@ static void test_io_composites_mocked(void) {
   // A short write keeps its place and goes around again until everything has
   // landed. One byte at a time is the extreme case of it.
   {
-    TestFileCtx ctx = {.real = io_unix_make(), .write_chunk = 1};
+    TestFileCtx ctx = {.real = io_make(), .write_chunk = 1};
     const IO io = test_io_file_make(&ctx);
 
     assert(ErrKindNone == io.write_all_to_file(&io, path, data).kind);
     assert(sizeof(payload) == ctx.write_calls);
 
-    const IO real = io_unix_make();
+    const IO real = io_make();
     Slice_u8 got = {0};
     assert(ErrKindNone ==
            real.map_file(&real, path, FileOpenOptionsReadOnly, &got).kind);
@@ -3906,14 +3904,14 @@ static void test_io_composites_mocked(void) {
   // the same bytes go out.
   {
     TestFileCtx ctx = {
-        .real = io_unix_make(), .write_chunk = 2, .write_interrupted_at = 2};
+        .real = io_make(), .write_chunk = 2, .write_interrupted_at = 2};
     const IO io = test_io_file_make(&ctx);
 
     assert(ErrKindNone == io.write_all_to_file(&io, path, data).kind);
     // Four chunks of two, plus the interrupted call that carried nothing.
     assert(5 == ctx.write_calls);
 
-    const IO real = io_unix_make();
+    const IO real = io_make();
     Slice_u8 got = {0};
     assert(ErrKindNone ==
            real.map_file(&real, path, FileOpenOptionsReadOnly, &got).kind);
@@ -3924,7 +3922,7 @@ static void test_io_composites_mocked(void) {
   // A write that reports no progress and no error would spin forever, so it
   // is treated as the peer hanging up.
   {
-    TestFileCtx ctx = {.real = io_unix_make(), .write_zero_at = 1};
+    TestFileCtx ctx = {.real = io_make(), .write_zero_at = 1};
     const IO io = test_io_file_make(&ctx);
 
     assert(ErrKindConnReset == io.write_all_to_file(&io, path, data).kind);
@@ -3935,8 +3933,7 @@ static void test_io_composites_mocked(void) {
 
   // A failed write reports, and still closes.
   {
-    TestFileCtx ctx = {.real = io_unix_make(),
-                       .write_fails_with = ErrKindConnReset};
+    TestFileCtx ctx = {.real = io_make(), .write_fails_with = ErrKindConnReset};
     const IO io = test_io_file_make(&ctx);
 
     assert(ErrKindConnReset == io.write_all_to_file(&io, path, data).kind);
@@ -3962,8 +3959,7 @@ static void test(const char *filter) {
       {"io_listen_and_serve_setup_failures",
        test_io_listen_and_serve_setup_failures},
       {"io_listen_and_serve_accept", test_io_listen_and_serve_accept},
-      {"torrent_client_pool_exhaustion",
-       test_torrent_client_pool_exhaustion},
+      {"torrent_client_pool_exhaustion", test_torrent_client_pool_exhaustion},
       {"io_syscall_failures", test_io_syscall_failures},
       {"torrent_make_dicts_oom", test_torrent_make_dicts_oom},
       {"io_composites_mocked", test_io_composites_mocked},

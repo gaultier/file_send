@@ -112,7 +112,8 @@ unix_valloc(const IO *io, usize bytes_count, u8 **res) {
   return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static usize unix_get_page_size(const IO *io) {
+__attribute__((warn_unused_result)) static usize
+unix_get_page_size(const IO *io) {
   (void)io;
 
   const i64 res = sysconf(_SC_PAGE_SIZE);
@@ -170,8 +171,8 @@ unix_socket(const IO *io, SocketDomain domain, SocketType type, i32 *fd) {
   return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static Error unix_listen(const IO *io, i32 fd,
-                                                             i32 backlog) {
+__attribute__((warn_unused_result)) static Error
+unix_listen(const IO *io, i32 fd, i32 backlog) {
   (void)io;
 
   const i32 ret = listen(fd, backlog);
@@ -318,7 +319,8 @@ unix_thread_create(const IO *io, ThreadCallback cb, void *data) {
   return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static Error unix_close(const IO *io, i32 fd) {
+__attribute__((warn_unused_result)) static Error unix_close(const IO *io,
+                                                            i32 fd) {
   (void)io;
 
   const i32 ret = close(fd);
@@ -561,7 +563,8 @@ unix_stdout_restore(const IO *io, i32 saved) {
 // of entirely different primitives, and so the primitives can be faked
 // underneath them in a test.
 __attribute__((warn_unused_result)) static Error
-unix_map_file(const IO *io, Slice_u8 path, FileOpenOptions opts, Slice_u8 *dst) {
+unix_map_file(const IO *io, Slice_u8 path, FileOpenOptions opts,
+              Slice_u8 *dst) {
   (void)io;
   assert(dst);
 
@@ -656,7 +659,7 @@ end:
   return err;
 }
 
-__attribute__((warn_unused_result)) static IO io_unix_make(void) {
+__attribute__((warn_unused_result)) static IO io_make(void) {
   return (IO){
       .socket = unix_socket,
       .listen = unix_listen,
