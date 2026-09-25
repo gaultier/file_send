@@ -659,7 +659,7 @@ end:
   return err;
 }
 
-__attribute__((warn_unused_result)) static IO io_make(void) {
+__attribute__((warn_unused_result)) static IO io_platform_make(void) {
   return (IO){
       .socket = unix_socket,
       .listen = unix_listen,

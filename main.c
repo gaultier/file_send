@@ -2557,7 +2557,7 @@ torrent_client_on_accept(const IO *io, void *vctx, Ipv4Addr accept_addr,
 int main(i32 argc, char *argv[]) {
   assert(argv);
 
-  const IO io = io_make();
+  const IO io = io_platform_make();
 
   const char *const cmd = argc >= 2 ? argv[1] : "";
   const usize arena_cap = 32 * MiB;
