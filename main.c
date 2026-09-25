@@ -799,6 +799,23 @@ unix_udp_send_to_ipv4(void *ctx, i32 fd, Ipv4Addr addr, const u8 *buf,
   return (Error){.kind = ErrKindNone};
 }
 
+__attribute__((warn_unused_result)) static Error
+unix_file_size(void *ctx, i32 fd, usize *dst_size) {
+  (void)ctx;
+  assert(dst_size);
+
+  struct stat st = {0};
+  const isize ret = fstat(fd, &st);
+
+  if (-1 == ret) {
+    return unix_error_from_errno(errno);
+  }
+
+  *dst_size = (usize)st.st_size;
+
+  return (Error){.kind = ErrKindNone};
+}
+
 // ---------- IO ----------
 
 typedef struct {
@@ -813,6 +830,7 @@ typedef struct {
   Error (*enable_socket_reuse)(void *ctx, i32 fd);
   Error (*read)(void *ctx, i32 fd, u8 *buf, usize len, usize *dst_read);
   Error (*write)(void *ctx, i32 fd, u8 *buf, usize len, usize *dst_written);
+  Error (*file_size)(void *ctx, i32 fd, usize *dst_size);
 } IO;
 
 __attribute__((warn_unused_result)) static IO io_unix_make(void) {
@@ -827,6 +845,7 @@ __attribute__((warn_unused_result)) static IO io_unix_make(void) {
       .enable_socket_reuse = unix_enable_socket_reuse,
       .read = unix_read,
       .write = unix_write,
+      .file_size = unix_file_size,
   };
 }
 
@@ -5416,15 +5435,20 @@ int main(i32 argc, char *argv[]) {
     assert(ErrKindNone ==
            io.open(NULL, argv[2], FileOpenOptionsReadOnly, &fd).kind);
 
-    struct stat st = {0};
-    assert(-1 != fstat(fd, &st));
-    assert(st.st_size > 0);
+    usize file_size = 0;
+    {
+      Error err = io.file_size(NULL, fd, &file_size);
+      if (ErrKindNone != err.kind) {
+        error_print("failed to get file size", err);
+        return 1;
+      }
+    }
 
     void *const input_data =
-        mmap(NULL, (usize)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+        mmap(NULL, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
     assert((void *)-1 != input_data);
 
-    const Slice_u8 input = slice_u8_make((u8 *)input_data, (usize)st.st_size);
+    const Slice_u8 input = slice_u8_make((u8 *)input_data, file_size);
     const Slice_u8 file_path = {.data = (u8 *)argv[2], .len = strlen(argv[2])};
 
     u8 announce_url_cstr[] = "http://localhost:12345";
