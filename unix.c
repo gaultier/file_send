@@ -418,10 +418,9 @@ unix_udp_multicast_open_ipv4(const IO *io, u32 ipv4, i32 *dst_fd) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_udp_send_to_ipv4(const IO *io, i32 fd, Ipv4Addr addr, const u8 *buf,
-                      usize len, usize *dst_sent) {
+unix_udp_send_to_ipv4(const IO *io, i32 fd, Ipv4Addr addr, Slice_u8 msg,
+                      usize *dst_sent) {
   (void)io;
-  assert(buf);
   assert(dst_sent);
 
   const struct sockaddr_in sock_addr_in = {
@@ -432,8 +431,8 @@ unix_udp_send_to_ipv4(const IO *io, i32 fd, Ipv4Addr addr, const u8 *buf,
 
   isize ret = 0;
   do {
-    ret = sendto(fd, buf, len, 0, (const struct sockaddr *)&sock_addr_in,
-                 sizeof(sock_addr_in));
+    ret = sendto(fd, msg.data, msg.len, 0,
+                 (const struct sockaddr *)&sock_addr_in, sizeof(sock_addr_in));
   } while (-1 == ret && EINTR == errno);
 
   if (-1 == ret) {

@@ -222,7 +222,7 @@ __attribute__((warn_unused_result)) static bool slice_u8_is_empty(Slice_u8 s) {
 }
 
 __attribute__((warn_unused_result)) static Slice_u8
-slice_u8_from_cstr(char *s) {
+slice_u8_from_cstr(const char *s) {
   return (Slice_u8){.data = (u8 *)s, .len = strlen(s)};
 }
 
@@ -513,8 +513,8 @@ struct IO {
   Error (*close)(const IO *io, i32 fd);
   Error (*enable_socket_reuse)(const IO *io, i32 fd);
   Error (*udp_multicast_open_ipv4)(const IO *io, u32 ipv4, i32 *dst_fd);
-  Error (*udp_send_to_ipv4)(const IO *io, i32 fd, Ipv4Addr addr, const u8 *buf,
-                            usize len, usize *dst_sent);
+  Error (*udp_send_to_ipv4)(const IO *io, i32 fd, Ipv4Addr addr, Slice_u8 msg,
+                            usize *dst_sent);
   Error (*read)(const IO *io, i32 fd, Slice_u8 data, usize *dst_read);
   Error (*write)(const IO *io, i32 fd, Slice_u8 data, usize *dst_written);
   Error (*file_size)(const IO *io, i32 fd, usize *dst_size);
@@ -888,6 +888,27 @@ sb_extend_within_cap(StringBuffer *sb, Slice_u8 s) {
 
   memcpy(sb->container.data + sb->len, s.data, s.len);
   assert(!__builtin_add_overflow(sb->len, s.len, &sb->len));
+
+  return true;
+}
+
+__attribute__((warn_unused_result)) static bool
+sb_append_usize_within_cap(StringBuffer *sb, usize n) {
+  assert(sb);
+
+  const usize digits = usize_digits_base_10(n);
+
+  if (sb_space(*sb) < digits) {
+    return false;
+  }
+
+  const Slice_u8 sb_dst = {
+      .data = sb->container.data + sb->len,
+      .len = sb_space(*sb),
+  };
+  assert(digits == encode_usize_base_10(n, sb_dst));
+
+  assert(!__builtin_add_overflow(sb->len, digits, &sb->len));
 
   return true;
 }

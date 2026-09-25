@@ -32,38 +32,7 @@ int main(i32 argc, char *argv[]) {
     test(argc > 2 ? argv[2] : NULL);
   } else
 #endif
-      if (0 == strcmp(cmd, "broadcast")) {
-    i32 udp_socket = 0;
-    {
-      Error err_udp = io.udp_multicast_open_ipv4(&io, 0, &udp_socket);
-      if (ErrKindNone != err_udp.kind) {
-        error_print("failed to open UDP multicast socket", err_udp);
-        return 1;
-      }
-    }
-    {
-
-      const u8 msg[] = "BT-SEARCH * HTTP/1.1\r\n"
-                       "Host: <host>\r\n"
-                       "Port: <port>\r\n"
-                       "Infohash: <ihash>\r\n"
-                       "cookie: <cookie (optional)>\r\n"
-                       "\r\n"
-                       "\r\n";
-      usize sent = 0;
-      const Ipv4Addr lsd_addr = {
-          .ip = 0xefc0988fUL, // 239.192.152.143
-          .port = 6771,
-      };
-
-      Error err_sendto = io.udp_send_to_ipv4(&io, udp_socket, lsd_addr, msg,
-                                             sizeof(msg), &sent);
-      if (ErrKindNone != err_sendto.kind) {
-        error_print("failed to send UDP multicast message", err_sendto);
-        return 1;
-      }
-    }
-  } else if (0 == strcmp(cmd, "gen-torrent")) {
+      if (0 == strcmp(cmd, "gen-torrent")) {
     if (3 != argc) {
       fprintf(stderr, "missing argument\n");
       return 1;
@@ -123,6 +92,75 @@ int main(i32 argc, char *argv[]) {
     Error err = io.map_file(&io, file_path, FileOpenOptionsReadOnly, &input);
     if (ErrKindNone != err.kind) {
       error_print("failed to open file", err);
+      return 1;
+    }
+
+    BencodeValue metainfo_dict = {0};
+    err = bencode_parse(&input, &arena, scratch, &metainfo_dict);
+    if (ErrKindNone != err.kind) {
+      error_print("failed to parse .torrent data", err);
+      return 1;
+    }
+    if (input.len > 0) {
+      fprintf(stderr, "trailing data in .torrent data\n");
+      return 1;
+    }
+
+    if (BencodeKindDict != metainfo_dict.kind) {
+      fprintf(stderr, "metainfo from .torrent data is not a dictionary\n");
+      return 1;
+    }
+    // TODO: More validation on `metainfo_dict`.
+    Slice_u8 info_hash_slice = {0};
+    u8 info_hash[SHA256_DIGEST_LENGTH] = {0};
+
+    for (usize i = 1; i < metainfo_dict.v.list.len; i += 2) {
+      BencodeValue k = metainfo_dict.v.list.data[i - 1];
+      BencodeValue v = metainfo_dict.v.list.data[i];
+      if (BencodeKindString == k.kind && slice_u8_eq_cstr(k.v.s, "info") &&
+          BencodeKindDict == v.kind) {
+        Slice_u8 info_encoded = {0};
+        err = bencode_encode(v, &info_encoded, &scratch);
+        if (ErrKindNone != err.kind) {
+          error_print("failed to encode info", err);
+          return 1;
+        }
+        sha256_digest(info_encoded, info_hash);
+        info_hash_slice =
+            (Slice_u8){.data = info_hash, .len = SHA256_DIGEST_LENGTH};
+      }
+    }
+
+    i32 udp_socket = 0;
+    {
+      Error err_udp = io.udp_multicast_open_ipv4(&io, 0, &udp_socket);
+      if (ErrKindNone != err_udp.kind) {
+        error_print("failed to open UDP multicast socket", err_udp);
+        return 1;
+      }
+    }
+
+    Slice_u8 udp_msg = {0};
+    err = torrent_make_udp_broadcast_message(slice_u8_from_cstr("localhost"),
+                                             12345, info_hash_slice, &arena,
+                                             &udp_msg);
+    if (ErrKindNone != err.kind) {
+      error_print("failed to craft UDP multicast message", err);
+      return 1;
+    }
+
+    fwrite(udp_msg.data, 1, udp_msg.len, stdout);
+
+    usize sent = 0;
+    const Ipv4Addr lsd_addr = {
+        .ip = 0xefc0988fUL, // 239.192.152.143
+        .port = 6771,
+    };
+
+    Error err_sendto =
+        io.udp_send_to_ipv4(&io, udp_socket, lsd_addr, udp_msg, &sent);
+    if (ErrKindNone != err_sendto.kind) {
+      error_print("failed to send UDP multicast message", err_sendto);
       return 1;
     }
 

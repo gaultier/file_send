@@ -1318,3 +1318,36 @@ torrent_client_on_accept(const IO *io, void *vctx, Ipv4Addr accept_addr,
 
   return err;
 }
+
+__attribute__((warn_unused_result)) static Error
+torrent_make_udp_broadcast_message(Slice_u8 url, u16 port, Slice_u8 info_hash,
+                                   Arena *arena, Slice_u8 *dst) {
+  assert(arena);
+  assert(dst);
+
+  StringBuffer sb = {0};
+  Error err = sb_make(100, arena, &sb);
+  if (ErrKindNone == err.kind) {
+    return err;
+  }
+
+  assert(sb_extend_within_cap(&sb, slice_u8_from_cstr("BT-SEARCH * HTTP/1.1\r\n"
+                                                      "Host: ")));
+  assert(sb_extend_within_cap(&sb, url));
+  assert(sb_extend_within_cap(&sb, slice_u8_from_cstr("\r\n"
+                                                      "Port: ")));
+
+  assert(sb_append_usize_within_cap(&sb, port));
+  assert(sb_extend_within_cap(&sb, slice_u8_from_cstr("\r\n"
+                                                      "Infohash: ")));
+
+  assert(sb_extend_within_cap(&sb, info_hash));
+
+  assert(sb_extend_within_cap(&sb, slice_u8_from_cstr("\r\n"
+                                                      "\r\n"
+                                                      "\r\n")));
+
+  *dst = slice_u8_take(sb.container, sb.len);
+
+  return (Error){.kind = ErrKindNone};
+}
