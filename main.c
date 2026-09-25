@@ -1444,6 +1444,7 @@ static void bencode_print_indent(usize indent) {
 // the value starts on begins at, which is what the children and the closing
 // bracket are aligned against. Nothing is written after the value either: a
 // trailing newline is the caller's to add.
+__attribute__(maybe_unused))
 static void bencode_print(BencodeValue v, usize indent) {
   switch (v.kind) {
   case BencodeKindInteger:
@@ -5284,12 +5285,15 @@ end:
 }
 
 __attribute__((warn_unused_result)) static Error
-torrent_make_torrent_file_data(Slice_u8 file_path, Slice_u8 file_data,
-                               Slice_u8 *dst_torrent, Arena *arena) {
+torrent_gen_torrent_file_data(Slice_u8 file_path, Slice_u8 file_data,
+                              Slice_u8 announce_url, Slice_u8 *dst_torrent,
+                              Arena *arena) {
   // TODO: Consider passing a scratch arena for some allocations.
 
   assert(dst_torrent);
   assert(arena);
+
+  Error err = {0};
 
   const Slice_u8 file_name = unix_path_last_component(file_path);
 
@@ -5297,45 +5301,35 @@ torrent_make_torrent_file_data(Slice_u8 file_path, Slice_u8 file_data,
   PieceHash *piece_hashes = NULL;
   usize piece_hashes_count = 0;
   Slice_u8 pieces_root = {0};
-  assert(ErrKindNone == torrent_make_info_dict_v2(
-                            file_name, TORRENT_BLOCK_SIZE * 16, file_data,
-                            file_name, &info_dict, &pieces_root, &piece_hashes,
-                            &piece_hashes_count, arena)
-                            .kind);
+  err = torrent_make_info_dict_v2(file_name, TORRENT_BLOCK_SIZE * 16, file_data,
+                                  file_name, &info_dict, &pieces_root,
+                                  &piece_hashes, &piece_hashes_count, arena);
 
-  bencode_print(info_dict, 0);
-  puts("");
+  if (ErrKindNone != err.kind) {
+    return err;
+  }
 
   Slice_u8 info_dict_encoded = {0};
-  assert(ErrKindNone ==
-         bencode_encode(info_dict, &info_dict_encoded, arena).kind);
-  // Bencode is binary: `%s` stops at the first NUL regardless of the
-  // precision given, so the bytes go out through `fwrite`.
-  printf("info dict encoded: ");
-  assert(info_dict_encoded.len ==
-         fwrite(info_dict_encoded.data, 1, info_dict_encoded.len, stdout));
-  puts("");
-
-  u8 info_hash[SHA256_DIGEST_LENGTH] = {0};
-  sha256_digest(info_dict_encoded, info_hash);
+  err = bencode_encode(info_dict, &info_dict_encoded, arena);
+  if (ErrKindNone != err.kind) {
+    return err;
+  }
 
   BencodeValue metainfo_dict = {0};
-  const char *const announce_url_cstr = "http://localhost:12345";
-  Slice_u8 announce_url =
-      slice_u8_make((u8 *)announce_url_cstr, strlen(announce_url_cstr));
-  assert(ErrKindNone == torrent_make_metainfo_dict_v2(
-                            pieces_root, announce_url, info_dict.v.list,
-                            piece_hashes, piece_hashes_count, &metainfo_dict,
-                            arena)
-                            .kind);
+  err = torrent_make_metainfo_dict_v2(
+      pieces_root, announce_url, info_dict.v.list, piece_hashes,
+      piece_hashes_count, &metainfo_dict, arena);
+  if (ErrKindNone != err.kind) {
+    return err;
+  }
 
   Slice_u8 metainfo_dict_encoded = {0};
-  assert(ErrKindNone ==
-         bencode_encode(metainfo_dict, &metainfo_dict_encoded, arena).kind);
-  printf("metainfo dict encoded: ");
-  assert(metainfo_dict_encoded.len == fwrite(metainfo_dict_encoded.data, 1,
-                                             metainfo_dict_encoded.len,
-                                             stdout));
+  err = bencode_encode(metainfo_dict, &metainfo_dict_encoded, arena);
+  if (ErrKindNone != err.kind) {
+    return err;
+  }
+
+  *dst_torrent = metainfo_dict_encoded;
 
   return (Error){.kind = ErrKindNone};
 }
@@ -5415,32 +5409,7 @@ int main(i32 argc, char *argv[]) {
         return 1;
       }
     }
-  } else if (0 == strcmp(cmd, "print-bencode")) {
-    assert(3 == argc);
-
-    i32 fd = 0;
-    assert(ErrKindNone ==
-           io.open(NULL, argv[2], FileOpenOptionsReadOnly, &fd).kind);
-
-    struct stat st = {0};
-    assert(-1 != fstat(fd, &st));
-    assert(st.st_size > 0);
-
-    void *const bencode_data =
-        mmap(NULL, (usize)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    assert((void *)-1 != bencode_data);
-
-    Slice_u8 input = slice_u8_make((u8 *)bencode_data, (usize)st.st_size);
-    Arena scratch = {0};
-    assert(ErrKindNone == arena_valloc(32 * MiB, &scratch).kind);
-
-    BencodeValue bencode = {0};
-    assert(ErrKindNone ==
-           bencode_parse(&input, &arena, scratch, &bencode).kind);
-
-    bencode_print(bencode, 0);
-    printf("\n");
-  } else if (0 == strcmp(cmd, "gen-merkle-tree")) {
+  } else if (0 == strcmp(cmd, "gen-torrent")) {
     assert(3 == argc);
 
     i32 fd = 0;
@@ -5457,58 +5426,21 @@ int main(i32 argc, char *argv[]) {
 
     const Slice_u8 input = slice_u8_make((u8 *)input_data, (usize)st.st_size);
     const Slice_u8 file_path = {.data = (u8 *)argv[2], .len = strlen(argv[2])};
-    const Slice_u8 file_name = unix_path_last_component(file_path);
 
-    BencodeValue info_dict = {0};
-    PieceHash *piece_hashes = NULL;
-    usize piece_hashes_count = 0;
-    Slice_u8 pieces_root = {0};
-    assert(ErrKindNone ==
-           torrent_make_info_dict_v2(file_name, TORRENT_BLOCK_SIZE * 16, input,
-                                     file_name, &info_dict, &pieces_root,
-                                     &piece_hashes, &piece_hashes_count, &arena)
-               .kind);
-
-    bencode_print(info_dict, 0);
-    puts("");
-
-    Slice_u8 info_dict_encoded = {0};
-    assert(ErrKindNone ==
-           bencode_encode(info_dict, &info_dict_encoded, &arena).kind);
-    // Bencode is binary: `%s` stops at the first NUL regardless of the
-    // precision given, so the bytes go out through `fwrite`.
-    printf("info dict encoded: ");
-    assert(info_dict_encoded.len ==
-           fwrite(info_dict_encoded.data, 1, info_dict_encoded.len, stdout));
-    puts("");
-
-    u8 info_hash[SHA256_DIGEST_LENGTH] = {0};
-    sha256_digest(info_dict_encoded, info_hash);
-    printf("info_hash=");
-    sha256_print_hex(info_hash);
-    puts("");
-
-    BencodeValue metainfo_dict = {0};
-    const char *const announce_url_cstr = "http://localhost:12345";
+    u8 announce_url_cstr[] = "http://localhost:12345";
     Slice_u8 announce_url =
-        slice_u8_make((u8 *)announce_url_cstr, strlen(announce_url_cstr));
-    assert(ErrKindNone == torrent_make_metainfo_dict_v2(
-                              pieces_root, announce_url, info_dict.v.list,
-                              piece_hashes, piece_hashes_count, &metainfo_dict,
-                              &arena)
-                              .kind);
-    bencode_print(metainfo_dict, 0);
-    puts("");
+        slice_u8_make(announce_url_cstr, sizeof(announce_url_cstr) - 1);
 
-    Slice_u8 metainfo_dict_encoded = {0};
-    assert(ErrKindNone ==
-           bencode_encode(metainfo_dict, &metainfo_dict_encoded, &arena).kind);
-    printf("metainfo dict encoded: ");
-    assert(metainfo_dict_encoded.len == fwrite(metainfo_dict_encoded.data, 1,
-                                               metainfo_dict_encoded.len,
-                                               stdout));
-    puts("");
+    Slice_u8 torrent_file_data = {0};
+    Error err = torrent_gen_torrent_file_data(file_path, input, announce_url,
+                                              &torrent_file_data, &arena);
+    if (ErrKindNone != err.kind) {
+      error_print("failed to generate torrent file data", err);
+      return 1;
+    }
 
+    fwrite(torrent_file_data.data, 1, torrent_file_data.len, stdout);
+  } else if (0 == strcmp(cmd, "share")) {
     const Ipv4Addr listen_addr = {.port = 12345, .ip = 0};
     TorrentNetworkCtx ctx = {0};
     Error err_listen = io_listen_and_serve_tcp_ipv4(&io, &ctx, listen_addr,
@@ -5523,7 +5455,7 @@ int main(i32 argc, char *argv[]) {
     printf("mem used: %zu\n", used_bytes);
     printf("mem unused: %zu\n", unused_bytes);
   } else {
-    fprintf(stderr, "unknown command\n");
+    fprintf(stderr, "unknown command: %s\n", cmd);
     exit(1);
   }
 }
