@@ -537,7 +537,9 @@ unix_virtual_mem_alloc(usize bytes_count, u8 **res) {
   return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static usize unix_get_page_size(void) {
+__attribute__((warn_unused_result)) static usize unix_get_page_size(void *ctx) {
+  (void)ctx;
+
   const i64 res = sysconf(_SC_PAGE_SIZE);
   assert(-1 != res && "unreachable");
 
@@ -1054,6 +1056,7 @@ typedef struct {
   Error (*map_file)(void *ctx, Slice_u8 path, FileOpenOptions opts,
                     Slice_u8 *dst);
   Error (*write_all_to_file)(void *ctx, Slice_u8 path, Slice_u8 data);
+  usize (*get_page_size)(void *ctx);
 } IO;
 
 __attribute__((warn_unused_result)) static IO io_unix_make(void) {
@@ -1071,6 +1074,7 @@ __attribute__((warn_unused_result)) static IO io_unix_make(void) {
       .file_size = unix_file_size,
       .map_file = unix_map_file,
       .write_all_to_file = unix_write_all_to_file,
+      .get_page_size = unix_get_page_size,
   };
 }
 
@@ -1199,11 +1203,12 @@ __attribute__((warn_unused_result)) static usize ceil_usize(usize numerator,
 
 // On success `*res` is the arena; on failure it is left alone and the reason
 // `mmap` gave is passed through.
-__attribute__((warn_unused_result)) static Error arena_valloc(usize bytes_count,
-                                                              Arena *res) {
+__attribute__((warn_unused_result)) static Error
+arena_valloc(IO *io, void *ctx, usize bytes_count, Arena *res) {
+  assert(io);
   assert(res);
 
-  const usize page_size = unix_get_page_size();
+  const usize page_size = io->get_page_size(ctx);
   assert(page_size > 0);
 
   const usize usable_bytes = usize_round_up_multiple_of(bytes_count, page_size);
