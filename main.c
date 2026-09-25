@@ -71,8 +71,6 @@ typedef enum {
   // No route to the destination. On macOS this is also how a denied Local
   // Network privacy grant surfaces, so it is not always a routing problem.
   ErrKindHostUnreachable,
-
-  ErrKindConnectionReset,
 } ErrorKind;
 
 typedef struct {
@@ -109,9 +107,6 @@ error_kind_to_cstr(ErrorKind kind) {
     return "too many open files";
   case ErrKindHostUnreachable:
     return "host unreachable";
-  case ErrKindConnectionReset:
-    return "connection reset";
-    break;
   }
 
   assert(0 && "unreachable");
@@ -163,6 +158,12 @@ isize_from_usize(usize magnitude, bool negative, isize *res) {
                                  : __builtin_add_overflow(magnitude, 0, res);
   return (Error){.kind = overflow ? ErrKindRange : ErrKindNone};
 }
+
+// The byte that separates path components on this platform. Passed to the
+// `path_*` helpers rather than baked into them: they are pure string
+// functions, and a hardcoded `/` would make them Unix wrappers in everything
+// but name.
+static const u8 PATH_SEPARATOR_UNIX = '/';
 
 // ---------- Arena ----------
 
@@ -372,8 +373,8 @@ slice_u8_consume(Slice_u8 *slice, u8 expected) {
 // yields nothing). This is Go's `filepath.Ext`; note that `path_with_ext`
 // takes its replacement *without* the dot, the way Rust's
 // `Path::set_extension` does.
-__attribute__((warn_unused_result)) static Slice_u8
-path_get_ext(Slice_u8 path) {
+__attribute__((warn_unused_result)) static Slice_u8 path_get_ext(Slice_u8 path,
+                                                                 u8 separator) {
   if (!path.data || 0 == path.len) {
     return (Slice_u8){0};
   }
@@ -382,7 +383,7 @@ path_get_ext(Slice_u8 path) {
   // dots must not be mistaken for an extension separator.
   usize base = 0;
   for (usize i = path.len; i > 0; i--) {
-    if ('/' == path.data[i - 1]) {
+    if (separator == path.data[i - 1]) {
       base = i;
       break;
     }
@@ -409,7 +410,8 @@ path_get_ext(Slice_u8 path) {
 // `..<ext>`; callers pass real file paths, so the case is pinned by the tests
 // rather than special cased.
 __attribute__((warn_unused_result)) static Error
-path_with_ext(Slice_u8 path, Slice_u8 ext, Slice_u8 *dst, Arena *arena) {
+path_with_ext(Slice_u8 path, Slice_u8 ext, u8 separator, Slice_u8 *dst,
+              Arena *arena) {
   assert(dst);
   assert(arena);
   assert(ext.data);
@@ -420,13 +422,13 @@ path_with_ext(Slice_u8 path, Slice_u8 ext, Slice_u8 *dst, Arena *arena) {
   }
 
   // A trailing separator leaves no name to put an extension on.
-  if ('/' == path.data[path.len - 1]) {
+  if (separator == path.data[path.len - 1]) {
     return (Error){.kind = ErrKindInvalidData};
   }
 
   // How much of `path` is kept, the dot itself excluded. The extension always
   // starts at index one or later, so at least one byte of name survives.
-  const Slice_u8 old_ext = path_get_ext(path);
+  const Slice_u8 old_ext = path_get_ext(path, separator);
   assert(old_ext.len < path.len);
   const usize stem_len = path.len - old_ext.len;
   assert(stem_len > 0);
@@ -522,7 +524,9 @@ __attribute__((warn_unused_result)) static Error unix_error_from_errno(i32 e) {
 // On success `*res` is the mapping; on failure it is left alone and the
 // `errno` `mmap` set is mapped onto an `Error`.
 __attribute__((warn_unused_result)) static Error
-unix_virtual_mem_alloc(usize bytes_count, u8 **res) {
+unix_valloc(void *ctx, usize bytes_count, u8 **res) {
+  (void)ctx;
+
   assert(bytes_count > 0);
   assert(res);
 
@@ -547,7 +551,9 @@ __attribute__((warn_unused_result)) static usize unix_get_page_size(void *ctx) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_vprotect_none(void *ptr, usize size) {
+unix_vprotect_none(void *ctx, void *ptr, usize size) {
+  (void)ctx;
+
   if (-1 == mprotect(ptr, size, PROT_NONE)) {
     return unix_error_from_errno(errno);
   }
@@ -560,7 +566,7 @@ unix_vprotect_none(void *ptr, usize size) {
 // The result may be "/", "." or "..": it is the last path element, not a
 // validated file name, so callers that need one must check it themselves.
 __attribute__((warn_unused_result)) static Slice_u8
-unix_path_last_component(Slice_u8 path) {
+path_last_component(Slice_u8 path, u8 separator) {
   //  If the path is empty, Base returns ".".
   if (slice_u8_is_empty(path)) {
     return (Slice_u8){.data = (u8 *)".", .len = 1};
@@ -568,7 +574,7 @@ unix_path_last_component(Slice_u8 path) {
 
   //  Trailing path separators are removed before extracting the last element.
   while (!slice_u8_is_empty(path)) {
-    if ('/' == path.data[path.len - 1]) {
+    if (separator == path.data[path.len - 1]) {
       path.len -= 1;
     } else {
       break;
@@ -576,9 +582,11 @@ unix_path_last_component(Slice_u8 path) {
   }
 
   //  If the path consists entirely of separators, Base returns a single
-  //  separator.
+  //  separator. Only `len` was trimmed above, so the first byte of the
+  //  caller's path is still there to borrow it from.
   if (slice_u8_is_empty(path)) {
-    return (Slice_u8){.data = (u8 *)"/", .len = 1};
+    assert(path.data);
+    return (Slice_u8){.data = path.data, .len = 1};
   }
 
   // Counts down over one-past-the-byte so the whole walk stays in `usize`:
@@ -586,18 +594,18 @@ unix_path_last_component(Slice_u8 path) {
   // separator.
   for (usize i = path.len; i > 0; i--) {
     const u8 c = path.data[i - 1];
-    if ('/' == c) {
+    if (separator == c) {
       const Slice_u8 res = {.data = path.data + i, .len = path.len - i};
       // The trailing separators are gone, so there is at least one byte left
       // after the last one.
       assert(!slice_u8_is_empty(res));
-      assert(!slice_u8_contains_byte(res, '/'));
+      assert(!slice_u8_contains_byte(res, separator));
 
       return res;
     }
   }
 
-  assert(!slice_u8_contains_byte(path, '/'));
+  assert(!slice_u8_contains_byte(path, separator));
   return path;
 }
 
@@ -959,13 +967,14 @@ unix_map_file(void *ctx, Slice_u8 path, FileOpenOptions opts, Slice_u8 *dst) {
   i32 fd = 0;
   err = unix_open(NULL, path, FileOpenOptionsReadOnly, &fd);
   if (ErrKindNone != err.kind) {
-    return unix_error_from_errno(errno);
+    return err;
   }
 
   usize file_size = 0;
   err = unix_file_size(NULL, fd, &file_size);
   if (ErrKindNone != err.kind) {
-    return unix_error_from_errno(errno);
+    (void)unix_close(NULL, fd);
+    return err;
   }
 
   i32 unix_opts = 0;
@@ -976,8 +985,16 @@ unix_map_file(void *ctx, Slice_u8 path, FileOpenOptions opts, Slice_u8 *dst) {
   }
 
   void *const data = mmap(NULL, file_size, unix_opts, MAP_PRIVATE, fd, 0);
-  if ((void *)-1 == data) {
-    return unix_error_from_errno(errno);
+  // Read `errno` before `close` gets a chance to overwrite it.
+  const Error err_mmap =
+      ((void *)-1 == data) ? unix_error_from_errno(errno) : (Error){0};
+
+  // The mapping holds its own reference to the file, so the descriptor has
+  // done its job either way.
+  (void)unix_close(NULL, fd);
+
+  if (ErrKindNone != err_mmap.kind) {
+    return err_mmap;
   }
 
   dst->data = data;
@@ -1003,7 +1020,7 @@ unix_write_all_to_file(void *ctx, Slice_u8 path, Slice_u8 data) {
                       FileOpenOptionsTruncate,
                   &fd);
   if (ErrKindNone != err.kind) {
-    return unix_error_from_errno(errno);
+    return err;
   }
 
   Slice_u8 remaining = data;
@@ -1057,6 +1074,8 @@ typedef struct {
                     Slice_u8 *dst);
   Error (*write_all_to_file)(void *ctx, Slice_u8 path, Slice_u8 data);
   usize (*get_page_size)(void *ctx);
+  Error (*valloc)(void *ctx, usize bytes_count, u8 **res);
+  Error (*vprotect_none)(void *ctx, void *ptr, usize size);
 } IO;
 
 __attribute__((warn_unused_result)) static IO io_unix_make(void) {
@@ -1075,6 +1094,8 @@ __attribute__((warn_unused_result)) static IO io_unix_make(void) {
       .map_file = unix_map_file,
       .write_all_to_file = unix_write_all_to_file,
       .get_page_size = unix_get_page_size,
+      .valloc = unix_valloc,
+      .vprotect_none = unix_vprotect_none,
   };
 }
 
@@ -1218,7 +1239,7 @@ arena_valloc(const IO *io, void *ctx, usize bytes_count, Arena *res) {
 
   u8 *arena_memory = NULL;
   {
-    const Error err = unix_virtual_mem_alloc(os_alloc_size, &arena_memory);
+    const Error err = io->valloc(ctx, os_alloc_size, &arena_memory);
     if (ErrKindNone != err.kind) {
       return err;
     }
@@ -1226,7 +1247,7 @@ arena_valloc(const IO *io, void *ctx, usize bytes_count, Arena *res) {
   assert(arena_memory);
 
   assert(ErrKindNone ==
-         unix_vprotect_none(arena_memory + usable_bytes, page_size).kind);
+         io->vprotect_none(ctx, arena_memory + usable_bytes, page_size).kind);
 
   // Right-align the arena against the guard page so that *any* write past
   // `arena.end` faults immediately, then round the start down to the
@@ -2829,6 +2850,61 @@ bencode_encode(BencodeValue b, Slice_u8 *dst, Arena *arena) {
   return (Error){.kind = ErrKindNone};
 }
 
+__attribute__((warn_unused_result)) static Error
+torrent_gen_torrent_file_data(Slice_u8 file_path, Slice_u8 file_data,
+                              Slice_u8 announce_url, Slice_u8 *dst_torrent,
+                              u8 dst_info_hash[SHA256_DIGEST_LENGTH],
+                              Arena scratch, Arena *arena) {
+  // TODO: Consider passing a scratch arena for some allocations.
+
+  assert(dst_torrent);
+  assert(dst_info_hash);
+  assert(arena);
+
+  Error err = {0};
+
+  const Slice_u8 file_name =
+      path_last_component(file_path, PATH_SEPARATOR_UNIX);
+
+  BencodeValue info_dict = {0};
+  PieceHash *piece_hashes = NULL;
+  usize piece_hashes_count = 0;
+  Slice_u8 pieces_root = {0};
+  err = torrent_make_info_dict_v2(file_name, TORRENT_BLOCK_SIZE * 16, file_data,
+                                  file_name, &info_dict, &pieces_root,
+                                  &piece_hashes, &piece_hashes_count, &scratch);
+
+  if (ErrKindNone != err.kind) {
+    return err;
+  }
+
+  Slice_u8 info_dict_encoded = {0};
+  err = bencode_encode(info_dict, &info_dict_encoded, &scratch);
+  if (ErrKindNone != err.kind) {
+    return err;
+  }
+
+  sha256_digest(info_dict_encoded, dst_info_hash);
+
+  BencodeValue metainfo_dict = {0};
+  err = torrent_make_metainfo_dict_v2(
+      pieces_root, announce_url, info_dict.v.list, piece_hashes,
+      piece_hashes_count, &metainfo_dict, &scratch);
+  if (ErrKindNone != err.kind) {
+    return err;
+  }
+
+  Slice_u8 metainfo_dict_encoded = {0};
+  err = bencode_encode(metainfo_dict, &metainfo_dict_encoded, arena);
+  if (ErrKindNone != err.kind) {
+    return err;
+  }
+
+  *dst_torrent = metainfo_dict_encoded;
+
+  return (Error){.kind = ErrKindNone};
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -3102,6 +3178,153 @@ static void test_unix_error_from_errno(void) {
   assert(ErrKindAgain == unix_error_from_errno(EWOULDBLOCK).kind);
 }
 
+// A fake `IO` for the arena. It records what `arena_valloc` asked the OS for,
+// answers with a page size the host does not have, and can make the mapping
+// fail on demand: the real `mmap` only fails for sizes so large that the
+// request says nothing about *which* error comes back.
+//
+// Anything it does not fake is delegated to `real` rather than reimplemented,
+// so the arena still hands back memory that can be written to.
+typedef struct {
+  IO real;
+  usize page_size;
+
+  // When set, `valloc` fails with this instead of mapping.
+  ErrorKind alloc_fails_with;
+
+  // What the arena actually asked for.
+  usize alloc_calls;
+  usize alloc_bytes_count;
+  usize protect_calls;
+  void *protect_ptr;
+  usize protect_size;
+} TestIoCtx;
+
+__attribute__((warn_unused_result)) static usize
+test_io_get_page_size(void *ctx) {
+  TestIoCtx *const c = ctx;
+  assert(c);
+
+  return c->page_size;
+}
+
+__attribute__((warn_unused_result)) static Error
+test_io_valloc(void *ctx, usize bytes_count, u8 **res) {
+  TestIoCtx *const c = ctx;
+  assert(c);
+
+  c->alloc_calls += 1;
+  c->alloc_bytes_count = bytes_count;
+
+  if (ErrKindNone != c->alloc_fails_with) {
+    return (Error){.kind = c->alloc_fails_with};
+  }
+
+  return c->real.valloc(NULL, bytes_count, res);
+}
+
+__attribute__((warn_unused_result)) static Error
+test_io_vprotect_none(void *ctx, void *ptr, usize size) {
+  TestIoCtx *const c = ctx;
+  assert(c);
+
+  c->protect_calls += 1;
+  c->protect_ptr = ptr;
+  c->protect_size = size;
+
+  return c->real.vprotect_none(NULL, ptr, size);
+}
+
+// Only the slots `arena_valloc` reaches for; the rest stay null so that a
+// call to any of them crashes rather than silently doing something real.
+__attribute__((warn_unused_result)) static IO test_io_make(void) {
+  return (IO){
+      .get_page_size = test_io_get_page_size,
+      .valloc = test_io_valloc,
+      .vprotect_none = test_io_vprotect_none,
+  };
+}
+
+// The arithmetic around the guard page, against a page size the host does not
+// use: on this machine `sysconf` reports 16 KiB, so rounding bugs that happen
+// to be invisible at that size would otherwise never show up.
+static void test_arena_valloc_mocked(void) {
+  const usize page_size = 64 * KiB;
+
+  // A single byte still costs a whole page, plus a whole page of guard.
+  {
+    TestIoCtx ctx = {.real = io_unix_make(), .page_size = page_size};
+    const IO io = test_io_make();
+    Arena arena = {0};
+
+    assert(ErrKindNone == arena_valloc(&io, &ctx, 1, &arena).kind);
+
+    assert(1 == ctx.alloc_calls);
+    assert(2 * page_size == ctx.alloc_bytes_count);
+
+    // The guard is exactly one page, and it begins where the arena ends:
+    // that adjacency is the whole point of right-aligning the arena.
+    assert(1 == ctx.protect_calls);
+    assert(page_size == ctx.protect_size);
+    assert((void *)arena.end == ctx.protect_ptr);
+
+    // The usable bytes are the mapping minus the guard.
+    assert((usize)(arena.end - arena.start) >= 1);
+    assert((usize)(arena.end - arena.start) <= page_size);
+  }
+
+  // One byte past a page rounds up to two, so three pages are mapped.
+  {
+    TestIoCtx ctx = {.real = io_unix_make(), .page_size = page_size};
+    const IO io = test_io_make();
+    Arena arena = {0};
+
+    assert(ErrKindNone == arena_valloc(&io, &ctx, page_size + 1, &arena).kind);
+    assert(3 * page_size == ctx.alloc_bytes_count);
+    assert((void *)arena.end == ctx.protect_ptr);
+  }
+
+  // An exact multiple is not rounded up past itself.
+  {
+    TestIoCtx ctx = {.real = io_unix_make(), .page_size = page_size};
+    const IO io = test_io_make();
+    Arena arena = {0};
+
+    assert(ErrKindNone == arena_valloc(&io, &ctx, 2 * page_size, &arena).kind);
+    assert(3 * page_size == ctx.alloc_bytes_count);
+  }
+
+  // A failed mapping is reported, not asserted, and leaves the caller's arena
+  // untouched. Nothing is protected either: there is no mapping to protect.
+  {
+    TestIoCtx ctx = {.real = io_unix_make(),
+                     .page_size = page_size,
+                     .alloc_fails_with = ErrKindOOM};
+    const IO io = test_io_make();
+    Arena arena = {.start = (u8 *)0xAA, .end = (u8 *)0xBB};
+
+    assert(ErrKindOOM == arena_valloc(&io, &ctx, 1, &arena).kind);
+    assert(1 == ctx.alloc_calls);
+    assert(0 == ctx.protect_calls);
+    assert((u8 *)0xAA == arena.start);
+    assert((u8 *)0xBB == arena.end);
+  }
+
+  // The reason is passed through rather than flattened into `ErrOOM`: the
+  // real `mmap` can only be provoked into `ENOMEM`, so this is the only way
+  // to check that the error travels verbatim.
+  {
+    TestIoCtx ctx = {.real = io_unix_make(),
+                     .page_size = page_size,
+                     .alloc_fails_with = ErrOSKindPermission};
+    const IO io = test_io_make();
+    Arena arena = {0};
+
+    assert(ErrOSKindPermission == arena_valloc(&io, &ctx, 1, &arena).kind);
+    assert(NULL == arena.start);
+  }
+}
+
 static void test_arena_valloc(void) {
   const IO io = io_unix_make();
 
@@ -3109,8 +3332,7 @@ static void test_arena_valloc(void) {
   // NULL, so this also pins down that conversion, and that the `ENOMEM` it
   // sets comes back as `ErrOOM` rather than a bare failure.
   Arena arena = {0};
-  assert(ErrKindOOM ==
-         arena_valloc(&io, NULL, (usize)1 << 62, &arena).kind);
+  assert(ErrKindOOM == arena_valloc(&io, NULL, (usize)1 << 62, &arena).kind);
 
   // A failed call leaves the caller's arena alone.
   assert(NULL == arena.start);
@@ -3177,7 +3399,7 @@ static void test_slice_u8(void) {
   }
 }
 
-static void test_unix_path_last_component(void) {
+static void test_path_last_component(void) {
   // Expectations generated with Go's `path/filepath.Base`.
   const struct {
     const char *input;
@@ -3230,28 +3452,29 @@ static void test_unix_path_last_component(void) {
   };
 
   for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-    const Slice_u8 got = unix_path_last_component(test_slice(cases[i].input));
+    const Slice_u8 got =
+        path_last_component(test_slice(cases[i].input), PATH_SEPARATOR_UNIX);
 
     assert(!slice_u8_is_empty(got));
     assert(slice_u8_eq_cstr(got, cases[i].expected));
   }
 
   // A null slice is the same as an empty one.
-  assert(
-      slice_u8_eq_cstr(unix_path_last_component(slice_u8_make(NULL, 0)), "."));
+  assert(slice_u8_eq_cstr(
+      path_last_component(slice_u8_make(NULL, 0), PATH_SEPARATOR_UNIX), "."));
 
   // The result borrows from the input: no copy, and it is a suffix of the
   // path (after the trailing separators are removed).
   {
     const Slice_u8 path = test_slice("/a/b/c.zip");
-    const Slice_u8 got = unix_path_last_component(path);
+    const Slice_u8 got = path_last_component(path, PATH_SEPARATOR_UNIX);
     assert(path.data + path.len - got.len == got.data);
   }
   // The input is passed by value, so the caller's slice is untouched even
   // though the function trims trailing separators.
   {
     Slice_u8 path = test_slice("/a/b/");
-    const Slice_u8 got = unix_path_last_component(path);
+    const Slice_u8 got = path_last_component(path, PATH_SEPARATOR_UNIX);
     assert(slice_u8_eq_cstr(got, "b"));
     assert(5 == path.len);
   }
@@ -3314,7 +3537,7 @@ static void test_path_get_ext(void) {
 
   for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
     const Slice_u8 path = test_slice(cases[i].input);
-    const Slice_u8 got = path_get_ext(path);
+    const Slice_u8 got = path_get_ext(path, PATH_SEPARATOR_UNIX);
 
     assert(slice_u8_eq_cstr(got, cases[i].expected));
 
@@ -3327,12 +3550,13 @@ static void test_path_get_ext(void) {
   }
 
   // A null slice is the same as an empty one.
-  assert(slice_u8_is_empty(path_get_ext(slice_u8_make(NULL, 0))));
+  assert(slice_u8_is_empty(
+      path_get_ext(slice_u8_make(NULL, 0), PATH_SEPARATOR_UNIX)));
 
   // The input is passed by value, so the caller's slice is untouched.
   {
     Slice_u8 path = test_slice("/a/b/c.zip");
-    const Slice_u8 got = path_get_ext(path);
+    const Slice_u8 got = path_get_ext(path, PATH_SEPARATOR_UNIX);
     assert(slice_u8_eq_cstr(got, ".zip"));
     assert(10 == path.len);
   }
@@ -3398,7 +3622,8 @@ static void test_path_with_ext(void) {
     Slice_u8 got = {0};
 
     assert(ErrKindNone == path_with_ext(test_slice(cases[i].input),
-                                        test_slice(cases[i].ext), &got, &arena)
+                                        test_slice(cases[i].ext),
+                                        PATH_SEPARATOR_UNIX, &got, &arena)
                               .kind);
     assert(slice_u8_eq_cstr(got, cases[i].expected));
 
@@ -3411,7 +3636,8 @@ static void test_path_with_ext(void) {
     Arena arena = test_arena(256);
     Slice_u8 got = {0};
     assert(ErrKindInvalidData ==
-           path_with_ext(test_slice(""), test_slice("torrent"), &got, &arena)
+           path_with_ext(test_slice(""), test_slice("torrent"),
+                         PATH_SEPARATOR_UNIX, &got, &arena)
                .kind);
     assert(slice_u8_is_empty(got));
   }
@@ -3420,10 +3646,10 @@ static void test_path_with_ext(void) {
   {
     Arena arena = test_arena(256);
     Slice_u8 got = {0};
-    assert(ErrKindInvalidData == path_with_ext(slice_u8_make(NULL, 0),
-                                               test_slice("torrent"), &got,
-                                               &arena)
-                                     .kind);
+    assert(ErrKindInvalidData ==
+           path_with_ext(slice_u8_make(NULL, 0), test_slice("torrent"),
+                         PATH_SEPARATOR_UNIX, &got, &arena)
+               .kind);
   }
 
   // A trailing separator leaves no last component.
@@ -3433,10 +3659,10 @@ static void test_path_with_ext(void) {
     for (usize i = 0; i < sizeof(inputs) / sizeof(inputs[0]); i++) {
       Arena arena = test_arena(256);
       Slice_u8 got = {0};
-      assert(ErrKindInvalidData == path_with_ext(test_slice(inputs[i]),
-                                                 test_slice("torrent"), &got,
-                                                 &arena)
-                                       .kind);
+      assert(ErrKindInvalidData ==
+             path_with_ext(test_slice(inputs[i]), test_slice("torrent"),
+                           PATH_SEPARATOR_UNIX, &got, &arena)
+                 .kind);
     }
   }
 
@@ -3448,7 +3674,8 @@ static void test_path_with_ext(void) {
 
     // "a.torrent" is nine bytes, one more than the arena holds.
     assert(ErrKindOOM == path_with_ext(test_slice("a.pdf"),
-                                       test_slice("torrent"), &got, &arena)
+                                       test_slice("torrent"),
+                                       PATH_SEPARATOR_UNIX, &got, &arena)
                              .kind);
     assert(slice_u8_is_empty(got));
   }
@@ -3461,8 +3688,9 @@ static void test_path_with_ext(void) {
     const Slice_u8 path = slice_u8_make((u8 *)input, sizeof(input) - 1);
     Slice_u8 got = {0};
 
-    assert(ErrKindNone ==
-           path_with_ext(path, test_slice("torrent"), &got, &arena).kind);
+    assert(ErrKindNone == path_with_ext(path, test_slice("torrent"),
+                                        PATH_SEPARATOR_UNIX, &got, &arena)
+                              .kind);
     assert(slice_u8_eq_cstr(got, "/a/b/c.torrent"));
     assert(slice_u8_eq_cstr(path, "/a/b/c.zip"));
     assert(0 == strcmp(input, "/a/b/c.zip"));
@@ -3476,7 +3704,8 @@ static void test_path_with_ext(void) {
     Slice_u8 got = {0};
 
     assert(ErrKindNone == path_with_ext(test_slice("a.pdf"),
-                                        test_slice("torrent"), &got, &arena)
+                                        test_slice("torrent"),
+                                        PATH_SEPARATOR_UNIX, &got, &arena)
                               .kind);
     assert(9 == got.len);
     assert((usize)(arena.start - before) == got.len);
@@ -4399,9 +4628,9 @@ test_merkle_data(Arena *arena) {
 static void test_torrent_merkle_vectors(void) {
   const IO io = io_unix_make();
   Arena data_arena = {0};
-  assert(ErrKindNone == arena_valloc(&io, NULL, TEST_MERKLE_MAX_LEN + 4 * KiB,
-                                     &data_arena)
-                            .kind);
+  assert(
+      ErrKindNone ==
+      arena_valloc(&io, NULL, TEST_MERKLE_MAX_LEN + 4 * KiB, &data_arena).kind);
   assert(data_arena.start);
   const Slice_u8 data = test_merkle_data(&data_arena);
 
@@ -4466,9 +4695,9 @@ static void test_torrent_merkle_vectors(void) {
 static void test_torrent_merkle_piece_layer(void) {
   const IO io = io_unix_make();
   Arena data_arena = {0};
-  assert(ErrKindNone == arena_valloc(&io, NULL, TEST_MERKLE_MAX_LEN + 4 * KiB,
-                                     &data_arena)
-                            .kind);
+  assert(
+      ErrKindNone ==
+      arena_valloc(&io, NULL, TEST_MERKLE_MAX_LEN + 4 * KiB, &data_arena).kind);
   assert(data_arena.start);
   const Slice_u8 data = test_merkle_data(&data_arena);
 
@@ -5570,6 +5799,281 @@ static void test_sha256_neon_lengths(void) {
 #endif
 }
 
+// A path under `TMPDIR` unique to this process, so a test run does not
+// collide with a stale file or with another run.
+__attribute__((warn_unused_result)) static Slice_u8
+test_tmp_path(char *buf, usize buf_len, const char *name) {
+  const char *const dir = getenv("TMPDIR");
+  const i32 n = snprintf(buf, buf_len, "%s/file_send_test_%d_%s",
+                         dir ? dir : "/tmp", (i32)getpid(), name);
+  assert(n > 0);
+  assert((usize)n < buf_len);
+
+  return slice_u8_make((u8 *)buf, (usize)n);
+}
+
+// The failure paths of `open`, which are the ones a caller actually has to
+// handle: they are reached through the vtable like any other caller would.
+static void test_io_open_errors(void) {
+  const IO io = io_unix_make();
+  i32 fd = -1;
+
+  // An empty path is rejected before the syscall.
+  assert(
+      ErrKindInvalidData ==
+      io.open(NULL, slice_u8_make(NULL, 0), FileOpenOptionsReadOnly, &fd).kind);
+  assert(ErrKindInvalidData ==
+         io.open(NULL, test_slice(""), FileOpenOptionsReadOnly, &fd).kind);
+
+  // So is one too long for the fixed buffer, and the limit rides along in
+  // `data` rather than an `errno` that was never set.
+  {
+    char long_path[5000] = {0};
+    memset(long_path, 'a', sizeof(long_path) - 1);
+    const Slice_u8 path = slice_u8_make((u8 *)long_path, sizeof(long_path) - 1);
+
+    const Error err = io.open(NULL, path, FileOpenOptionsReadOnly, &fd);
+    assert(ErrKindRange == err.kind);
+    assert(4095 == err.data);
+  }
+
+  // A missing file is the OS's complaint, carried verbatim.
+  {
+    char buf[256] = {0};
+    const Slice_u8 path = test_tmp_path(buf, sizeof(buf), "does_not_exist");
+    (void)unlink((const char *)path.data);
+
+    const Error err = io.open(NULL, path, FileOpenOptionsReadOnly, &fd);
+    // `ENOENT` has no kind of its own yet, so it lands in the catch-all;
+    // `data` is what tells it apart.
+    assert(ErrKindInvalidData == err.kind);
+    assert(ENOENT == (i32)err.data);
+  }
+}
+
+// `write_all_to_file` and `map_file` are only ever used as a pair, so they
+// are checked as one: against a real file, because a fake filesystem would
+// only be testing itself.
+static void test_io_file_round_trip(void) {
+  const IO io = io_unix_make();
+
+  char buf[256] = {0};
+  const Slice_u8 path = test_tmp_path(buf, sizeof(buf), "round_trip");
+  (void)unlink((const char *)path.data);
+
+  // Bencode is binary, so a NUL in the middle must survive.
+  const u8 payload[] = {'d', '3', ':', 'a', 'b', 'c', 0x00, 'e'};
+  const Slice_u8 data = slice_u8_make((u8 *)payload, sizeof(payload));
+
+  assert(ErrKindNone == io.write_all_to_file(NULL, path, data).kind);
+
+  {
+    Slice_u8 got = {0};
+    assert(ErrKindNone ==
+           io.map_file(NULL, path, FileOpenOptionsReadOnly, &got).kind);
+    assert(data.len == got.len);
+    assert(0 == memcmp(data.data, got.data, data.len));
+  }
+
+  // Rewriting with fewer bytes truncates: without `O_TRUNC` the old tail
+  // would still be there, which for a bencode file is silent corruption.
+  {
+    const u8 shorter[] = {'i', '1', 'e'};
+    const Slice_u8 data_shorter = slice_u8_make((u8 *)shorter, sizeof(shorter));
+    assert(ErrKindNone == io.write_all_to_file(NULL, path, data_shorter).kind);
+
+    Slice_u8 got = {0};
+    assert(ErrKindNone ==
+           io.map_file(NULL, path, FileOpenOptionsReadOnly, &got).kind);
+    assert(sizeof(shorter) == got.len);
+    assert(0 == memcmp(shorter, got.data, sizeof(shorter)));
+  }
+
+  // Writing nothing is a no-op, not a truncation: the file is left as it was.
+  {
+    assert(ErrKindNone ==
+           io.write_all_to_file(NULL, path, slice_u8_make(NULL, 0)).kind);
+
+    Slice_u8 got = {0};
+    assert(ErrKindNone ==
+           io.map_file(NULL, path, FileOpenOptionsReadOnly, &got).kind);
+    assert(3 == got.len);
+  }
+
+  assert(0 == unlink((const char *)path.data));
+
+  // Mapping what is no longer there fails rather than handing back an empty
+  // slice.
+  {
+    Slice_u8 got = {0};
+    assert(ErrKindNone !=
+           io.map_file(NULL, path, FileOpenOptionsReadOnly, &got).kind);
+  }
+
+  // An empty file has nothing to map: `mmap` rejects a zero length, and that
+  // is reported rather than handed back as an empty slice.
+  {
+    char empty_buf[256] = {0};
+    const Slice_u8 empty_path =
+        test_tmp_path(empty_buf, sizeof(empty_buf), "empty");
+    (void)unlink((const char *)empty_path.data);
+
+    i32 fd = -1;
+    assert(ErrKindNone ==
+           io.open(NULL, empty_path,
+                   FileOpenOptionsWriteOnly | FileOpenOptionsCreate, &fd)
+               .kind);
+    assert(ErrKindNone == io.close(NULL, fd).kind);
+
+    Slice_u8 got = {0};
+    assert(ErrKindNone !=
+           io.map_file(NULL, empty_path, FileOpenOptionsReadOnly, &got).kind);
+    assert(slice_u8_is_empty(got));
+
+    assert(0 == unlink((const char *)empty_path.data));
+  }
+
+  // A directory opens but cannot be mapped, which walks the `mmap` failure
+  // path with the descriptor already in hand.
+  {
+    Slice_u8 got = {0};
+    assert(ErrKindNone !=
+           io.map_file(NULL, test_slice("/tmp"), FileOpenOptionsReadOnly, &got)
+               .kind);
+  }
+
+  // A path `open` rejects without setting `errno` still comes back as the
+  // range error, not as whatever `errno` happened to hold.
+  {
+    char long_path[5000] = {0};
+    memset(long_path, 'a', sizeof(long_path) - 1);
+    const Slice_u8 too_long =
+        slice_u8_make((u8 *)long_path, sizeof(long_path) - 1);
+
+    Slice_u8 got = {0};
+    assert(ErrKindRange ==
+           io.map_file(NULL, too_long, FileOpenOptionsReadOnly, &got).kind);
+
+    const u8 byte = 'x';
+    assert(ErrKindRange ==
+           io.write_all_to_file(NULL, too_long, slice_u8_make((u8 *)&byte, 1))
+               .kind);
+  }
+}
+
+// Every allocation failure inside the torrent builder, walked by squeezing
+// the arenas. The sizes are found by bisection rather than reasoned about:
+// what matters is that each step reports rather than aborting, and that a
+// caller never sees a half built torrent.
+static void test_torrent_gen_torrent_file_data_oom(void) {
+  const Slice_u8 file_path = test_slice("some_dir/payload.bin");
+  const Slice_u8 announce = test_slice("http://localhost:12345");
+
+  Arena data_arena = test_arena(64 * KiB);
+  const usize data_len = 40 * KiB;
+  u8 *const data_bytes = arena_alloc(&data_arena, 1, sizeof(u8), data_len);
+  assert(data_bytes);
+  for (usize i = 0; i < data_len; i++) {
+    data_bytes[i] = (u8)(i * 31);
+  }
+  const Slice_u8 file_data = slice_u8_make(data_bytes, data_len);
+
+  // The whole thing succeeds when there is room, which is what makes the
+  // failures below meaningful.
+  usize needed_scratch = 0;
+  {
+    Arena arena = test_arena(64 * KiB);
+    Arena scratch = test_arena(64 * KiB);
+    const u8 *const scratch_start = scratch.start;
+    Slice_u8 torrent = {0};
+    u8 info_hash[SHA256_DIGEST_LENGTH] = {0};
+
+    assert(ErrKindNone ==
+           torrent_gen_torrent_file_data(file_path, file_data, announce,
+                                         &torrent, info_hash, scratch, &arena)
+               .kind);
+    assert(!slice_u8_is_empty(torrent));
+
+    // The caller's scratch is passed by value, so its offset is untouched.
+    assert(scratch_start == scratch.start);
+    needed_scratch = 64 * KiB;
+  }
+  assert(needed_scratch > 0);
+
+  // Starving the scratch arena a byte at a time walks every early return in
+  // turn: the info dict, its encoding, the metainfo dict.
+  usize reported_oom = 0;
+  for (usize cap = 64; cap < 16 * KiB; cap *= 2) {
+    Arena arena = test_arena(64 * KiB);
+    Arena scratch = test_arena(cap);
+    Slice_u8 torrent = {.data = (u8 *)0xAA, .len = 1};
+    u8 info_hash[SHA256_DIGEST_LENGTH] = {0};
+
+    const Error err = torrent_gen_torrent_file_data(
+        file_path, file_data, announce, &torrent, info_hash, scratch, &arena);
+    if (ErrKindNone == err.kind) {
+      continue;
+    }
+
+    reported_oom += 1;
+    assert(ErrKindOOM == err.kind);
+    // Nothing half built escapes: `dst` is only written on success.
+    assert((u8 *)0xAA == torrent.data);
+    assert(1 == torrent.len);
+  }
+  assert(reported_oom > 0);
+
+  // The last allocation is the one that goes in the caller's arena, so
+  // starving that one alone reaches the final return.
+  {
+    Arena arena = test_arena(64);
+    Arena scratch = test_arena(64 * KiB);
+    Slice_u8 torrent = {0};
+    u8 info_hash[SHA256_DIGEST_LENGTH] = {0};
+
+    assert(ErrKindOOM ==
+           torrent_gen_torrent_file_data(file_path, file_data, announce,
+                                         &torrent, info_hash, scratch, &arena)
+               .kind);
+    assert(NULL == torrent.data);
+  }
+}
+
+// Every kind renders as something, and no two share a spelling: a duplicated
+// string means two enum members that cannot be told apart in a message, which
+// is how `ErrKindConnectionReset` was found. The switch is `-Wswitch-enum`
+// checked, so this is about the strings, not about reaching every arm.
+static void test_error_kind_to_cstr(void) {
+  const ErrorKind kinds[] = {
+      ErrKindNone,
+      ErrKindOOM,
+      ErrKindInvalidData,
+      ErrOSKindPermission,
+      ErrKindRange,
+      ErrKindAddrInUse,
+      ErrKindAgain,
+      ErrKindInterrupted,
+      ErrKindConnReset,
+      ErrKindTooManyFiles,
+      ErrKindHostUnreachable,
+  };
+
+  // `slice_u8_from_cstr` only ever runs on these in anger, so it rides along
+  // here rather than earning a test of its own.
+  assert(slice_u8_eq_cstr(slice_u8_from_cstr((char *)"torrent"), "torrent"));
+  assert(slice_u8_is_empty(slice_u8_from_cstr((char *)"")));
+
+  for (usize i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+    const char *const got = error_kind_to_cstr(kinds[i]);
+    assert(got);
+    assert(strlen(got) > 0);
+
+    for (usize j = 0; j < i; j++) {
+      assert(0 != strcmp(got, error_kind_to_cstr(kinds[j])));
+    }
+  }
+}
+
 static void test(const char *filter) {
   const struct {
     const char *name;
@@ -5582,8 +6086,14 @@ static void test(const char *filter) {
       {"arena_alloc", test_arena_alloc},
       {"unix_error_from_errno", test_unix_error_from_errno},
       {"arena_valloc", test_arena_valloc},
+      {"arena_valloc_mocked", test_arena_valloc_mocked},
+      {"error_kind_to_cstr", test_error_kind_to_cstr},
+      {"io_open_errors", test_io_open_errors},
+      {"io_file_round_trip", test_io_file_round_trip},
+      {"torrent_gen_torrent_file_data_oom",
+       test_torrent_gen_torrent_file_data_oom},
       {"slice_u8", test_slice_u8},
-      {"unix_path_last_component", test_unix_path_last_component},
+      {"path_last_component", test_path_last_component},
       {"path_get_ext", test_path_get_ext},
       {"path_with_ext", test_path_with_ext},
       {"ascii_num_parse", test_ascii_num_parse},
@@ -5774,60 +6284,6 @@ end:
 }
 
 __attribute__((warn_unused_result)) static Error
-torrent_gen_torrent_file_data(Slice_u8 file_path, Slice_u8 file_data,
-                              Slice_u8 announce_url, Slice_u8 *dst_torrent,
-                              u8 dst_info_hash[SHA256_DIGEST_LENGTH],
-                              Arena scratch, Arena *arena) {
-  // TODO: Consider passing a scratch arena for some allocations.
-
-  assert(dst_torrent);
-  assert(dst_info_hash);
-  assert(arena);
-
-  Error err = {0};
-
-  const Slice_u8 file_name = unix_path_last_component(file_path);
-
-  BencodeValue info_dict = {0};
-  PieceHash *piece_hashes = NULL;
-  usize piece_hashes_count = 0;
-  Slice_u8 pieces_root = {0};
-  err = torrent_make_info_dict_v2(file_name, TORRENT_BLOCK_SIZE * 16, file_data,
-                                  file_name, &info_dict, &pieces_root,
-                                  &piece_hashes, &piece_hashes_count, &scratch);
-
-  if (ErrKindNone != err.kind) {
-    return err;
-  }
-
-  Slice_u8 info_dict_encoded = {0};
-  err = bencode_encode(info_dict, &info_dict_encoded, &scratch);
-  if (ErrKindNone != err.kind) {
-    return err;
-  }
-
-  sha256_digest(info_dict_encoded, dst_info_hash);
-
-  BencodeValue metainfo_dict = {0};
-  err = torrent_make_metainfo_dict_v2(
-      pieces_root, announce_url, info_dict.v.list, piece_hashes,
-      piece_hashes_count, &metainfo_dict, &scratch);
-  if (ErrKindNone != err.kind) {
-    return err;
-  }
-
-  Slice_u8 metainfo_dict_encoded = {0};
-  err = bencode_encode(metainfo_dict, &metainfo_dict_encoded, arena);
-  if (ErrKindNone != err.kind) {
-    return err;
-  }
-
-  *dst_torrent = metainfo_dict_encoded;
-
-  return (Error){.kind = ErrKindNone};
-}
-
-__attribute__((warn_unused_result)) static Error
 torrent_client_on_accept(const IO *io, void *vctx, Ipv4Addr accept_addr,
                          i32 accept_socket) {
   assert(io);
@@ -5936,7 +6392,7 @@ int main(i32 argc, char *argv[]) {
 
     Slice_u8 torrent_file_path = {0};
     err = path_with_ext(file_path, slice_u8_from_cstr((char *)"torrent"),
-                        &torrent_file_path, &arena);
+                        PATH_SEPARATOR_UNIX, &torrent_file_path, &arena);
     if (ErrKindNone != err.kind) {
       error_print("failed to compute the torrent path", err);
       return 1;
@@ -5954,7 +6410,7 @@ int main(i32 argc, char *argv[]) {
     }
     const Slice_u8 file_path = slice_u8_from_cstr(argv[2]);
 
-    const Slice_u8 file_ext = path_get_ext(file_path);
+    const Slice_u8 file_ext = path_get_ext(file_path, PATH_SEPARATOR_UNIX);
     if (!slice_u8_eq_cstr(file_ext, ".torrent")) {
       fprintf(stderr, "provided file is not a .torrent file: %s\n", argv[2]);
       return 1;
