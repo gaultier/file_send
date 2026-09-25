@@ -253,8 +253,8 @@ slice_u8_eq_cstr(Slice_u8 s, const char *cstr) {
 // Peek at the first byte of `slice`, leaving it in place.
 // Returns `ErrInvalidData`, and does not touch `*res`, if there is no first
 // byte.
-__attribute__((warn_unused_result)) static Error
-slice_u8_first(Slice_u8 slice, u8 *res) {
+__attribute__((warn_unused_result)) static Error slice_u8_first(Slice_u8 slice,
+                                                                u8 *res) {
   assert(res);
 
   if (!slice.data) {
@@ -282,8 +282,8 @@ static void slice_u8_advance(Slice_u8 *slice, usize count) {
   slice->data += count;
 }
 
-__attribute__((warn_unused_result)) static Error
-slice_u8_skip(Slice_u8 *slice, usize count) {
+__attribute__((warn_unused_result)) static Error slice_u8_skip(Slice_u8 *slice,
+                                                               usize count) {
   assert(slice);
   if (!slice->data) {
     return (Error){.kind = ErrKindInvalidData};
@@ -347,8 +347,7 @@ slice_u8_consume(Slice_u8 *slice, u8 expected) {
 // Anything not listed is this code calling the kernel wrong, which is what
 // `ErrInvalidData` covers: a bad descriptor, a misaligned address, a length
 // of zero, an unsupported protection, a socket option that does not apply.
-__attribute__((warn_unused_result)) static Error
-unix_error_from_errno(i32 e) {
+__attribute__((warn_unused_result)) static Error unix_error_from_errno(i32 e) {
   ErrorKind kind = ErrKindInvalidData;
 
   switch (e) {
@@ -535,8 +534,8 @@ unix_socket(void *ctx, SocketDomain domain, SocketType type, i32 *fd) {
   return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static Error
-unix_listen(void *ctx, i32 fd, i32 backlog) {
+__attribute__((warn_unused_result)) static Error unix_listen(void *ctx, i32 fd,
+                                                             i32 backlog) {
   (void)ctx;
 
   const i32 ret = listen(fd, backlog);
@@ -665,8 +664,7 @@ unix_thread_create(void *ctx, ThreadCallback cb) {
   return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static Error unix_close(void *ctx,
-                                                                i32 fd) {
+__attribute__((warn_unused_result)) static Error unix_close(void *ctx, i32 fd) {
   (void)ctx;
 
   const i32 ret = close(fd);
@@ -800,7 +798,7 @@ typedef struct {
   Error (*open)(void *ctx, char *path, FileOpenOptions options, i32 *fd);
   Error (*tcp_bind_ipv4)(void *ctx, i32 listen_socket, Ipv4Addr addr);
   Error (*accept)(void *ctx, i32 listen_socket, i32 *dst_accept_socket,
-                      Ipv4Addr *dst_accept_addr);
+                  Ipv4Addr *dst_accept_addr);
   Error (*thread_create)(void *ctx, ThreadCallback cb);
   Error (*close)(void *ctx, i32 fd);
   Error (*enable_socket_reuse)(void *ctx, i32 fd);
@@ -823,8 +821,8 @@ __attribute__((warn_unused_result)) static IO io_unix_make(void) {
   };
 }
 
-typedef Error (*AcceptCallback)(const IO *io, void *ctx,
-                                    Ipv4Addr accept_addr, i32 accept_socket);
+typedef Error (*AcceptCallback)(const IO *io, void *ctx, Ipv4Addr accept_addr,
+                                i32 accept_socket);
 
 __attribute__((warn_unused_result)) static Error
 io_listen_and_serve_tcp_ipv4(const IO *io, void *ctx, Ipv4Addr listen_addr,
@@ -852,8 +850,7 @@ io_listen_and_serve_tcp_ipv4(const IO *io, void *ctx, Ipv4Addr listen_addr,
   {
     // A port left behind by a previous run is an ordinary answer, not a bug
     // in this process, so it travels back as an `Error`.
-    const Error err_bind =
-        io->tcp_bind_ipv4(ctx, listen_socket, listen_addr);
+    const Error err_bind = io->tcp_bind_ipv4(ctx, listen_socket, listen_addr);
     if (ErrKindNone != err_bind.kind) {
       (void)io->close(ctx, listen_socket);
       return err_bind;
@@ -892,8 +889,7 @@ io_listen_and_serve_tcp_ipv4(const IO *io, void *ctx, Ipv4Addr listen_addr,
 
     // `accept_socket` belongs to the callback from here on, including
     // closing it when the callback itself fails.
-    const Error err_on_accept =
-        on_accept(io, ctx, accept_addr, accept_socket);
+    const Error err_on_accept = on_accept(io, ctx, accept_addr, accept_socket);
     if (ErrKindNone != err_on_accept.kind) {
       error_print("failed to handle connection", err_on_accept);
     }
@@ -950,8 +946,8 @@ __attribute__((warn_unused_result)) static usize ceil_usize(usize numerator,
 
 // On success `*res` is the arena; on failure it is left alone and the reason
 // `mmap` gave is passed through.
-__attribute__((warn_unused_result)) static Error
-arena_valloc(usize bytes_count, Arena *res) {
+__attribute__((warn_unused_result)) static Error arena_valloc(usize bytes_count,
+                                                              Arena *res) {
   assert(res);
 
   const usize page_size = unix_get_page_size();
@@ -994,8 +990,8 @@ arena_valloc(usize bytes_count, Arena *res) {
 // Rejects a run with no digits at all, one that is not terminated by a
 // non-digit, one with a leading zero, and one that overflows a `usize`.
 // `*data` is only advanced, and `*res` only written, when the parse succeeds.
-__attribute__((warn_unused_result)) static Error
-ascii_num_parse(Slice_u8 *data, usize *res) {
+__attribute__((warn_unused_result)) static Error ascii_num_parse(Slice_u8 *data,
+                                                                 usize *res) {
   assert(data);
   assert(res);
 
@@ -1101,7 +1097,8 @@ bencode_parse_num(Slice_u8 *input, BencodeValue *res) {
     return (Error){.kind = ErrKindInvalidData};
   }
 
-  const bool negative_sign = ErrKindNone == slice_u8_consume(&remaining, '-').kind;
+  const bool negative_sign =
+      ErrKindNone == slice_u8_consume(&remaining, '-').kind;
 
   // Also rejects `ie` and `i-e`: a number needs at least one digit. A run of
   // digits too wide for a `usize` comes back as `ErrRange`, which is passed
@@ -1297,8 +1294,7 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
       // Parsed straight into its final slot: no intermediate copy.
       assert(values_count < values_cap);
       {
-        const Error err =
-            bencode_parse_num(&remaining, &values[values_count]);
+        const Error err = bencode_parse_num(&remaining, &values[values_count]);
         if (ErrKindNone != err.kind) {
           return err;
         }
@@ -2095,12 +2091,10 @@ torrent_build_merkle_tree(Slice_u8 data, usize piece_length_in_bytes,
   return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static Error
-torrent_make_metainfo_dict_v2(Slice_u8 pieces_root, Slice_u8 announce_url,
-                              BencodeList info_dict,
-                              const PieceHash *piece_hashes,
-                              usize piece_hashes_count, BencodeValue *dst,
-                              Arena *arena) {
+__attribute__((warn_unused_result)) static Error torrent_make_metainfo_dict_v2(
+    Slice_u8 pieces_root, Slice_u8 announce_url, BencodeList info_dict,
+    const PieceHash *piece_hashes, usize piece_hashes_count, BencodeValue *dst,
+    Arena *arena) {
   assert(!slice_u8_is_empty(announce_url));
   assert(info_dict.len > 0);
   assert(SHA256_DIGEST_LENGTH == pieces_root.len);
@@ -2614,7 +2608,8 @@ static void test_isize_from_usize(void) {
   assert(123 == res);
   assert(ErrKindNone == isize_from_usize((usize)SSIZE_MAX, false, &res).kind);
   assert(SSIZE_MAX == res);
-  assert(ErrKindNone != isize_from_usize((usize)SSIZE_MAX + 1, false, &res).kind);
+  assert(ErrKindNone !=
+         isize_from_usize((usize)SSIZE_MAX + 1, false, &res).kind);
   assert(ErrKindNone != isize_from_usize(SIZE_MAX, false, &res).kind);
 
   // Negative. `|ISIZE_MIN|` is one greater than `ISIZE_MAX`.
@@ -2624,9 +2619,11 @@ static void test_isize_from_usize(void) {
   assert(-123 == res);
   assert(ErrKindNone == isize_from_usize((usize)SSIZE_MAX, true, &res).kind);
   assert(-SSIZE_MAX == res);
-  assert(ErrKindNone == isize_from_usize((usize)SSIZE_MAX + 1, true, &res).kind);
+  assert(ErrKindNone ==
+         isize_from_usize((usize)SSIZE_MAX + 1, true, &res).kind);
   assert((-SSIZE_MAX - 1) == res);
-  assert(ErrKindNone != isize_from_usize((usize)SSIZE_MAX + 2, true, &res).kind);
+  assert(ErrKindNone !=
+         isize_from_usize((usize)SSIZE_MAX + 2, true, &res).kind);
   assert(ErrKindNone != isize_from_usize(SIZE_MAX, true, &res).kind);
 }
 
@@ -2822,7 +2819,8 @@ static void test_unix_error_from_errno(void) {
   };
 
   for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-    assert(cases[i].expected == unix_error_from_errno(cases[i].errno_value).kind);
+    assert(cases[i].expected ==
+           unix_error_from_errno(cases[i].errno_value).kind);
     // The `errno` value is preserved verbatim for the caller to render.
     assert((u64)cases[i].errno_value ==
            unix_error_from_errno(cases[i].errno_value).data);
@@ -3085,7 +3083,8 @@ static void test_bencode_parse_num(void) {
 
     // Poisoned so that a write on the failure path is visible.
     BencodeValue value = {.kind = BencodeKindDict};
-    assert((ErrKindNone == bencode_parse_num(&data, &value).kind) == cases[i].ok);
+    assert((ErrKindNone == bencode_parse_num(&data, &value).kind) ==
+           cases[i].ok);
 
     if (!cases[i].ok) {
       // A failed parse consumes nothing and writes nothing.
@@ -3131,7 +3130,8 @@ static void test_bencode_parse_string(void) {
 
     // Poisoned so that a write on the failure path is visible.
     BencodeValue value = {.kind = BencodeKindDict};
-    assert((ErrKindNone == bencode_parse_string(&data, &value).kind) == cases[i].ok);
+    assert((ErrKindNone == bencode_parse_string(&data, &value).kind) ==
+           cases[i].ok);
 
     if (!cases[i].ok) {
       // A failed parse consumes nothing and writes nothing.
@@ -3254,8 +3254,8 @@ static void test_bencode_parse(void) {
     u8 *const arena_start = arena.start;
 
     BencodeValue value = {0};
-    assert((ErrKindNone == bencode_parse(&data, &arena, scratch, &value).kind) ==
-           cases[i].ok);
+    assert((ErrKindNone ==
+            bencode_parse(&data, &arena, scratch, &value).kind) == cases[i].ok);
 
     if (!cases[i].ok) {
       // A failed parse rolls back the input and the output arena both.
@@ -3287,8 +3287,9 @@ static void test_bencode_parse(void) {
 
       BencodeValue value = {0};
       // Only `0:` has a body short enough to succeed.
-      assert((ErrKindNone == bencode_parse(&data, &arena, scratch, &value).kind) ==
-             ('0' == c));
+      assert(
+          (ErrKindNone == bencode_parse(&data, &arena, scratch, &value).kind) ==
+          ('0' == c));
     }
   }
 
@@ -3400,7 +3401,8 @@ static void test_bencode_parse(void) {
 
     // An empty container needs no allocation at all, so it still succeeds.
     Slice_u8 data_empty = test_slice("le");
-    assert(ErrKindNone == bencode_parse(&data_empty, &arena, scratch, &value).kind);
+    assert(ErrKindNone ==
+           bencode_parse(&data_empty, &arena, scratch, &value).kind);
     assert(0 == value.v.list.len);
   }
 
@@ -3950,7 +3952,8 @@ static void test_torrent_merkle_vectors(void) {
       assert(ErrKindNone ==
              torrent_build_merkle_tree(slice_u8_make(data.data, vectors[i].len),
                                        piece_lengths_in_bytes[p], &pieces,
-                                       &pieces_count, root, &arena).kind);
+                                       &pieces_count, root, &arena)
+                 .kind);
 
       assert(0 == memcmp(root, expected, sizeof(expected)));
     }
@@ -3988,7 +3991,8 @@ static void test_torrent_merkle_piece_layer(void) {
       assert(ErrKindNone ==
              torrent_build_merkle_tree(slice_u8_make(data.data, len),
                                        piece_length_in_bytes, &pieces,
-                                       &pieces_count, root, &arena).kind);
+                                       &pieces_count, root, &arena)
+                 .kind);
 
       const usize expected_pieces = ceil_usize(len, piece_length_in_bytes);
       if (expected_pieces > 1) {
@@ -4073,7 +4077,8 @@ static void test_torrent_merkle_padding(void) {
   // that holds file data is observable.
   assert(ErrKindNone == torrent_build_merkle_tree(slice_u8_make(buf, len),
                                                   16 * KiB, &pieces,
-                                                  &pieces_count, root, &arena).kind);
+                                                  &pieces_count, root, &arena)
+                            .kind);
   assert(pieces);
   assert(3 == pieces_count);
 
@@ -4140,7 +4145,8 @@ static void test_torrent_merkle_empty(void) {
 
   assert(ErrKindNone == torrent_build_merkle_tree((Slice_u8){0}, 256 * KiB,
                                                   &pieces, &pieces_count, root,
-                                                  &arena).kind);
+                                                  &arena)
+                            .kind);
   assert(NULL == pieces);
   assert(0 == pieces_count);
 
@@ -4174,7 +4180,8 @@ static void test_torrent_merkle_oom(void) {
   u8 root[SHA256_DIGEST_LENGTH] = {0};
   assert(ErrKindNone != torrent_build_merkle_tree(slice_u8_make(buf, len),
                                                   16 * KiB, &pieces,
-                                                  &pieces_count, root, &arena).kind);
+                                                  &pieces_count, root, &arena)
+                            .kind);
   assert(NULL == pieces);
   assert(0 == pieces_count);
 }
@@ -4670,7 +4677,8 @@ static void test_bencode_encode_torrent_info(void) {
          torrent_make_info_dict_v2(name, 16 * TORRENT_BLOCK_SIZE,
                                    slice_u8_make(file_data, file_len), name,
                                    &info, &pieces_root_slice, &piece_hashes,
-                                   &piece_hashes_count, &arena).kind);
+                                   &piece_hashes_count, &arena)
+             .kind);
 
   const usize cap = bencode_encode_exact_size(info, 0);
   Slice_u8 dst = {.data = arena_alloc(&arena, __alignof__(u8), sizeof(u8), cap),
@@ -4777,7 +4785,8 @@ static void test_torrent_metainfo_once(usize file_len,
          torrent_make_info_dict_v2(name, 16 * TORRENT_BLOCK_SIZE,
                                    slice_u8_make(file_data, file_len), name,
                                    &info, &pieces_root, &piece_hashes,
-                                   &piece_hashes_count, &arena).kind);
+                                   &piece_hashes_count, &arena)
+             .kind);
 
   // The root the info dict publishes is the one libtorrent computes.
   u8 expected_root[SHA256_DIGEST_LENGTH] = {0};
@@ -4791,7 +4800,8 @@ static void test_torrent_metainfo_once(usize file_len,
   BencodeValue metainfo = {0};
   assert(ErrKindNone == torrent_make_metainfo_dict_v2(
                             pieces_root, announce, info.v.list, piece_hashes,
-                            piece_hashes_count, &metainfo, &arena).kind);
+                            piece_hashes_count, &metainfo, &arena)
+                            .kind);
 
   // Three keys, in the order bencode requires: announce < info < piece
   // layers.
@@ -4863,7 +4873,8 @@ static void test_torrent_metainfo_once(usize file_len,
   assert(0 == memcmp(infohash, expected_infohash, sizeof(infohash)));
 
   Slice_u8 metainfo_encoded = {0};
-  assert(ErrKindNone == bencode_encode(metainfo, &metainfo_encoded, &arena).kind);
+  assert(ErrKindNone ==
+         bencode_encode(metainfo, &metainfo_encoded, &arena).kind);
   assert(metainfo_encoded.len > info_encoded.len);
   assert(test_slice_contains(metainfo_encoded, info_encoded));
 
@@ -4884,7 +4895,8 @@ static void test_torrent_metainfo_once(usize file_len,
   // never does, so a mis-ordered key only ever shows up here.
   Slice_u8 to_parse = metainfo_encoded;
   BencodeValue reparsed = {0};
-  assert(ErrKindNone == bencode_parse(&to_parse, &arena, scratch, &reparsed).kind);
+  assert(ErrKindNone ==
+         bencode_parse(&to_parse, &arena, scratch, &reparsed).kind);
   assert(0 == to_parse.len);
   assert(BencodeKindDict == reparsed.kind);
   assert(2 * 3 == reparsed.v.list.len);
@@ -5302,7 +5314,9 @@ int main(i32 argc, char *argv[]) {
   Arena arena = {0};
   assert(ErrKindNone == arena_valloc(arena_cap, &arena).kind);
 
-  {
+  if (0 == strcmp(cmd, "test")) {
+    test(argc > 2 ? argv[2] : NULL);
+  } else if (0 == strcmp(cmd, "broadcast")) {
     i32 udp_socket = 0;
     {
       Error err_udp = unix_udp_multicast_open_ipv4(NULL, 0, &udp_socket);
@@ -5319,22 +5333,19 @@ int main(i32 argc, char *argv[]) {
           .port = 6771,
       };
 
-      Error err_sendto = unix_udp_send_to_ipv4(NULL, udp_socket, lsd_addr,
-                                                   msg, sizeof(msg), &sent);
+      Error err_sendto = unix_udp_send_to_ipv4(NULL, udp_socket, lsd_addr, msg,
+                                               sizeof(msg), &sent);
       if (ErrKindNone != err_sendto.kind) {
         error_print("failed to send UDP multicast message", err_sendto);
         return 1;
       }
     }
-  }
-
-  if (0 == strcmp(cmd, "test")) {
-    test(argc > 2 ? argv[2] : NULL);
   } else if (0 == strcmp(cmd, "print-bencode")) {
     assert(3 == argc);
 
     i32 fd = 0;
-    assert(ErrKindNone == io.open(NULL, argv[2], FileOpenOptionsReadOnly, &fd).kind);
+    assert(ErrKindNone ==
+           io.open(NULL, argv[2], FileOpenOptionsReadOnly, &fd).kind);
 
     struct stat st = {0};
     assert(-1 != fstat(fd, &st));
@@ -5349,7 +5360,8 @@ int main(i32 argc, char *argv[]) {
     assert(ErrKindNone == arena_valloc(32 * MiB, &scratch).kind);
 
     BencodeValue bencode = {0};
-    assert(ErrKindNone == bencode_parse(&input, &arena, scratch, &bencode).kind);
+    assert(ErrKindNone ==
+           bencode_parse(&input, &arena, scratch, &bencode).kind);
 
     bencode_print(bencode, 0);
     printf("\n");
@@ -5357,7 +5369,8 @@ int main(i32 argc, char *argv[]) {
     assert(3 == argc);
 
     i32 fd = 0;
-    assert(ErrKindNone == io.open(NULL, argv[2], FileOpenOptionsReadOnly, &fd).kind);
+    assert(ErrKindNone ==
+           io.open(NULL, argv[2], FileOpenOptionsReadOnly, &fd).kind);
 
     struct stat st = {0};
     assert(-1 != fstat(fd, &st));
@@ -5375,10 +5388,11 @@ int main(i32 argc, char *argv[]) {
     PieceHash *piece_hashes = NULL;
     usize piece_hashes_count = 0;
     Slice_u8 pieces_root = {0};
-    assert(ErrKindNone == torrent_make_info_dict_v2(
-                              file_name, TORRENT_BLOCK_SIZE * 16, input,
-                              file_name, &info_dict, &pieces_root,
-                              &piece_hashes, &piece_hashes_count, &arena).kind);
+    assert(ErrKindNone ==
+           torrent_make_info_dict_v2(file_name, TORRENT_BLOCK_SIZE * 16, input,
+                                     file_name, &info_dict, &pieces_root,
+                                     &piece_hashes, &piece_hashes_count, &arena)
+               .kind);
 
     bencode_print(info_dict, 0);
     puts("");
@@ -5406,7 +5420,8 @@ int main(i32 argc, char *argv[]) {
     assert(ErrKindNone == torrent_make_metainfo_dict_v2(
                               pieces_root, announce_url, info_dict.v.list,
                               piece_hashes, piece_hashes_count, &metainfo_dict,
-                              &arena).kind);
+                              &arena)
+                              .kind);
     bencode_print(metainfo_dict, 0);
     puts("");
 
@@ -5421,8 +5436,8 @@ int main(i32 argc, char *argv[]) {
 
     const Ipv4Addr listen_addr = {.port = 12345, .ip = 0};
     TorrentNetworkCtx ctx = {0};
-    Error err_listen = io_listen_and_serve_tcp_ipv4(
-        &io, &ctx, listen_addr, torrent_client_on_accept);
+    Error err_listen = io_listen_and_serve_tcp_ipv4(&io, &ctx, listen_addr,
+                                                    torrent_client_on_accept);
     if (ErrKindNone != err_listen.kind) {
       error_print("failed to listen and serve", err_listen);
       return 1;
