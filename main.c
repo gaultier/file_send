@@ -10,7 +10,9 @@
 
 #include "torrent.c"
 
+#ifdef WITH_TESTS
 #include "test.c"
+#endif
 
 int main(i32 argc, char *argv[]) {
   assert(argv);
