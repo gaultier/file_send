@@ -63,8 +63,67 @@ typedef enum {
 
 typedef struct {
   ErrorKind kind;
+  // When the error came from the operating system, the `errno` that produced
+  // `kind`; 0 otherwise. A real failure never leaves `errno` at 0, so 0 reads
+  // unambiguously as "no OS detail to report".
   u64 data;
 } Error;
+
+// The human readable name of `kind`, for diagnostics only.
+__attribute__((warn_unused_result)) static const char *
+error_kind_to_cstr(ErrorKind kind) {
+  switch (kind) {
+  case ErrKindNone:
+    return "none";
+  case ErrKindOOM:
+    return "out of memory";
+  case ErrKindInvalidData:
+    return "invalid data";
+  case ErrOSKindPermission:
+    return "permission denied";
+  case ErrKindRange:
+    return "out of range";
+  case ErrKindAddrInUse:
+    return "address already in use";
+  case ErrKindAgain:
+    return "would block";
+  case ErrKindInterrupted:
+    return "interrupted";
+  case ErrKindConnReset:
+    return "connection reset";
+  case ErrKindTooManyFiles:
+    return "too many open files";
+  }
+
+  assert(0 && "unreachable");
+}
+
+// Renders `err` to stderr, appending the operating system's own description
+// when the error carries an `errno`.
+static void error_print(const char *context, Error err) {
+  assert(context);
+
+  if (0 == err.data) {
+    fprintf(stderr, "%s: %s\n", context, error_kind_to_cstr(err.kind));
+    return;
+  }
+
+  // `strerror_r` and not `strerror`: a thread is spawned per client, and
+  // `strerror` hands back a buffer shared by the whole process.
+  char os_msg[256] = {0};
+  const i32 ret = strerror_r((i32)err.data, os_msg, sizeof(os_msg));
+
+  if (0 != ret) {
+    // The description did not fit or the number is not a known `errno`; the
+    // number itself is still worth printing.
+    fprintf(stderr, "%s: %s (errno %" PRIu64 ")\n", context,
+            error_kind_to_cstr(err.kind), err.data);
+    return;
+  }
+
+  fprintf(stderr, "%s: %s (errno %" PRIu64 ": %s)\n", context,
+          error_kind_to_cstr(err.kind), err.data, os_msg);
+}
 
 __attribute__((warn_unused_result)) static bool char_is_digit_ascii(u8 c) {
   return '0' <= c && c <= '9';
@@ -72,7 +131,7 @@ __attribute__((warn_unused_result)) static bool char_is_digit_ascii(u8 c) {
 
 // Convert `magnitude`, optionally negated, to an isize.
 // Returns `ErrRange` if the value does not fit.
-__attribute__((warn_unused_result)) static ErrorKind
+__attribute__((warn_unused_result)) static Error
 isize_from_usize(usize magnitude, bool negative, isize *res) {
   assert(res);
 
@@ -83,7 +142,7 @@ isize_from_usize(usize magnitude, bool negative, isize *res) {
   // valid magnitude but not a valid positive value) with no special case.
   const bool overflow = negative ? __builtin_sub_overflow(0, magnitude, res)
                                  : __builtin_add_overflow(magnitude, 0, res);
-  return overflow ? ErrKindRange : ErrKindNone;
+  return (Error){.kind = overflow ? ErrKindRange : ErrKindNone};
 }
 
 // ---------- Arena ----------
@@ -189,20 +248,20 @@ slice_u8_eq_cstr(Slice_u8 s, const char *cstr) {
 // Peek at the first byte of `slice`, leaving it in place.
 // Returns `ErrInvalidData`, and does not touch `*res`, if there is no first
 // byte.
-__attribute__((warn_unused_result)) static ErrorKind
+__attribute__((warn_unused_result)) static Error
 slice_u8_first(Slice_u8 slice, u8 *res) {
   assert(res);
 
   if (!slice.data) {
-    return ErrKindInvalidData;
+    return (Error){.kind = ErrKindInvalidData};
   }
 
   if (slice.len == 0) {
-    return ErrKindInvalidData;
+    return (Error){.kind = ErrKindInvalidData};
   }
 
   *res = slice.data[0];
-  return ErrKindNone;
+  return (Error){.kind = ErrKindNone};
 }
 
 // Advance past `count` bytes. The caller must have already established that
@@ -218,19 +277,19 @@ static void slice_u8_advance(Slice_u8 *slice, usize count) {
   slice->data += count;
 }
 
-__attribute__((warn_unused_result)) static ErrorKind
+__attribute__((warn_unused_result)) static Error
 slice_u8_skip(Slice_u8 *slice, usize count) {
   assert(slice);
   if (!slice->data) {
-    return ErrKindInvalidData;
+    return (Error){.kind = ErrKindInvalidData};
   }
 
   if (slice->len < count) {
-    return ErrKindInvalidData;
+    return (Error){.kind = ErrKindInvalidData};
   }
 
   slice_u8_advance(slice, count);
-  return ErrKindNone;
+  return (Error){.kind = ErrKindNone};
 }
 
 // The caller must have already established that `count` bytes are available:
@@ -258,21 +317,21 @@ __attribute__((warn_unused_result)) static Slice_u8 slice_u8_make(u8 *data,
 // speculative `if (ErrNone != consume(...)) { return ...; }` inside a parse
 // that rolls back. A byte that simply does not match is reported the same way
 // as a missing one: it is the caller that knows whether that is an error.
-__attribute__((warn_unused_result)) static ErrorKind
+__attribute__((warn_unused_result)) static Error
 slice_u8_consume(Slice_u8 *slice, u8 expected) {
   assert(slice);
   assert(slice->data);
 
   u8 actual = 0;
-  if (ErrKindNone != slice_u8_first(*slice, &actual)) {
-    return ErrKindInvalidData;
+  if (ErrKindNone != slice_u8_first(*slice, &actual).kind) {
+    return (Error){.kind = ErrKindInvalidData};
   }
   if (actual != expected) {
-    return ErrKindInvalidData;
+    return (Error){.kind = ErrKindInvalidData};
   }
 
   slice_u8_advance(slice, 1);
-  return ErrKindNone;
+  return (Error){.kind = ErrKindNone};
 }
 // ---------- Unix ----------
 
@@ -283,22 +342,28 @@ slice_u8_consume(Slice_u8 *slice, u8 expected) {
 // Anything not listed is this code calling the kernel wrong, which is what
 // `ErrInvalidData` covers: a bad descriptor, a misaligned address, a length
 // of zero, an unsupported protection, a socket option that does not apply.
-__attribute__((warn_unused_result)) static ErrorKind
+__attribute__((warn_unused_result)) static Error
 unix_error_from_errno(i32 e) {
+  ErrorKind kind = ErrKindInvalidData;
+
   switch (e) {
   case EACCES:
   case EPERM:
-    return ErrOSKindPermission;
+    kind = ErrOSKindPermission;
+    break;
 
   case ENOMEM:
   case ENOBUFS:
-    return ErrKindOOM;
+    kind = ErrKindOOM;
+    break;
 
   case EOVERFLOW:
-    return ErrKindRange;
+    kind = ErrKindRange;
+    break;
 
   case EADDRINUSE:
-    return ErrKindAddrInUse;
+    kind = ErrKindAddrInUse;
+    break;
 
   // `EAGAIN` and `EWOULDBLOCK` are permitted to be the same value, and on
   // this platform they are, so the second label would be a duplicate case.
@@ -306,28 +371,39 @@ unix_error_from_errno(i32 e) {
 #if EAGAIN != EWOULDBLOCK
   case EWOULDBLOCK:
 #endif
-    return ErrKindAgain;
+    kind = ErrKindAgain;
+    break;
 
   case EINTR:
-    return ErrKindInterrupted;
+    kind = ErrKindInterrupted;
+    break;
 
   case ECONNABORTED:
   case ECONNRESET:
   case EPIPE:
-    return ErrKindConnReset;
+    kind = ErrKindConnReset;
+    break;
 
   case EMFILE: // Per process limit.
   case ENFILE: // System wide limit.
-    return ErrKindTooManyFiles;
+    kind = ErrKindTooManyFiles;
+    break;
 
   default:
-    return ErrKindInvalidData;
+    kind = ErrKindInvalidData;
+    break;
   }
+
+  // The `errno` value rides along with the kind so a caller can render the
+  // system's own description. `errno` is never 0 on a real failure, so a
+  // `data` of 0 reads as "no OS detail", which is also what the `e == 0`
+  // case produces.
+  return (Error){.kind = kind, .data = (u64)e};
 }
 
 // On success `*res` is the mapping; on failure it is left alone and the
 // `errno` `mmap` set is mapped onto an `Error`.
-__attribute__((warn_unused_result)) static ErrorKind
+__attribute__((warn_unused_result)) static Error
 unix_virtual_mem_alloc(usize bytes_count, u8 **res) {
   assert(bytes_count > 0);
   assert(res);
@@ -340,7 +416,7 @@ unix_virtual_mem_alloc(usize bytes_count, u8 **res) {
   }
 
   *res = alloc;
-  return ErrKindNone;
+  return (Error){.kind = ErrKindNone};
 }
 
 __attribute__((warn_unused_result)) static usize unix_get_page_size(void) {
@@ -350,13 +426,13 @@ __attribute__((warn_unused_result)) static usize unix_get_page_size(void) {
   return (usize)res;
 }
 
-__attribute__((warn_unused_result)) static ErrorKind
+__attribute__((warn_unused_result)) static Error
 unix_vprotect_none(void *ptr, usize size) {
   if (-1 == mprotect(ptr, size, PROT_NONE)) {
     return unix_error_from_errno(errno);
   }
 
-  return ErrKindNone;
+  return (Error){.kind = ErrKindNone};
 }
 
 // Matches https://pkg.go.dev/path/filepath#Base.
@@ -412,7 +488,7 @@ typedef enum {
 
 typedef enum { SocketTypeUdp, SocketTypeTcp } SocketType;
 
-__attribute__((warn_unused_result)) static ErrorKind
+__attribute__((warn_unused_result)) static Error
 unix_socket(void *ctx, SocketDomain domain, SocketType type, i32 *fd) {
   (void)ctx;
 
@@ -447,10 +523,10 @@ unix_socket(void *ctx, SocketDomain domain, SocketType type, i32 *fd) {
 
   *fd = ret;
 
-  return ErrKindNone;
+  return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static ErrorKind
+__attribute__((warn_unused_result)) static Error
 unix_listen(void *ctx, i32 fd, i32 backlog) {
   (void)ctx;
 
@@ -460,14 +536,14 @@ unix_listen(void *ctx, i32 fd, i32 backlog) {
     return unix_error_from_errno(errno);
   }
 
-  return ErrKindNone;
+  return (Error){.kind = ErrKindNone};
 }
 
 typedef enum {
   FileOpenOptionsReadOnly = 1,
 } FileOpenOptions;
 
-__attribute__((warn_unused_result)) static ErrorKind
+__attribute__((warn_unused_result)) static Error
 unix_open(void *ctx, char *path, FileOpenOptions options, i32 *fd) {
   (void)ctx;
 
@@ -489,7 +565,7 @@ unix_open(void *ctx, char *path, FileOpenOptions options, i32 *fd) {
 
   *fd = ret;
 
-  return ErrKindNone;
+  return (Error){.kind = ErrKindNone};
 }
 
 typedef struct {
@@ -497,7 +573,7 @@ typedef struct {
   u16 port;
 } Ipv4Addr;
 
-__attribute__((warn_unused_result)) static ErrorKind
+__attribute__((warn_unused_result)) static Error
 unix_tcp_bind_ipv4(void *ctx, i32 listen_socket, Ipv4Addr addr) {
 
   (void)ctx;
@@ -518,10 +594,10 @@ unix_tcp_bind_ipv4(void *ctx, i32 listen_socket, Ipv4Addr addr) {
     return unix_error_from_errno(errno);
   }
 
-  return ErrKindNone;
+  return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static ErrorKind
+__attribute__((warn_unused_result)) static Error
 unix_accept(void *ctx, i32 listen_socket, i32 *dst_accept_socket,
             Ipv4Addr *dst_accept_addr) {
 
@@ -547,12 +623,12 @@ unix_accept(void *ctx, i32 listen_socket, i32 *dst_accept_socket,
   dst_accept_addr->port = ntohs(sock_addr_in.sin_port);
   dst_accept_addr->ip = ntohl(sock_addr_in.sin_addr.s_addr);
 
-  return ErrKindNone;
+  return (Error){.kind = ErrKindNone};
 }
 
 typedef void *(*ThreadCallback)(void *data);
 
-__attribute__((warn_unused_result)) static ErrorKind
+__attribute__((warn_unused_result)) static Error
 unix_thread_create(void *ctx, ThreadCallback cb) {
   assert(cb);
 
@@ -577,10 +653,10 @@ unix_thread_create(void *ctx, ThreadCallback cb) {
     return unix_error_from_errno(ret);
   }
 
-  return ErrKindNone;
+  return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static ErrorKind unix_close(void *ctx,
+__attribute__((warn_unused_result)) static Error unix_close(void *ctx,
                                                                 i32 fd) {
   (void)ctx;
 
@@ -590,10 +666,10 @@ __attribute__((warn_unused_result)) static ErrorKind unix_close(void *ctx,
     return unix_error_from_errno(errno);
   }
 
-  return ErrKindNone;
+  return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static ErrorKind
+__attribute__((warn_unused_result)) static Error
 unix_enable_socket_reuse(void *ctx, i32 fd) {
   (void)ctx;
 
@@ -604,10 +680,10 @@ unix_enable_socket_reuse(void *ctx, i32 fd) {
     return unix_error_from_errno(errno);
   }
 
-  return ErrKindNone;
+  return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static ErrorKind
+__attribute__((warn_unused_result)) static Error
 unix_read(void *ctx, i32 fd, u8 *buf, usize len, usize *dst_read) {
   (void)ctx;
 
@@ -625,10 +701,10 @@ unix_read(void *ctx, i32 fd, u8 *buf, usize len, usize *dst_read) {
   assert(ret >= 0);
   *dst_read = (usize)ret;
 
-  return ErrKindNone;
+  return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static ErrorKind
+__attribute__((warn_unused_result)) static Error
 unix_write(void *ctx, i32 fd, u8 *buf, usize len, usize *dst_written) {
   (void)ctx;
 
@@ -646,9 +722,9 @@ unix_write(void *ctx, i32 fd, u8 *buf, usize len, usize *dst_written) {
   assert(ret >= 0);
   *dst_written = (usize)ret;
 
-  return ErrKindNone;
+  return (Error){.kind = ErrKindNone};
 }
-__attribute__((warn_unused_result)) static ErrorKind
+__attribute__((warn_unused_result)) static Error
 unix_udp_multicast_open_ipv4(void *ctx, u32 ipv4, i32 *dst_fd) {
   (void)ctx;
 
@@ -661,7 +737,7 @@ unix_udp_multicast_open_ipv4(void *ctx, u32 ipv4, i32 *dst_fd) {
 
   const u8 ttl = 1;
   if (-1 == setsockopt(fd, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl))) {
-    const ErrorKind err = unix_error_from_errno(errno);
+    const Error err = unix_error_from_errno(errno);
     (void)close(fd);
     return err;
   }
@@ -669,17 +745,17 @@ unix_udp_multicast_open_ipv4(void *ctx, u32 ipv4, i32 *dst_fd) {
   const struct in_addr iface = {.s_addr = htonl(ipv4)};
   if (-1 ==
       setsockopt(fd, IPPROTO_IP, IP_MULTICAST_IF, &iface, sizeof(iface))) {
-    const ErrorKind err = unix_error_from_errno(errno);
+    const Error err = unix_error_from_errno(errno);
     (void)close(fd);
     return err;
   }
 
   *dst_fd = fd;
 
-  return ErrKindNone;
+  return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static ErrorKind
+__attribute__((warn_unused_result)) static Error
 unix_udp_send_to_ipv4(void *ctx, i32 fd, Ipv4Addr addr, const u8 *buf,
                       usize len, usize *dst_sent) {
   (void)ctx;
@@ -704,23 +780,23 @@ unix_udp_send_to_ipv4(void *ctx, i32 fd, Ipv4Addr addr, const u8 *buf,
 
   *dst_sent = (usize)ret;
 
-  return ErrKindNone;
+  return (Error){.kind = ErrKindNone};
 }
 
 // ---------- IO ----------
 
 typedef struct {
-  ErrorKind (*socket)(void *ctx, SocketDomain domain, SocketType type, i32 *fd);
-  ErrorKind (*listen)(void *ctx, i32 fd, i32 backlog);
-  ErrorKind (*open)(void *ctx, char *path, FileOpenOptions options, i32 *fd);
-  ErrorKind (*tcp_bind_ipv4)(void *ctx, i32 listen_socket, Ipv4Addr addr);
-  ErrorKind (*accept)(void *ctx, i32 listen_socket, i32 *dst_accept_socket,
+  Error (*socket)(void *ctx, SocketDomain domain, SocketType type, i32 *fd);
+  Error (*listen)(void *ctx, i32 fd, i32 backlog);
+  Error (*open)(void *ctx, char *path, FileOpenOptions options, i32 *fd);
+  Error (*tcp_bind_ipv4)(void *ctx, i32 listen_socket, Ipv4Addr addr);
+  Error (*accept)(void *ctx, i32 listen_socket, i32 *dst_accept_socket,
                       Ipv4Addr *dst_accept_addr);
-  ErrorKind (*thread_create)(void *ctx, ThreadCallback cb);
-  ErrorKind (*close)(void *ctx, i32 fd);
-  ErrorKind (*enable_socket_reuse)(void *ctx, i32 fd);
-  ErrorKind (*read)(void *ctx, i32 fd, u8 *buf, usize len, usize *dst_read);
-  ErrorKind (*write)(void *ctx, i32 fd, u8 *buf, usize len, usize *dst_written);
+  Error (*thread_create)(void *ctx, ThreadCallback cb);
+  Error (*close)(void *ctx, i32 fd);
+  Error (*enable_socket_reuse)(void *ctx, i32 fd);
+  Error (*read)(void *ctx, i32 fd, u8 *buf, usize len, usize *dst_read);
+  Error (*write)(void *ctx, i32 fd, u8 *buf, usize len, usize *dst_written);
 } IO;
 
 __attribute__((warn_unused_result)) static IO io_unix_make(void) {
@@ -738,10 +814,10 @@ __attribute__((warn_unused_result)) static IO io_unix_make(void) {
   };
 }
 
-typedef ErrorKind (*AcceptCallback)(const IO *io, void *ctx,
+typedef Error (*AcceptCallback)(const IO *io, void *ctx,
                                     Ipv4Addr accept_addr, i32 accept_socket);
 
-__attribute__((warn_unused_result)) static ErrorKind
+__attribute__((warn_unused_result)) static Error
 io_listen_and_serve_tcp_ipv4(const IO *io, void *ctx, Ipv4Addr listen_addr,
                              AcceptCallback on_accept) {
   assert(io);
@@ -749,17 +825,17 @@ io_listen_and_serve_tcp_ipv4(const IO *io, void *ctx, Ipv4Addr listen_addr,
 
   i32 listen_socket = 0;
   {
-    const ErrorKind err_socket =
+    const Error err_socket =
         io->socket(ctx, SocketDomainIpv4, SocketTypeTcp, &listen_socket);
-    if (ErrKindNone != err_socket) {
+    if (ErrKindNone != err_socket.kind) {
       return err_socket;
     }
     puts("opened socket");
   }
   {
-    const ErrorKind err_reuse = io->enable_socket_reuse(ctx, listen_socket);
+    const Error err_reuse = io->enable_socket_reuse(ctx, listen_socket);
 
-    if (ErrKindNone != err_reuse) {
+    if (ErrKindNone != err_reuse.kind) {
       return err_reuse;
     }
   }
@@ -767,9 +843,9 @@ io_listen_and_serve_tcp_ipv4(const IO *io, void *ctx, Ipv4Addr listen_addr,
   {
     // A port left behind by a previous run is an ordinary answer, not a bug
     // in this process, so it travels back as an `Error`.
-    const ErrorKind err_bind =
+    const Error err_bind =
         io->tcp_bind_ipv4(ctx, listen_socket, listen_addr);
-    if (ErrKindNone != err_bind) {
+    if (ErrKindNone != err_bind.kind) {
       (void)io->close(ctx, listen_socket);
       return err_bind;
     }
@@ -777,8 +853,8 @@ io_listen_and_serve_tcp_ipv4(const IO *io, void *ctx, Ipv4Addr listen_addr,
   }
 
   {
-    const ErrorKind err_listen = io->listen(ctx, listen_socket, 1024);
-    if (ErrKindNone != err_listen) {
+    const Error err_listen = io->listen(ctx, listen_socket, 1024);
+    if (ErrKindNone != err_listen.kind) {
       (void)io->close(ctx, listen_socket);
       return err_listen;
     }
@@ -789,16 +865,16 @@ io_listen_and_serve_tcp_ipv4(const IO *io, void *ctx, Ipv4Addr listen_addr,
     i32 accept_socket = 0;
     Ipv4Addr accept_addr = {0};
 
-    const ErrorKind err_accept =
+    const Error err_accept =
         io->accept(ctx, listen_socket, &accept_socket, &accept_addr);
 
     // The peer is allowed to vanish between the handshake and the `accept`.
     // That is one dead connection, not a dead server.
-    if (ErrKindConnReset == err_accept) {
+    if (ErrKindConnReset == err_accept.kind) {
       continue;
     }
 
-    if (ErrKindNone != err_accept) {
+    if (ErrKindNone != err_accept.kind) {
       // TODO: `ErrTooManyFiles` is transient and deserves a backoff instead
       // of tearing the listener down, which needs a timer in `IO`.
       (void)io->close(ctx, listen_socket);
@@ -807,10 +883,10 @@ io_listen_and_serve_tcp_ipv4(const IO *io, void *ctx, Ipv4Addr listen_addr,
 
     // `accept_socket` belongs to the callback from here on, including
     // closing it when the callback itself fails.
-    const ErrorKind err_on_accept =
+    const Error err_on_accept =
         on_accept(io, ctx, accept_addr, accept_socket);
-    if (ErrKindNone != err_on_accept) {
-      fprintf(stderr, "failed to handle connection: %d\n", err_on_accept);
+    if (ErrKindNone != err_on_accept.kind) {
+      error_print("failed to handle connection", err_on_accept);
     }
   }
 }
@@ -865,7 +941,7 @@ __attribute__((warn_unused_result)) static usize ceil_usize(usize numerator,
 
 // On success `*res` is the arena; on failure it is left alone and the reason
 // `mmap` gave is passed through.
-__attribute__((warn_unused_result)) static ErrorKind
+__attribute__((warn_unused_result)) static Error
 arena_valloc(usize bytes_count, Arena *res) {
   assert(res);
 
@@ -879,15 +955,15 @@ arena_valloc(usize bytes_count, Arena *res) {
 
   u8 *arena_memory = NULL;
   {
-    const ErrorKind err = unix_virtual_mem_alloc(os_alloc_size, &arena_memory);
-    if (ErrKindNone != err) {
+    const Error err = unix_virtual_mem_alloc(os_alloc_size, &arena_memory);
+    if (ErrKindNone != err.kind) {
       return err;
     }
   }
   assert(arena_memory);
 
   assert(ErrKindNone ==
-         unix_vprotect_none(arena_memory + usable_bytes, page_size));
+         unix_vprotect_none(arena_memory + usable_bytes, page_size).kind);
 
   // Right-align the arena against the guard page so that *any* write past
   // `arena.end` faults immediately, then round the start down to the
@@ -901,7 +977,7 @@ arena_valloc(usize bytes_count, Arena *res) {
 
   *res =
       arena_from_mem((u8 *)start, (usize)arena_memory + usable_bytes - start);
-  return ErrKindNone;
+  return (Error){.kind = ErrKindNone};
 }
 
 // Parse a run of ASCII digits from the front of `*data`, consuming them.
@@ -909,13 +985,13 @@ arena_valloc(usize bytes_count, Arena *res) {
 // Rejects a run with no digits at all, one that is not terminated by a
 // non-digit, one with a leading zero, and one that overflows a `usize`.
 // `*data` is only advanced, and `*res` only written, when the parse succeeds.
-__attribute__((warn_unused_result)) static ErrorKind
+__attribute__((warn_unused_result)) static Error
 ascii_num_parse(Slice_u8 *data, usize *res) {
   assert(data);
   assert(res);
 
   if (!data->data) {
-    return ErrKindInvalidData;
+    return (Error){.kind = ErrKindInvalidData};
   }
 
   Slice_u8 remaining = *data;
@@ -928,21 +1004,21 @@ ascii_num_parse(Slice_u8 *data, usize *res) {
     u8 current = 0;
 
     // Unterminated.
-    if (ErrKindNone != slice_u8_first(remaining, &current)) {
-      return ErrKindInvalidData;
+    if (ErrKindNone != slice_u8_first(remaining, &current).kind) {
+      return (Error){.kind = ErrKindInvalidData};
     }
 
     // End.
     if (!char_is_digit_ascii(current)) {
       // No digit at all e.g. `e` or `:spam`: not a number.
       if (0 == consumed) {
-        return ErrKindInvalidData;
+        return (Error){.kind = ErrKindInvalidData};
       }
 
       assert(consumed < MAX_LEN);
       *data = remaining;
       *res = num;
-      return ErrKindNone;
+      return (Error){.kind = ErrKindNone};
     }
 
     if (current == '0' && consumed == 0) {
@@ -951,17 +1027,17 @@ ascii_num_parse(Slice_u8 *data, usize *res) {
 
     // Leading zeroes forbidden except `i0e`.
     if (consumed > 0 && has_leading_zero) {
-      return ErrKindInvalidData;
+      return (Error){.kind = ErrKindInvalidData};
     }
 
     // A run of digits too long for a `usize` is well formed but out of
     // range, which is a different complaint from malformed input.
     const usize digit = current - '0';
     if (__builtin_mul_overflow(num, 10, &num)) {
-      return ErrKindRange;
+      return (Error){.kind = ErrKindRange};
     }
     if (__builtin_add_overflow(num, digit, &num)) {
-      return ErrKindRange;
+      return (Error){.kind = ErrKindRange};
     }
 
     slice_u8_advance(&remaining, 1);
@@ -1004,7 +1080,7 @@ struct BencodeValue {
 //
 // `*input` is only advanced, and `*res` only written, when the parse
 // succeeds.
-__attribute__((warn_unused_result)) static ErrorKind
+__attribute__((warn_unused_result)) static Error
 bencode_parse_num(Slice_u8 *input, BencodeValue *res) {
   assert(input);
   assert(input->data);
@@ -1012,43 +1088,43 @@ bencode_parse_num(Slice_u8 *input, BencodeValue *res) {
 
   Slice_u8 remaining = *input;
 
-  if (ErrKindNone != slice_u8_consume(&remaining, 'i')) {
-    return ErrKindInvalidData;
+  if (ErrKindNone != slice_u8_consume(&remaining, 'i').kind) {
+    return (Error){.kind = ErrKindInvalidData};
   }
 
-  const bool negative_sign = ErrKindNone == slice_u8_consume(&remaining, '-');
+  const bool negative_sign = ErrKindNone == slice_u8_consume(&remaining, '-').kind;
 
   // Also rejects `ie` and `i-e`: a number needs at least one digit. A run of
   // digits too wide for a `usize` comes back as `ErrRange`, which is passed
   // through rather than flattened: the input is well formed, just too big.
   usize magnitude = 0;
   {
-    const ErrorKind err = ascii_num_parse(&remaining, &magnitude);
-    if (ErrKindNone != err) {
+    const Error err = ascii_num_parse(&remaining, &magnitude);
+    if (ErrKindNone != err.kind) {
       return err;
     }
   }
 
   // `i-0e` is invalid bencode.
   if (negative_sign && 0 == magnitude) {
-    return ErrKindInvalidData;
+    return (Error){.kind = ErrKindInvalidData};
   }
 
   isize num = 0;
   {
-    const ErrorKind err = isize_from_usize(magnitude, negative_sign, &num);
-    if (ErrKindNone != err) {
+    const Error err = isize_from_usize(magnitude, negative_sign, &num);
+    if (ErrKindNone != err.kind) {
       return err;
     }
   }
 
-  if (ErrKindNone != slice_u8_consume(&remaining, 'e')) {
-    return ErrKindInvalidData;
+  if (ErrKindNone != slice_u8_consume(&remaining, 'e').kind) {
+    return (Error){.kind = ErrKindInvalidData};
   }
 
   *input = remaining;
   *res = (BencodeValue){.kind = BencodeKindInteger, .v.num = num};
-  return ErrKindNone;
+  return (Error){.kind = ErrKindNone};
 }
 
 // `4:spam`
@@ -1056,7 +1132,7 @@ bencode_parse_num(Slice_u8 *input, BencodeValue *res) {
 // The string is not copied: it points into `*input`.
 // `*input` is only advanced, and `*res` only written, when the parse
 // succeeds.
-__attribute__((warn_unused_result)) static ErrorKind
+__attribute__((warn_unused_result)) static Error
 bencode_parse_string(Slice_u8 *input, BencodeValue *res) {
   assert(input);
   assert(input->data);
@@ -1067,19 +1143,19 @@ bencode_parse_string(Slice_u8 *input, BencodeValue *res) {
   // Also rejects a leading `:` or any non-digit: a length needs a digit.
   usize len = 0;
   {
-    const ErrorKind err = ascii_num_parse(&remaining, &len);
-    if (ErrKindNone != err) {
+    const Error err = ascii_num_parse(&remaining, &len);
+    if (ErrKindNone != err.kind) {
       return err;
     }
   }
 
-  if (ErrKindNone != slice_u8_consume(&remaining, ':')) {
-    return ErrKindInvalidData;
+  if (ErrKindNone != slice_u8_consume(&remaining, ':').kind) {
+    return (Error){.kind = ErrKindInvalidData};
   }
 
   // Truncated body.
   if (len > remaining.len) {
-    return ErrKindInvalidData;
+    return (Error){.kind = ErrKindInvalidData};
   }
 
   const Slice_u8 s = slice_u8_take(remaining, len);
@@ -1092,7 +1168,7 @@ bencode_parse_string(Slice_u8 *input, BencodeValue *res) {
   if (0 != res->v.s.len) {
     assert(res->v.s.data);
   }
-  return ErrKindNone;
+  return (Error){.kind = ErrKindNone};
 }
 
 // Compare two byte strings lexicographically: the first differing byte
@@ -1127,7 +1203,7 @@ bytes_cmp(const u8 *a, usize a_len, const u8 *b, usize b_len) {
   return a_len < b_len ? -1 : 1;
 }
 
-__attribute__((warn_unused_result)) static ErrorKind
+__attribute__((warn_unused_result)) static Error
 bencode_validate_dict(BencodeList list) {
   if (0 != list.len) {
     assert(NULL != list.data);
@@ -1135,14 +1211,14 @@ bencode_validate_dict(BencodeList list) {
 
   // Mismatched key-value pairs?
   if (list.len % 2 != 0) {
-    return ErrKindInvalidData;
+    return (Error){.kind = ErrKindInvalidData};
   }
 
   for (usize i = 0; i < list.len; i += 2) {
     const BencodeValue key = list.data[i];
 
     if (key.kind != BencodeKindString) {
-      return ErrKindInvalidData;
+      return (Error){.kind = ErrKindInvalidData};
     }
 
     if (i > 1) {
@@ -1150,12 +1226,12 @@ bencode_validate_dict(BencodeList list) {
 
       if (bytes_cmp(previous.v.s.data, previous.v.s.len, key.v.s.data,
                     key.v.s.len) >= 0) {
-        return ErrKindInvalidData;
+        return (Error){.kind = ErrKindInvalidData};
       }
     }
   }
 
-  return ErrKindNone;
+  return (Error){.kind = ErrKindNone};
 }
 
 #define BENCODE_MAX_DEPTH 128
@@ -1167,7 +1243,7 @@ bencode_validate_dict(BencodeList list) {
 // parse leaves the caller with neither consumed input nor consumed memory.
 //
 // `scratch` is taken by value and is not consumed by the call.
-__attribute__((warn_unused_result)) static ErrorKind
+__attribute__((warn_unused_result)) static Error
 bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
   assert(input);
   assert(arena);
@@ -1179,7 +1255,7 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
 
   // Nothing to do?
   if (0 == input->len) {
-    return ErrKindInvalidData;
+    return (Error){.kind = ErrKindInvalidData};
   }
 
   Slice_u8 remaining = *input;
@@ -1192,7 +1268,7 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
                                      sizeof(BencodeValue), values_cap);
   // OOM?
   if (!values) {
-    return ErrKindOOM;
+    return (Error){.kind = ErrKindOOM};
   }
   usize values_count = 0;
 
@@ -1203,8 +1279,8 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
 
   for (usize _i = 0; _i < MAX_LEN; _i++) {
     u8 current = 0;
-    if (ErrKindNone != slice_u8_first(remaining, &current)) {
-      return ErrKindInvalidData;
+    if (ErrKindNone != slice_u8_first(remaining, &current).kind) {
+      return (Error){.kind = ErrKindInvalidData};
     }
 
     switch (current) {
@@ -1212,9 +1288,9 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
       // Parsed straight into its final slot: no intermediate copy.
       assert(values_count < values_cap);
       {
-        const ErrorKind err =
+        const Error err =
             bencode_parse_num(&remaining, &values[values_count]);
-        if (ErrKindNone != err) {
+        if (ErrKindNone != err.kind) {
           return err;
         }
       }
@@ -1224,7 +1300,7 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
     case 'l':
     case 'd':
       if (containers_count >= BENCODE_MAX_DEPTH) {
-        return ErrKindInvalidData;
+        return (Error){.kind = ErrKindInvalidData};
       }
       slice_u8_advance(&remaining, 1);
 
@@ -1238,7 +1314,7 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
     case 'e': {
       if (0 == containers_count) {
         // Stray `e`, reject.
-        return ErrKindInvalidData;
+        return (Error){.kind = ErrKindInvalidData};
       }
 
       slice_u8_advance(&remaining, 1);
@@ -1252,7 +1328,7 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
 
       // Should always be key-value pairs.
       if (!container.is_list && children_len % 2 != 0) {
-        return ErrKindInvalidData;
+        return (Error){.kind = ErrKindInvalidData};
       }
 
       // Now record the value for this container.
@@ -1266,7 +1342,7 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
                         sizeof(BencodeValue), children_len);
         // OOM?
         if (!children) {
-          return ErrKindOOM;
+          return (Error){.kind = ErrKindOOM};
         }
 
         // Copy the items from `values` to the new right-sized allocation.
@@ -1275,8 +1351,8 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
         value.v.list.len = children_len;
 
         if (BencodeKindDict == value.kind) {
-          const ErrorKind err = bencode_validate_dict(value.v.list);
-          if (ErrKindNone != err) {
+          const Error err = bencode_validate_dict(value.v.list);
+          if (ErrKindNone != err.kind) {
             return err;
           }
         }
@@ -1306,9 +1382,9 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
       // Parsed straight into its final slot: no intermediate copy.
       assert(values_count < values_cap);
       {
-        const ErrorKind err =
+        const Error err =
             bencode_parse_string(&remaining, &values[values_count]);
-        if (ErrKindNone != err) {
+        if (ErrKindNone != err.kind) {
           return err;
         }
       }
@@ -1317,7 +1393,7 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
 
       // Unknown character.
     default:
-      return ErrKindInvalidData;
+      return (Error){.kind = ErrKindInvalidData};
     }
 
     // We just finished to correctly parse a value.
@@ -1333,11 +1409,11 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
       *input = remaining;
       *arena = arena_local;
       *res = values[0];
-      return ErrKindNone;
+      return (Error){.kind = ErrKindNone};
     }
   }
 
-  return ErrKindInvalidData;
+  return (Error){.kind = ErrKindInvalidData};
 }
 
 static void bencode_print_indent(usize indent) {
@@ -1949,7 +2025,7 @@ static void torrent_build_merkle_sub_tree(const MerkleTree *tree,
 // Build the merkle tree for one file, yielding its root (`pieces root` in the
 // info dictionary) and its piece layer (`piece layers` at the torrent root).
 // An empty file has neither, per BEP 52, and leaves `root` zeroed.
-__attribute__((warn_unused_result)) static ErrorKind
+__attribute__((warn_unused_result)) static Error
 torrent_build_merkle_tree(Slice_u8 data, usize piece_length_in_bytes,
                           PieceHash **piece_hashes, usize *piece_hashes_count,
                           u8 root[SHA256_DIGEST_LENGTH], Arena *arena) {
@@ -1966,7 +2042,7 @@ torrent_build_merkle_tree(Slice_u8 data, usize piece_length_in_bytes,
   memset(root, 0, SHA256_DIGEST_LENGTH);
 
   if (0 == data.len) {
-    return ErrKindNone;
+    return (Error){.kind = ErrKindNone};
   }
   assert(data.data);
 
@@ -1977,7 +2053,7 @@ torrent_build_merkle_tree(Slice_u8 data, usize piece_length_in_bytes,
                                         sizeof(PieceHash), pieces_count);
   // OOM?
   if (!hashes) {
-    return ErrKindOOM;
+    return (Error){.kind = ErrKindOOM};
   }
 
   const MerkleTree tree =
@@ -2007,10 +2083,10 @@ torrent_build_merkle_tree(Slice_u8 data, usize piece_length_in_bytes,
     *piece_hashes_count = tree.pieces_count;
   }
 
-  return ErrKindNone;
+  return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static ErrorKind
+__attribute__((warn_unused_result)) static Error
 torrent_make_metainfo_dict_v2(Slice_u8 pieces_root, Slice_u8 announce_url,
                               BencodeList info_dict,
                               const PieceHash *piece_hashes,
@@ -2032,7 +2108,7 @@ torrent_make_metainfo_dict_v2(Slice_u8 pieces_root, Slice_u8 announce_url,
   dst->v.list.data = arena_alloc(arena, __alignof__(BencodeValue),
                                  sizeof(BencodeValue), dst->v.list.len);
   if (!dst->v.list.data) {
-    return ErrKindOOM;
+    return (Error){.kind = ErrKindOOM};
   }
 
   // `metainfo["announce"] = announce_url`
@@ -2072,7 +2148,7 @@ torrent_make_metainfo_dict_v2(Slice_u8 pieces_root, Slice_u8 announce_url,
     // which leaves the dict empty.
     if (0 == piece_hashes_count) {
       pieces_value->v.list = (BencodeList){0};
-      return ErrKindNone;
+      return (Error){.kind = ErrKindNone};
     }
 
     assert(piece_hashes);
@@ -2081,7 +2157,7 @@ torrent_make_metainfo_dict_v2(Slice_u8 pieces_root, Slice_u8 announce_url,
         arena_alloc(arena, __alignof__(BencodeValue), sizeof(BencodeValue),
                     pieces_value->v.list.len);
     if (!pieces_value->v.list.data) {
-      return ErrKindOOM;
+      return (Error){.kind = ErrKindOOM};
     }
 
     // `metainfo["piece layers"][pieces_root] = piece_hashes`
@@ -2100,17 +2176,17 @@ torrent_make_metainfo_dict_v2(Slice_u8 pieces_root, Slice_u8 announce_url,
       layer_value->v.s.data =
           arena_alloc(arena, __alignof__(u8), sizeof(u8), layer_value->v.s.len);
       if (!layer_value->v.s.data) {
-        return ErrKindOOM;
+        return (Error){.kind = ErrKindOOM};
       }
 
       memcpy(layer_value->v.s.data, piece_hashes, layer_value->v.s.len);
     }
   }
 
-  return ErrKindNone;
+  return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static ErrorKind torrent_make_info_dict_v2(
+__attribute__((warn_unused_result)) static Error torrent_make_info_dict_v2(
     Slice_u8 name, usize piece_length_in_bytes, Slice_u8 file_data,
     Slice_u8 file_name, BencodeValue *dst_info_dict, Slice_u8 *dst_pieces_root,
     PieceHash **dst_piece_hashes, usize *dst_piece_hashes_count, Arena *arena) {
@@ -2134,7 +2210,7 @@ __attribute__((warn_unused_result)) static ErrorKind torrent_make_info_dict_v2(
                                  sizeof(BencodeValue), dict_items_count * 2),
   };
   if (NULL == dst_info_dict->v.list.data) {
-    return ErrKindOOM;
+    return (Error){.kind = ErrKindOOM};
   }
 
   // `info["name"] = name`
@@ -2156,9 +2232,9 @@ __attribute__((warn_unused_result)) static ErrorKind torrent_make_info_dict_v2(
 
     BencodeValue *const value = &dst_info_dict->v.list.data[7];
     value->kind = BencodeKindInteger;
-    const ErrorKind err =
+    const Error err =
         isize_from_usize(piece_length_in_bytes, false, &value->v.num);
-    if (ErrKindNone != err) {
+    if (ErrKindNone != err.kind) {
       return err;
     }
   }
@@ -2183,10 +2259,10 @@ __attribute__((warn_unused_result)) static ErrorKind torrent_make_info_dict_v2(
         slice_u8_make((u8 *)"file tree", sizeof("file tree") - 1);
 
     u8 root[SHA256_DIGEST_LENGTH] = {0};
-    const ErrorKind err = torrent_build_merkle_tree(
+    const Error err = torrent_build_merkle_tree(
         file_data, piece_length_in_bytes, dst_piece_hashes,
         dst_piece_hashes_count, root, arena);
-    if (ErrKindNone != err) {
+    if (ErrKindNone != err.kind) {
       return err;
     }
     // If the file data does not fit within one piece, then the piece layer is
@@ -2203,7 +2279,7 @@ __attribute__((warn_unused_result)) static ErrorKind torrent_make_info_dict_v2(
         arena_alloc(arena, __alignof__(BencodeValue), sizeof(BencodeValue),
                     file_tree_dict->v.list.len);
     if (NULL == file_tree_dict->v.list.data) {
-      return ErrKindOOM;
+      return (Error){.kind = ErrKindOOM};
     }
 
     // `info["file tree"][file_name] = {}`
@@ -2219,7 +2295,7 @@ __attribute__((warn_unused_result)) static ErrorKind torrent_make_info_dict_v2(
           arena_alloc(arena, __alignof__(BencodeValue), sizeof(BencodeValue),
                       file_name_dict->v.list.len);
       if (NULL == file_name_dict->v.list.data) {
-        return ErrKindOOM;
+        return (Error){.kind = ErrKindOOM};
       }
 
       // `info["file tree"][file_name][""] = {}`
@@ -2235,7 +2311,7 @@ __attribute__((warn_unused_result)) static ErrorKind torrent_make_info_dict_v2(
             arena_alloc(arena, __alignof__(BencodeValue), sizeof(BencodeValue),
                         empty_dict->v.list.len);
         if (NULL == empty_dict->v.list.data) {
-          return ErrKindOOM;
+          return (Error){.kind = ErrKindOOM};
         }
 
         // `info["file tree"][file_name][""]["length"] = file_data.length`
@@ -2246,9 +2322,9 @@ __attribute__((warn_unused_result)) static ErrorKind torrent_make_info_dict_v2(
 
           BencodeValue *const length_value = &empty_dict->v.list.data[1];
           length_value->kind = BencodeKindInteger;
-          const ErrorKind length_err =
+          const Error length_err =
               isize_from_usize(file_data.len, false, &length_value->v.num);
-          if (ErrKindNone != length_err) {
+          if (ErrKindNone != length_err.kind) {
             return length_err;
           }
         }
@@ -2266,7 +2342,7 @@ __attribute__((warn_unused_result)) static ErrorKind torrent_make_info_dict_v2(
           pieces_root_value->v.s.data = arena_alloc(
               arena, __alignof__(u8), sizeof(u8), SHA256_DIGEST_LENGTH);
           if (NULL == pieces_root_value->v.s.data) {
-            return ErrKindOOM;
+            return (Error){.kind = ErrKindOOM};
           }
           memcpy(pieces_root_value->v.s.data, root, SHA256_DIGEST_LENGTH);
 
@@ -2278,7 +2354,7 @@ __attribute__((warn_unused_result)) static ErrorKind torrent_make_info_dict_v2(
     }
   }
 
-  return ErrKindNone;
+  return (Error){.kind = ErrKindNone};
 }
 
 __attribute__((warn_unused_result)) static usize usize_digits_base_10(usize n) {
@@ -2461,7 +2537,7 @@ bencode_encode_in_place(BencodeValue b, Slice_u8 dst) {
   return written;
 }
 
-__attribute__((warn_unused_result)) static ErrorKind
+__attribute__((warn_unused_result)) static Error
 bencode_encode(BencodeValue b, Slice_u8 *dst, Arena *arena) {
   assert(dst);
   assert(arena);
@@ -2472,14 +2548,14 @@ bencode_encode(BencodeValue b, Slice_u8 *dst, Arena *arena) {
       (Slice_u8){.data = arena_alloc(arena, __alignof__(u8), sizeof(u8), size),
                  .len = size};
   if (!dst->data) {
-    return ErrKindOOM;
+    return (Error){.kind = ErrKindOOM};
   }
 
   const usize written = bencode_encode_in_place(b, *dst);
   assert(written == size);
   assert(written == dst->len);
 
-  return ErrKindNone;
+  return (Error){.kind = ErrKindNone};
 }
 
 // ---------------------------------------------------------------------------
@@ -2492,7 +2568,7 @@ bencode_encode(BencodeValue b, Slice_u8 *dst, Arena *arena) {
 // instead.
 __attribute__((warn_unused_result)) static Arena test_arena(usize bytes_count) {
   Arena arena = {0};
-  assert(ErrKindNone == arena_valloc(bytes_count, &arena));
+  assert(ErrKindNone == arena_valloc(bytes_count, &arena).kind);
   assert(arena.start);
   assert(arena.end);
   assert((usize)arena.end - (usize)arena.start >= bytes_count);
@@ -2523,26 +2599,26 @@ static void test_isize_from_usize(void) {
   isize res = 0;
 
   // Positive.
-  assert(ErrKindNone == isize_from_usize(0, false, &res));
+  assert(ErrKindNone == isize_from_usize(0, false, &res).kind);
   assert(0 == res);
-  assert(ErrKindNone == isize_from_usize(123, false, &res));
+  assert(ErrKindNone == isize_from_usize(123, false, &res).kind);
   assert(123 == res);
-  assert(ErrKindNone == isize_from_usize((usize)SSIZE_MAX, false, &res));
+  assert(ErrKindNone == isize_from_usize((usize)SSIZE_MAX, false, &res).kind);
   assert(SSIZE_MAX == res);
-  assert(ErrKindNone != isize_from_usize((usize)SSIZE_MAX + 1, false, &res));
-  assert(ErrKindNone != isize_from_usize(SIZE_MAX, false, &res));
+  assert(ErrKindNone != isize_from_usize((usize)SSIZE_MAX + 1, false, &res).kind);
+  assert(ErrKindNone != isize_from_usize(SIZE_MAX, false, &res).kind);
 
   // Negative. `|ISIZE_MIN|` is one greater than `ISIZE_MAX`.
-  assert(ErrKindNone == isize_from_usize(0, true, &res));
+  assert(ErrKindNone == isize_from_usize(0, true, &res).kind);
   assert(0 == res);
-  assert(ErrKindNone == isize_from_usize(123, true, &res));
+  assert(ErrKindNone == isize_from_usize(123, true, &res).kind);
   assert(-123 == res);
-  assert(ErrKindNone == isize_from_usize((usize)SSIZE_MAX, true, &res));
+  assert(ErrKindNone == isize_from_usize((usize)SSIZE_MAX, true, &res).kind);
   assert(-SSIZE_MAX == res);
-  assert(ErrKindNone == isize_from_usize((usize)SSIZE_MAX + 1, true, &res));
+  assert(ErrKindNone == isize_from_usize((usize)SSIZE_MAX + 1, true, &res).kind);
   assert((-SSIZE_MAX - 1) == res);
-  assert(ErrKindNone != isize_from_usize((usize)SSIZE_MAX + 2, true, &res));
-  assert(ErrKindNone != isize_from_usize(SIZE_MAX, true, &res));
+  assert(ErrKindNone != isize_from_usize((usize)SSIZE_MAX + 2, true, &res).kind);
+  assert(ErrKindNone != isize_from_usize(SIZE_MAX, true, &res).kind);
 }
 
 static void test_usize_round_up_multiple_of(void) {
@@ -2733,14 +2809,17 @@ static void test_unix_error_from_errno(void) {
   };
 
   for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-    assert(cases[i].expected == unix_error_from_errno(cases[i].errno_value));
-    assert(ErrKindNone != unix_error_from_errno(cases[i].errno_value));
+    assert(cases[i].expected == unix_error_from_errno(cases[i].errno_value).kind);
+    // The `errno` value is preserved verbatim for the caller to render.
+    assert((u64)cases[i].errno_value ==
+           unix_error_from_errno(cases[i].errno_value).data);
+    assert(ErrKindNone != unix_error_from_errno(cases[i].errno_value).kind);
   }
 
   // `EAGAIN` and `EWOULDBLOCK` are allowed to be the same value; whether they
   // are or not, both have to answer `ErrAgain`.
-  assert(ErrKindAgain == unix_error_from_errno(EAGAIN));
-  assert(ErrKindAgain == unix_error_from_errno(EWOULDBLOCK));
+  assert(ErrKindAgain == unix_error_from_errno(EAGAIN).kind);
+  assert(ErrKindAgain == unix_error_from_errno(EWOULDBLOCK).kind);
 }
 
 static void test_arena_valloc(void) {
@@ -2748,7 +2827,7 @@ static void test_arena_valloc(void) {
   // NULL, so this also pins down that conversion, and that the `ENOMEM` it
   // sets comes back as `ErrOOM` rather than a bare failure.
   Arena arena = {0};
-  assert(ErrKindOOM == arena_valloc((usize)1 << 62, &arena));
+  assert(ErrKindOOM == arena_valloc((usize)1 << 62, &arena).kind);
 
   // A failed call leaves the caller's arena alone.
   assert(NULL == arena.start);
@@ -2761,46 +2840,46 @@ static void test_slice_u8(void) {
   // slice_u8_first.
   {
     u8 first = 0xAA;
-    assert(ErrKindNone != slice_u8_first(slice_u8_make(NULL, 0), &first));
-    assert(ErrKindNone != slice_u8_first(slice_u8_make(data, 0), &first));
+    assert(ErrKindNone != slice_u8_first(slice_u8_make(NULL, 0), &first).kind);
+    assert(ErrKindNone != slice_u8_first(slice_u8_make(data, 0), &first).kind);
     // Nothing is written when there is no first byte.
     assert(0xAA == first);
 
     assert(ErrKindNone ==
-           slice_u8_first(slice_u8_make(data, sizeof(data)), &first));
+           slice_u8_first(slice_u8_make(data, sizeof(data)), &first).kind);
     assert('a' == first);
 
     // Peeking does not consume.
     Slice_u8 slice = slice_u8_make(data, sizeof(data));
-    assert(ErrKindNone == slice_u8_first(slice, &first));
+    assert(ErrKindNone == slice_u8_first(slice, &first).kind);
     assert(sizeof(data) == slice.len);
   }
   // slice_u8_skip.
   {
     Slice_u8 empty = slice_u8_make(NULL, 0);
-    assert(ErrKindNone != slice_u8_skip(&empty, 1));
+    assert(ErrKindNone != slice_u8_skip(&empty, 1).kind);
 
     Slice_u8 slice = slice_u8_make(data, sizeof(data));
 
     // Past the end: refused, and the slice is unchanged.
-    assert(ErrKindNone != slice_u8_skip(&slice, sizeof(data) + 1));
+    assert(ErrKindNone != slice_u8_skip(&slice, sizeof(data) + 1).kind);
     assert(sizeof(data) == slice.len);
     assert(data == slice.data);
 
-    assert(ErrKindNone == slice_u8_skip(&slice, 0));
+    assert(ErrKindNone == slice_u8_skip(&slice, 0).kind);
     assert(sizeof(data) == slice.len);
 
-    assert(ErrKindNone == slice_u8_skip(&slice, 2));
+    assert(ErrKindNone == slice_u8_skip(&slice, 2).kind);
     assert(1 == slice.len);
 
     u8 first = 0;
-    assert(ErrKindNone == slice_u8_first(slice, &first));
+    assert(ErrKindNone == slice_u8_first(slice, &first).kind);
     assert('c' == first);
 
     // Skipping exactly to the end is legal.
-    assert(ErrKindNone == slice_u8_skip(&slice, 1));
+    assert(ErrKindNone == slice_u8_skip(&slice, 1).kind);
     assert(0 == slice.len);
-    assert(ErrKindNone != slice_u8_first(slice, &first));
+    assert(ErrKindNone != slice_u8_first(slice, &first).kind);
   }
   // slice_u8_take.
   {
@@ -2931,7 +3010,7 @@ static void test_ascii_num_parse(void) {
     const Slice_u8 before = data;
 
     usize num = 0xAA;
-    assert(cases[i].expected == ascii_num_parse(&data, &num));
+    assert(cases[i].expected == ascii_num_parse(&data, &num).kind);
 
     if (ErrKindNone != cases[i].expected) {
       // A failed parse consumes nothing and writes nothing.
@@ -2950,7 +3029,7 @@ static void test_ascii_num_parse(void) {
   {
     Slice_u8 data = slice_u8_make(NULL, 0);
     usize num = 0;
-    assert(ErrKindInvalidData == ascii_num_parse(&data, &num));
+    assert(ErrKindInvalidData == ascii_num_parse(&data, &num).kind);
   }
 }
 
@@ -2993,7 +3072,7 @@ static void test_bencode_parse_num(void) {
 
     // Poisoned so that a write on the failure path is visible.
     BencodeValue value = {.kind = BencodeKindDict};
-    assert((ErrKindNone == bencode_parse_num(&data, &value)) == cases[i].ok);
+    assert((ErrKindNone == bencode_parse_num(&data, &value).kind) == cases[i].ok);
 
     if (!cases[i].ok) {
       // A failed parse consumes nothing and writes nothing.
@@ -3039,7 +3118,7 @@ static void test_bencode_parse_string(void) {
 
     // Poisoned so that a write on the failure path is visible.
     BencodeValue value = {.kind = BencodeKindDict};
-    assert((ErrKindNone == bencode_parse_string(&data, &value)) == cases[i].ok);
+    assert((ErrKindNone == bencode_parse_string(&data, &value).kind) == cases[i].ok);
 
     if (!cases[i].ok) {
       // A failed parse consumes nothing and writes nothing.
@@ -3060,7 +3139,7 @@ static void test_bencode_parse_string(void) {
     Slice_u8 data = test_slice(input);
 
     BencodeValue value = {0};
-    assert(ErrKindNone == bencode_parse_string(&data, &value));
+    assert(ErrKindNone == bencode_parse_string(&data, &value).kind);
     assert((u8 *)input + 2 == value.v.s.data);
   }
 }
@@ -3162,7 +3241,7 @@ static void test_bencode_parse(void) {
     u8 *const arena_start = arena.start;
 
     BencodeValue value = {0};
-    assert((ErrKindNone == bencode_parse(&data, &arena, scratch, &value)) ==
+    assert((ErrKindNone == bencode_parse(&data, &arena, scratch, &value).kind) ==
            cases[i].ok);
 
     if (!cases[i].ok) {
@@ -3195,7 +3274,7 @@ static void test_bencode_parse(void) {
 
       BencodeValue value = {0};
       // Only `0:` has a body short enough to succeed.
-      assert((ErrKindNone == bencode_parse(&data, &arena, scratch, &value)) ==
+      assert((ErrKindNone == bencode_parse(&data, &arena, scratch, &value).kind) ==
              ('0' == c));
     }
   }
@@ -3208,7 +3287,7 @@ static void test_bencode_parse(void) {
 
     Slice_u8 data = test_slice("ld1:a1:beli2eee");
     BencodeValue value = {0};
-    assert(ErrKindNone == bencode_parse(&data, &arena, scratch, &value));
+    assert(ErrKindNone == bencode_parse(&data, &arena, scratch, &value).kind);
     assert(BencodeKindList == value.kind);
     assert(2 == value.v.list.len);
 
@@ -3233,7 +3312,7 @@ static void test_bencode_parse(void) {
     const char *const input = "l4:spame";
     Slice_u8 data = test_slice(input);
     BencodeValue value = {0};
-    assert(ErrKindNone == bencode_parse(&data, &arena, scratch, &value));
+    assert(ErrKindNone == bencode_parse(&data, &arena, scratch, &value).kind);
     assert((u8 *)input + 3 == value.v.list.data[0].v.s.data);
   }
 
@@ -3252,7 +3331,7 @@ static void test_bencode_parse(void) {
       Slice_u8 data = slice_u8_make(input, 2 * depth);
       BencodeValue value = {0};
       const bool ok =
-          ErrKindNone == bencode_parse(&data, &arena, scratch, &value);
+          ErrKindNone == bencode_parse(&data, &arena, scratch, &value).kind;
 
       assert(ok == (depth <= BENCODE_MAX_DEPTH));
       if (ok) {
@@ -3279,7 +3358,7 @@ static void test_bencode_parse(void) {
 
     Slice_u8 data = slice_u8_make(input, sizeof(input));
     BencodeValue value = {0};
-    assert(ErrKindNone == bencode_parse(&data, &arena, scratch, &value));
+    assert(ErrKindNone == bencode_parse(&data, &arena, scratch, &value).kind);
     assert(BencodeKindList == value.kind);
     assert(children_len == value.v.list.len);
 
@@ -3295,7 +3374,7 @@ static void test_bencode_parse(void) {
 
     Slice_u8 data = test_slice("li1ei2ee");
     BencodeValue value = {0};
-    assert(ErrKindNone != bencode_parse(&data, &arena, scratch, &value));
+    assert(ErrKindNone != bencode_parse(&data, &arena, scratch, &value).kind);
   }
   // Out of output arena: the children of a container do not fit.
   {
@@ -3304,11 +3383,11 @@ static void test_bencode_parse(void) {
 
     Slice_u8 data = test_slice("li1ee");
     BencodeValue value = {0};
-    assert(ErrKindNone != bencode_parse(&data, &arena, scratch, &value));
+    assert(ErrKindNone != bencode_parse(&data, &arena, scratch, &value).kind);
 
     // An empty container needs no allocation at all, so it still succeeds.
     Slice_u8 data_empty = test_slice("le");
-    assert(ErrKindNone == bencode_parse(&data_empty, &arena, scratch, &value));
+    assert(ErrKindNone == bencode_parse(&data_empty, &arena, scratch, &value).kind);
     assert(0 == value.v.list.len);
   }
 
@@ -3322,12 +3401,12 @@ static void test_bencode_parse(void) {
 
     Slice_u8 data_a = test_slice("li1ei2ee");
     BencodeValue a = {0};
-    assert(ErrKindNone == bencode_parse(&data_a, &arena, scratch, &a));
+    assert(ErrKindNone == bencode_parse(&data_a, &arena, scratch, &a).kind);
     assert(scratch_start == scratch.start);
 
     Slice_u8 data_b = test_slice("li3ee");
     BencodeValue b = {0};
-    assert(ErrKindNone == bencode_parse(&data_b, &arena, scratch, &b));
+    assert(ErrKindNone == bencode_parse(&data_b, &arena, scratch, &b).kind);
     assert(scratch_start == scratch.start);
 
     assert(a.v.list.data != b.v.list.data);
@@ -3345,7 +3424,7 @@ static void test_bencode_parse(void) {
 
     Slice_u8 data = slice_u8_make(NULL, 0);
     BencodeValue value = {0};
-    assert(ErrKindNone != bencode_parse(&data, &arena, scratch, &value));
+    assert(ErrKindNone != bencode_parse(&data, &arena, scratch, &value).kind);
   }
 
   // A parse that fails *after* allocating gives the memory back: the inner
@@ -3360,7 +3439,7 @@ static void test_bencode_parse(void) {
 
     // Poisoned so that a write on the failure path is visible.
     BencodeValue value = {.kind = BencodeKindString};
-    assert(ErrKindNone != bencode_parse(&data, &arena, scratch, &value));
+    assert(ErrKindNone != bencode_parse(&data, &arena, scratch, &value).kind);
 
     assert(arena_start == arena.start);
     assert(strlen(input) == data.len);
@@ -3451,7 +3530,7 @@ static void test_bencode_validate_dict(void) {
   // Empty: trivially valid, and a NULL `data` is allowed when `len` is zero.
   {
     const BencodeList list = {0};
-    assert(ErrKindNone == bencode_validate_dict(list));
+    assert(ErrKindNone == bencode_validate_dict(list).kind);
   }
   // Keys strictly increasing.
   {
@@ -3461,7 +3540,7 @@ static void test_bencode_validate_dict(void) {
         test_bencode_make_string("c", 1), num,
     };
     const BencodeList list = {.len = 6, .data = children};
-    assert(ErrKindNone == bencode_validate_dict(list));
+    assert(ErrKindNone == bencode_validate_dict(list).kind);
   }
   // Out of order, anywhere in the dict.
   {
@@ -3472,7 +3551,7 @@ static void test_bencode_validate_dict(void) {
         num,
     };
     const BencodeList list = {.len = 4, .data = children};
-    assert(ErrKindNone != bencode_validate_dict(list));
+    assert(ErrKindNone != bencode_validate_dict(list).kind);
   }
   {
     BencodeValue children[] = {
@@ -3481,7 +3560,7 @@ static void test_bencode_validate_dict(void) {
         test_bencode_make_string("b", 1), num,
     };
     const BencodeList list = {.len = 6, .data = children};
-    assert(ErrKindNone != bencode_validate_dict(list));
+    assert(ErrKindNone != bencode_validate_dict(list).kind);
   }
   // Duplicate keys: sorted is not enough, the order has to be strict.
   {
@@ -3492,19 +3571,19 @@ static void test_bencode_validate_dict(void) {
         num,
     };
     const BencodeList list = {.len = 4, .data = children};
-    assert(ErrKindNone != bencode_validate_dict(list));
+    assert(ErrKindNone != bencode_validate_dict(list).kind);
   }
   // Keys must be strings.
   {
     BencodeValue children[] = {num, num};
     const BencodeList list = {.len = 2, .data = children};
-    assert(ErrKindNone != bencode_validate_dict(list));
+    assert(ErrKindNone != bencode_validate_dict(list).kind);
   }
   // ... including a non-string key that is not the first one.
   {
     BencodeValue children[] = {test_bencode_make_string("a", 1), num, num, num};
     const BencodeList list = {.len = 4, .data = children};
-    assert(ErrKindNone != bencode_validate_dict(list));
+    assert(ErrKindNone != bencode_validate_dict(list).kind);
   }
   // Values are not constrained, only keys are.
   {
@@ -3517,19 +3596,19 @@ static void test_bencode_validate_dict(void) {
         nested_dict,
     };
     const BencodeList list = {.len = 4, .data = children};
-    assert(ErrKindNone == bencode_validate_dict(list));
+    assert(ErrKindNone == bencode_validate_dict(list).kind);
   }
   // An odd number of children is not key/value pairs.
   {
     BencodeValue children[] = {test_bencode_make_string("a", 1), num,
                                test_bencode_make_string("b", 1)};
     const BencodeList list = {.len = 3, .data = children};
-    assert(ErrKindNone != bencode_validate_dict(list));
+    assert(ErrKindNone != bencode_validate_dict(list).kind);
   }
   {
     BencodeValue children[] = {test_bencode_make_string("a", 1)};
     const BencodeList list = {.len = 1, .data = children};
-    assert(ErrKindNone != bencode_validate_dict(list));
+    assert(ErrKindNone != bencode_validate_dict(list).kind);
   }
   // The empty key is legal and sorts before every other key.
   {
@@ -3540,7 +3619,7 @@ static void test_bencode_validate_dict(void) {
         num,
     };
     const BencodeList list = {.len = 4, .data = children};
-    assert(ErrKindNone == bencode_validate_dict(list));
+    assert(ErrKindNone == bencode_validate_dict(list).kind);
   }
   // A key that is a prefix of the next one is in order; the reverse is not.
   {
@@ -3551,7 +3630,7 @@ static void test_bencode_validate_dict(void) {
         num,
     };
     const BencodeList list = {.len = 4, .data = children};
-    assert(ErrKindNone == bencode_validate_dict(list));
+    assert(ErrKindNone == bencode_validate_dict(list).kind);
   }
   {
     BencodeValue children[] = {
@@ -3561,7 +3640,7 @@ static void test_bencode_validate_dict(void) {
         num,
     };
     const BencodeList list = {.len = 4, .data = children};
-    assert(ErrKindNone != bencode_validate_dict(list));
+    assert(ErrKindNone != bencode_validate_dict(list).kind);
   }
   // Ordering is by raw byte value, so `0x80` sorts *after* `0x7f`. A signed
   // comparison would get this pair backwards.
@@ -3573,7 +3652,7 @@ static void test_bencode_validate_dict(void) {
         num,
     };
     const BencodeList list = {.len = 4, .data = children};
-    assert(ErrKindNone == bencode_validate_dict(list));
+    assert(ErrKindNone == bencode_validate_dict(list).kind);
   }
   {
     BencodeValue children[] = {
@@ -3583,7 +3662,7 @@ static void test_bencode_validate_dict(void) {
         num,
     };
     const BencodeList list = {.len = 4, .data = children};
-    assert(ErrKindNone != bencode_validate_dict(list));
+    assert(ErrKindNone != bencode_validate_dict(list).kind);
   }
   // Keys are compared over their whole length, zero bytes included.
   {
@@ -3598,7 +3677,7 @@ static void test_bencode_validate_dict(void) {
         num,
     };
     const BencodeList list = {.len = 4, .data = children};
-    assert(ErrKindNone == bencode_validate_dict(list));
+    assert(ErrKindNone == bencode_validate_dict(list).kind);
   }
 }
 
@@ -3807,7 +3886,7 @@ test_merkle_data(Arena *arena) {
 static void test_torrent_merkle_vectors(void) {
   Arena data_arena = {0};
   assert(ErrKindNone ==
-         arena_valloc(TEST_MERKLE_MAX_LEN + 4 * KiB, &data_arena));
+         arena_valloc(TEST_MERKLE_MAX_LEN + 4 * KiB, &data_arena).kind);
   assert(data_arena.start);
   const Slice_u8 data = test_merkle_data(&data_arena);
 
@@ -3858,7 +3937,7 @@ static void test_torrent_merkle_vectors(void) {
       assert(ErrKindNone ==
              torrent_build_merkle_tree(slice_u8_make(data.data, vectors[i].len),
                                        piece_lengths_in_bytes[p], &pieces,
-                                       &pieces_count, root, &arena));
+                                       &pieces_count, root, &arena).kind);
 
       assert(0 == memcmp(root, expected, sizeof(expected)));
     }
@@ -3871,7 +3950,7 @@ static void test_torrent_merkle_vectors(void) {
 static void test_torrent_merkle_piece_layer(void) {
   Arena data_arena = {0};
   assert(ErrKindNone ==
-         arena_valloc(TEST_MERKLE_MAX_LEN + 4 * KiB, &data_arena));
+         arena_valloc(TEST_MERKLE_MAX_LEN + 4 * KiB, &data_arena).kind);
   assert(data_arena.start);
   const Slice_u8 data = test_merkle_data(&data_arena);
 
@@ -3896,7 +3975,7 @@ static void test_torrent_merkle_piece_layer(void) {
       assert(ErrKindNone ==
              torrent_build_merkle_tree(slice_u8_make(data.data, len),
                                        piece_length_in_bytes, &pieces,
-                                       &pieces_count, root, &arena));
+                                       &pieces_count, root, &arena).kind);
 
       const usize expected_pieces = ceil_usize(len, piece_length_in_bytes);
       if (expected_pieces > 1) {
@@ -3962,7 +4041,7 @@ static void test_torrent_merkle_piece_layer(void) {
 // nothing but padding is emphatically not zero.
 static void test_torrent_merkle_padding(void) {
   Arena data_arena = {0};
-  assert(ErrKindNone == arena_valloc(64 * KiB, &data_arena));
+  assert(ErrKindNone == arena_valloc(64 * KiB, &data_arena).kind);
   assert(data_arena.start);
 
   // Three blocks, so the tree pads to four leaves and the last leaf covers no
@@ -3981,7 +4060,7 @@ static void test_torrent_merkle_padding(void) {
   // that holds file data is observable.
   assert(ErrKindNone == torrent_build_merkle_tree(slice_u8_make(buf, len),
                                                   16 * KiB, &pieces,
-                                                  &pieces_count, root, &arena));
+                                                  &pieces_count, root, &arena).kind);
   assert(pieces);
   assert(3 == pieces_count);
 
@@ -4048,7 +4127,7 @@ static void test_torrent_merkle_empty(void) {
 
   assert(ErrKindNone == torrent_build_merkle_tree((Slice_u8){0}, 256 * KiB,
                                                   &pieces, &pieces_count, root,
-                                                  &arena));
+                                                  &arena).kind);
   assert(NULL == pieces);
   assert(0 == pieces_count);
 
@@ -4060,7 +4139,7 @@ static void test_torrent_merkle_empty(void) {
 // asserted, and leaves nothing half built behind.
 static void test_torrent_merkle_oom(void) {
   Arena data_arena = {0};
-  assert(ErrKindNone == arena_valloc(64 * KiB, &data_arena));
+  assert(ErrKindNone == arena_valloc(64 * KiB, &data_arena).kind);
   assert(data_arena.start);
 
   // Two blocks, so at one block per piece the layer needs two hashes.
@@ -4082,7 +4161,7 @@ static void test_torrent_merkle_oom(void) {
   u8 root[SHA256_DIGEST_LENGTH] = {0};
   assert(ErrKindNone != torrent_build_merkle_tree(slice_u8_make(buf, len),
                                                   16 * KiB, &pieces,
-                                                  &pieces_count, root, &arena));
+                                                  &pieces_count, root, &arena).kind);
   assert(NULL == pieces);
   assert(0 == pieces_count);
 }
@@ -4240,7 +4319,7 @@ static void test_encode_usize_base_10_round_trip(void) {
 
     Slice_u8 to_parse = slice_u8_make(terminated, got + 1);
     usize parsed = 0;
-    assert(ErrKindNone == ascii_num_parse(&to_parse, &parsed));
+    assert(ErrKindNone == ascii_num_parse(&to_parse, &parsed).kind);
     assert(n == parsed);
   }
 }
@@ -4341,7 +4420,7 @@ static void test_encode_isize_base_10_round_trip(void) {
 
     Slice_u8 to_parse = slice_u8_make(framed, got + 2);
     BencodeValue parsed = {0};
-    assert(ErrKindNone == bencode_parse_num(&to_parse, &parsed));
+    assert(ErrKindNone == bencode_parse_num(&to_parse, &parsed).kind);
     assert(BencodeKindInteger == parsed.kind);
     assert(n == parsed.v.num);
   }
@@ -4513,7 +4592,7 @@ static void test_bencode_encode_wide_dict(void) {
   Slice_u8 to_parse = slice_u8_take(dst, written);
   BencodeValue parsed = {0};
   assert(ErrKindNone ==
-         bencode_parse(&to_parse, &parse_arena, scratch, &parsed));
+         bencode_parse(&to_parse, &parse_arena, scratch, &parsed).kind);
   assert(BencodeKindDict == parsed.kind);
   assert(pairs * 2 == parsed.v.list.len);
 }
@@ -4548,7 +4627,7 @@ static void test_bencode_encode_round_trip(void) {
     const Slice_u8 original = input;
 
     BencodeValue parsed = {0};
-    assert(ErrKindNone == bencode_parse(&input, &arena, scratch, &parsed));
+    assert(ErrKindNone == bencode_parse(&input, &arena, scratch, &parsed).kind);
 
     test_bencode_encode_once(parsed, documents[i]);
 
@@ -4578,7 +4657,7 @@ static void test_bencode_encode_torrent_info(void) {
          torrent_make_info_dict_v2(name, 16 * TORRENT_BLOCK_SIZE,
                                    slice_u8_make(file_data, file_len), name,
                                    &info, &pieces_root_slice, &piece_hashes,
-                                   &piece_hashes_count, &arena));
+                                   &piece_hashes_count, &arena).kind);
 
   const usize cap = bencode_encode_exact_size(info, 0);
   Slice_u8 dst = {.data = arena_alloc(&arena, __alignof__(u8), sizeof(u8), cap),
@@ -4685,7 +4764,7 @@ static void test_torrent_metainfo_once(usize file_len,
          torrent_make_info_dict_v2(name, 16 * TORRENT_BLOCK_SIZE,
                                    slice_u8_make(file_data, file_len), name,
                                    &info, &pieces_root, &piece_hashes,
-                                   &piece_hashes_count, &arena));
+                                   &piece_hashes_count, &arena).kind);
 
   // The root the info dict publishes is the one libtorrent computes.
   u8 expected_root[SHA256_DIGEST_LENGTH] = {0};
@@ -4699,7 +4778,7 @@ static void test_torrent_metainfo_once(usize file_len,
   BencodeValue metainfo = {0};
   assert(ErrKindNone == torrent_make_metainfo_dict_v2(
                             pieces_root, announce, info.v.list, piece_hashes,
-                            piece_hashes_count, &metainfo, &arena));
+                            piece_hashes_count, &metainfo, &arena).kind);
 
   // Three keys, in the order bencode requires: announce < info < piece
   // layers.
@@ -4762,7 +4841,7 @@ static void test_torrent_metainfo_once(usize file_len,
   // then finding those exact bytes inside the metainfo encoding is the
   // property everything downstream depends on: nesting must not perturb them.
   Slice_u8 info_encoded = {0};
-  assert(ErrKindNone == bencode_encode(info, &info_encoded, &arena));
+  assert(ErrKindNone == bencode_encode(info, &info_encoded, &arena).kind);
 
   u8 infohash[SHA256_DIGEST_LENGTH] = {0};
   sha256_digest(info_encoded, infohash);
@@ -4771,7 +4850,7 @@ static void test_torrent_metainfo_once(usize file_len,
   assert(0 == memcmp(infohash, expected_infohash, sizeof(infohash)));
 
   Slice_u8 metainfo_encoded = {0};
-  assert(ErrKindNone == bencode_encode(metainfo, &metainfo_encoded, &arena));
+  assert(ErrKindNone == bencode_encode(metainfo, &metainfo_encoded, &arena).kind);
   assert(metainfo_encoded.len > info_encoded.len);
   assert(test_slice_contains(metainfo_encoded, info_encoded));
 
@@ -4792,7 +4871,7 @@ static void test_torrent_metainfo_once(usize file_len,
   // never does, so a mis-ordered key only ever shows up here.
   Slice_u8 to_parse = metainfo_encoded;
   BencodeValue reparsed = {0};
-  assert(ErrKindNone == bencode_parse(&to_parse, &arena, scratch, &reparsed));
+  assert(ErrKindNone == bencode_parse(&to_parse, &arena, scratch, &reparsed).kind);
   assert(0 == to_parse.len);
   assert(BencodeKindDict == reparsed.kind);
   assert(2 * 3 == reparsed.v.list.len);
@@ -5141,10 +5220,10 @@ static void *torrent_client_handle(void *vctx) {
 
   const char msg[] = "hello, world!";
   usize written = 0;
-  const ErrorKind err_write =
+  const Error err_write =
       client_ctx->io->write(client_ctx->ctx, client_ctx->socket, (u8 *)msg,
                             sizeof(msg) - 1, &written);
-  if (ErrKindNone == err_write) {
+  if (ErrKindNone == err_write.kind) {
     goto end;
   }
 
@@ -5161,7 +5240,7 @@ end:
   return NULL;
 }
 
-__attribute__((warn_unused_result)) static ErrorKind
+__attribute__((warn_unused_result)) static Error
 torrent_client_on_accept(const IO *io, void *vctx, Ipv4Addr accept_addr,
                          i32 accept_socket) {
   assert(io);
@@ -5170,13 +5249,13 @@ torrent_client_on_accept(const IO *io, void *vctx, Ipv4Addr accept_addr,
 
   puts("accepted");
 
-  ErrorKind err = ErrKindNone;
+  Error err = {.kind = ErrKindNone};
   TorrentClientHandleCtx *const client_ctx =
       torrent_client_ctx_pool_acquire(&network_ctx->pool);
   if (!client_ctx) {
     fprintf(stderr, "backpressure: no available pool slot for client\n");
     (void)io->close(vctx, accept_socket);
-    return ErrKindOOM;
+    return (Error){.kind = ErrKindOOM};
   }
 
   assert(client_ctx);
@@ -5187,7 +5266,7 @@ torrent_client_on_accept(const IO *io, void *vctx, Ipv4Addr accept_addr,
   client_ctx->network_ctx = network_ctx;
 
   err = io->thread_create(client_ctx, torrent_client_handle);
-  if (ErrKindNone != err) {
+  if (ErrKindNone != err.kind) {
     // The thread never started, so nothing else will free the context or hang
     // up on the peer.
     torrent_client_ctx_pool_release(&network_ctx->pool, client_ctx);
@@ -5208,14 +5287,14 @@ int main(i32 argc, char *argv[]) {
   const char *const cmd = 2 == argc ? argv[1] : "";
   const usize arena_cap = 32 * MiB;
   Arena arena = {0};
-  assert(ErrKindNone == arena_valloc(arena_cap, &arena));
+  assert(ErrKindNone == arena_valloc(arena_cap, &arena).kind);
 
   {
     i32 udp_socket = 0;
     {
-      ErrorKind err_udp = unix_udp_multicast_open_ipv4(NULL, 0, &udp_socket);
-      if (ErrKindNone != err_udp) {
-        fprintf(stderr, "failed to open UDP multicast socket: %d\n", err_udp);
+      Error err_udp = unix_udp_multicast_open_ipv4(NULL, 0, &udp_socket);
+      if (ErrKindNone != err_udp.kind) {
+        error_print("failed to open UDP multicast socket", err_udp);
         return 1;
       }
     }
@@ -5227,11 +5306,10 @@ int main(i32 argc, char *argv[]) {
           .port = 6771,
       };
 
-      ErrorKind err_sendto = unix_udp_send_to_ipv4(NULL, udp_socket, lsd_addr,
+      Error err_sendto = unix_udp_send_to_ipv4(NULL, udp_socket, lsd_addr,
                                                    msg, sizeof(msg), &sent);
-      if (ErrKindNone != err_sendto) {
-        fprintf(stderr, "failed to send UDP multicast message: %d\n",
-                err_sendto);
+      if (ErrKindNone != err_sendto.kind) {
+        error_print("failed to send UDP multicast message", err_sendto);
         return 1;
       }
     }
@@ -5243,7 +5321,7 @@ int main(i32 argc, char *argv[]) {
     assert(3 == argc);
 
     i32 fd = 0;
-    assert(ErrKindNone == io.open(NULL, argv[2], FileOpenOptionsReadOnly, &fd));
+    assert(ErrKindNone == io.open(NULL, argv[2], FileOpenOptionsReadOnly, &fd).kind);
 
     struct stat st = {0};
     assert(-1 != fstat(fd, &st));
@@ -5255,10 +5333,10 @@ int main(i32 argc, char *argv[]) {
 
     Slice_u8 input = slice_u8_make((u8 *)bencode_data, (usize)st.st_size);
     Arena scratch = {0};
-    assert(ErrKindNone == arena_valloc(32 * MiB, &scratch));
+    assert(ErrKindNone == arena_valloc(32 * MiB, &scratch).kind);
 
     BencodeValue bencode = {0};
-    assert(ErrKindNone == bencode_parse(&input, &arena, scratch, &bencode));
+    assert(ErrKindNone == bencode_parse(&input, &arena, scratch, &bencode).kind);
 
     bencode_print(bencode, 0);
     printf("\n");
@@ -5266,7 +5344,7 @@ int main(i32 argc, char *argv[]) {
     assert(3 == argc);
 
     i32 fd = 0;
-    assert(ErrKindNone == io.open(NULL, argv[2], FileOpenOptionsReadOnly, &fd));
+    assert(ErrKindNone == io.open(NULL, argv[2], FileOpenOptionsReadOnly, &fd).kind);
 
     struct stat st = {0};
     assert(-1 != fstat(fd, &st));
@@ -5287,14 +5365,14 @@ int main(i32 argc, char *argv[]) {
     assert(ErrKindNone == torrent_make_info_dict_v2(
                               file_name, TORRENT_BLOCK_SIZE * 16, input,
                               file_name, &info_dict, &pieces_root,
-                              &piece_hashes, &piece_hashes_count, &arena));
+                              &piece_hashes, &piece_hashes_count, &arena).kind);
 
     bencode_print(info_dict, 0);
     puts("");
 
     Slice_u8 info_dict_encoded = {0};
     assert(ErrKindNone ==
-           bencode_encode(info_dict, &info_dict_encoded, &arena));
+           bencode_encode(info_dict, &info_dict_encoded, &arena).kind);
     // Bencode is binary: `%s` stops at the first NUL regardless of the
     // precision given, so the bytes go out through `fwrite`.
     printf("info dict encoded: ");
@@ -5315,13 +5393,13 @@ int main(i32 argc, char *argv[]) {
     assert(ErrKindNone == torrent_make_metainfo_dict_v2(
                               pieces_root, announce_url, info_dict.v.list,
                               piece_hashes, piece_hashes_count, &metainfo_dict,
-                              &arena));
+                              &arena).kind);
     bencode_print(metainfo_dict, 0);
     puts("");
 
     Slice_u8 metainfo_dict_encoded = {0};
     assert(ErrKindNone ==
-           bencode_encode(metainfo_dict, &metainfo_dict_encoded, &arena));
+           bencode_encode(metainfo_dict, &metainfo_dict_encoded, &arena).kind);
     printf("metainfo dict encoded: ");
     assert(metainfo_dict_encoded.len == fwrite(metainfo_dict_encoded.data, 1,
                                                metainfo_dict_encoded.len,
@@ -5330,10 +5408,10 @@ int main(i32 argc, char *argv[]) {
 
     const Ipv4Addr listen_addr = {.port = 12345, .ip = 0};
     TorrentNetworkCtx ctx = {0};
-    ErrorKind err_listen = io_listen_and_serve_tcp_ipv4(
+    Error err_listen = io_listen_and_serve_tcp_ipv4(
         &io, &ctx, listen_addr, torrent_client_on_accept);
-    if (ErrKindNone != err_listen) {
-      fprintf(stderr, "failed to listen and serve: %d\n", err_listen);
+    if (ErrKindNone != err_listen.kind) {
+      error_print("failed to listen and serve", err_listen);
       return 1;
     }
 
