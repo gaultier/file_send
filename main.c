@@ -14,7 +14,6 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
-#include <sys/sysctl.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -23,6 +22,16 @@
 // reference the vector one is checked against.
 #if defined(__aarch64__)
 #include <arm_neon.h>
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#elif defined(__linux__)
+#include <sys/auxv.h>
+// glibc defines this in `bits/hwcap.h`, musl does not; it is ABI, not a header
+// detail.
+#ifndef HWCAP_SHA2
+#define HWCAP_SHA2 (1 << 6)
+#endif
+#endif
 #define SHA256_HAS_NEON 1
 #else
 #define SHA256_HAS_NEON 0
@@ -1707,18 +1716,27 @@ sha256_compress_blocks_neon(u32 h[8], const u8 *blocks, usize blocks_count) {
 }
 
 // The extension is optional even on AArch64, so ask rather than assume.
-// Cached because this sits on the hot path of every hash and `sysctlbyname`
-// is a syscall. Racing callers compute the same answer, so the race is
-// benign.
+// Cached because this sits on the hot path of every hash and the query is not
+// free. Racing callers compute the same answer, so the race is benign.
 __attribute__((warn_unused_result)) static bool sha256_neon_supported(void) {
   static i32 cached = -1;
 
   if (cached < 0) {
+#if defined(__APPLE__)
     i32 present = 0;
     usize present_size = sizeof(present);
     const bool ok = 0 == sysctlbyname("hw.optional.arm.FEAT_SHA256", &present,
                                       &present_size, NULL, 0);
     cached = (ok && 0 != present) ? 1 : 0;
+#elif defined(__linux__)
+    // The kernel publishes AArch64 feature bits in the ELF auxiliary vector;
+    // `getauxval` reads the copy the loader already saved, so it is not a
+    // syscall. An unknown type yields 0, which falls back to the scalar path.
+    const unsigned long hwcap = getauxval(AT_HWCAP);
+    cached = (0 != (hwcap & HWCAP_SHA2)) ? 1 : 0;
+#else
+    cached = 0;
+#endif
   }
 
   return 1 == cached;
