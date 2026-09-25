@@ -425,26 +425,24 @@ static void test_arena_valloc_mocked(void) {
 
 // The server narrates to stdout. That is the point in production and noise in
 // a test, more so at a thousand connections, so it is swallowed for the
-// duration. `dup` has no vtable slot: this is the harness redirecting its own
-// output, not the program doing I/O.
+// duration.
+//
+// The real platform, never the `io` the test itself is driving: the tests that
+// want quiet are exactly the ones running against a mock, and redirecting this
+// process's output is the harness's own business either way.
 __attribute__((warn_unused_result)) static i32 test_stdout_silence(void) {
-  fflush(stdout);
+  const IO io = io_unix_make();
 
-  const i32 saved = dup(STDOUT_FILENO);
-  assert(-1 != saved);
-
-  const i32 devnull = open("/dev/null", O_WRONLY);
-  assert(-1 != devnull);
-  assert(-1 != dup2(devnull, STDOUT_FILENO));
-  assert(0 == close(devnull));
+  i32 saved = -1;
+  assert(ErrKindNone == io.stdout_silence(&io, &saved).kind);
 
   return saved;
 }
 
 static void test_stdout_restore(i32 saved) {
-  fflush(stdout);
-  assert(-1 != dup2(saved, STDOUT_FILENO));
-  assert(0 == close(saved));
+  const IO io = io_unix_make();
+
+  assert(ErrKindNone == io.stdout_restore(&io, saved).kind);
 }
 
 // A scripted `IO` for the TCP server. Every slot it fakes can be made to fail,
@@ -3306,13 +3304,25 @@ static void test_sha256_neon_lengths(void) {
 #endif
 }
 
+// Removing a scratch file the harness itself made. It goes to the real
+// platform for the same reason `test_stdout_silence` does: the file is on the
+// real filesystem whatever `io` the test under it happens to be driving.
+__attribute__((warn_unused_result)) static Error
+test_remove_file(Slice_u8 path) {
+  const IO io = io_unix_make();
+
+  return io.remove_file(&io, path);
+}
+
 // A path under `TMPDIR` unique to this process, so a test run does not
 // collide with a stale file or with another run.
 __attribute__((warn_unused_result)) static Slice_u8
 test_tmp_path(char *buf, usize buf_len, const char *name) {
+  const IO io = io_unix_make();
+
   const char *const dir = getenv("TMPDIR");
-  const i32 n = snprintf(buf, buf_len, "%s/file_send_test_%d_%s",
-                         dir ? dir : "/tmp", (i32)getpid(), name);
+  const i32 n = snprintf(buf, buf_len, "%s/file_send_test_%zu_%s",
+                         dir ? dir : "/tmp", io.get_process_id(&io), name);
   assert(n > 0);
   assert((usize)n < buf_len);
 
@@ -3348,7 +3358,7 @@ static void test_io_open_errors(void) {
   {
     char buf[256] = {0};
     const Slice_u8 path = test_tmp_path(buf, sizeof(buf), "does_not_exist");
-    (void)unlink((const char *)path.data);
+    (void)test_remove_file(path);
 
     const Error err = io.open(&io, path, FileOpenOptionsReadOnly, &fd);
     // `ENOENT` has no kind of its own yet, so it lands in the catch-all;
@@ -3366,7 +3376,7 @@ static void test_io_file_round_trip(void) {
 
   char buf[256] = {0};
   const Slice_u8 path = test_tmp_path(buf, sizeof(buf), "round_trip");
-  (void)unlink((const char *)path.data);
+  (void)test_remove_file(path);
 
   // Bencode is binary, so a NUL in the middle must survive.
   const u8 payload[] = {'d', '3', ':', 'a', 'b', 'c', 0x00, 'e'};
@@ -3407,7 +3417,7 @@ static void test_io_file_round_trip(void) {
     assert(3 == got.len);
   }
 
-  assert(0 == unlink((const char *)path.data));
+  assert(ErrKindNone == test_remove_file(path).kind);
 
   // Mapping what is no longer there fails rather than handing back an empty
   // slice.
@@ -3423,7 +3433,7 @@ static void test_io_file_round_trip(void) {
     char empty_buf[256] = {0};
     const Slice_u8 empty_path =
         test_tmp_path(empty_buf, sizeof(empty_buf), "empty");
-    (void)unlink((const char *)empty_path.data);
+    (void)test_remove_file(empty_path);
 
     i32 fd = -1;
     assert(ErrKindNone ==
@@ -3437,7 +3447,7 @@ static void test_io_file_round_trip(void) {
            io.map_file(&io, empty_path, FileOpenOptionsReadOnly, &got).kind);
     assert(slice_u8_is_empty(got));
 
-    assert(0 == unlink((const char *)empty_path.data));
+    assert(ErrKindNone == test_remove_file(empty_path).kind);
   }
 
   // A directory opens but cannot be mapped, which walks the `mmap` failure
@@ -3632,7 +3642,7 @@ static void test_io_syscall_failures(void) {
            io.map_file(&io, path, FileOpenOptionsWriteOnly, &got).kind);
     assert(sizeof(payload) == got.len);
 
-    assert(0 == unlink((const char *)path.data));
+    assert(ErrKindNone == test_remove_file(path).kind);
   }
 }
 
@@ -3933,7 +3943,7 @@ static void test_io_composites_mocked(void) {
     assert(1 == ctx.close_calls);
   }
 
-  assert(0 == unlink((const char *)path.data));
+  assert(ErrKindNone == test_remove_file(path).kind);
 }
 
 static void test(const char *filter) {

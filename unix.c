@@ -11,6 +11,18 @@
 // `-Wundef` is an error.
 #if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
 
+// Inside the guard, so a system that is not this one never sees them. The
+// feature-test macros that decide what these expose are set on the command
+// line, in `run.sh`, because they have to be in place before the first
+// header of the translation unit.
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <pthread.h>
+#include <sys/mman.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 // Map an `errno` onto our own errors. Shared by every syscall wrapper: an
 // `errno` means the same thing whichever call produced it, so the mapping
 // lives in one place rather than being repeated per wrapper.
@@ -449,6 +461,101 @@ unix_file_size(const IO *io, i32 fd, usize *dst_size) {
   return (Error){.kind = ErrKindNone};
 }
 
+__attribute__((warn_unused_result)) static Error
+unix_remove_file(const IO *io, Slice_u8 path) {
+  (void)io;
+
+  // Same bound and the same reason as `unix_open`: the name has to reach the
+  // kernel as a NUL terminated string, and the slice carries no terminator.
+  char unix_path[4096] = {0};
+  const usize unix_path_max_len = sizeof(unix_path) - 1;
+
+  if (!path.data || 0 == path.len) {
+    return (Error){.kind = ErrKindInvalidData};
+  }
+
+  if (path.len > unix_path_max_len) {
+    return (Error){.kind = ErrKindRange, .data = unix_path_max_len};
+  }
+
+  memcpy(unix_path, path.data, path.len);
+
+  if (-1 == unlink(unix_path)) {
+    return unix_error_from_errno(errno);
+  }
+
+  return (Error){.kind = ErrKindNone};
+}
+
+__attribute__((warn_unused_result)) static usize
+unix_get_process_id(const IO *io) {
+  (void)io;
+
+  // `getpid` cannot fail, and a pid is never negative.
+  const i64 res = (i64)getpid();
+  assert(res >= 0);
+
+  return (usize)res;
+}
+
+__attribute__((warn_unused_result)) static Error
+unix_stdout_silence(const IO *io, i32 *dst_saved) {
+  (void)io;
+  assert(dst_saved);
+
+  // Anything already buffered belongs on the real stdout, so it has to go out
+  // before the descriptor underneath it is replaced.
+  (void)fflush(stdout);
+
+  const i32 saved = dup(STDOUT_FILENO);
+  if (-1 == saved) {
+    return unix_error_from_errno(errno);
+  }
+
+  const i32 devnull = open("/dev/null", O_WRONLY);
+  if (-1 == devnull) {
+    const Error err = unix_error_from_errno(errno);
+    (void)close(saved);
+    return err;
+  }
+
+  if (-1 == dup2(devnull, STDOUT_FILENO)) {
+    const Error err = unix_error_from_errno(errno);
+    (void)close(devnull);
+    (void)close(saved);
+    return err;
+  }
+
+  // `dup2` gave `STDOUT_FILENO` its own reference to the same description.
+  (void)close(devnull);
+
+  *dst_saved = saved;
+
+  return (Error){.kind = ErrKindNone};
+}
+
+__attribute__((warn_unused_result)) static Error
+unix_stdout_restore(const IO *io, i32 saved) {
+  (void)io;
+
+  // Whatever the silenced stretch wrote went to `/dev/null` and is of no
+  // interest, but the stream still has to be emptied against the descriptor
+  // it was written for.
+  (void)fflush(stdout);
+
+  if (-1 == dup2(saved, STDOUT_FILENO)) {
+    const Error err = unix_error_from_errno(errno);
+    (void)close(saved);
+    return err;
+  }
+
+  if (-1 == close(saved)) {
+    return unix_error_from_errno(errno);
+  }
+
+  return (Error){.kind = ErrKindNone};
+}
+
 // Composites: one operation to the program, several to Unix. They go
 // through `io` so another platform can implement the same operation out
 // of entirely different primitives, and so the primitives can be faked
@@ -564,9 +671,13 @@ __attribute__((warn_unused_result)) static IO io_unix_make(void) {
       .file_size = unix_file_size,
       .map_file = unix_map_file,
       .write_all_to_file = unix_write_all_to_file,
+      .remove_file = unix_remove_file,
       .get_page_size = unix_get_page_size,
       .valloc = unix_valloc,
       .vprotect_none = unix_vprotect_none,
+      .get_process_id = unix_get_process_id,
+      .stdout_silence = unix_stdout_silence,
+      .stdout_restore = unix_stdout_restore,
       // The Unix implementation is stateless; every slot ignores its `ctx`.
       .ctx = NULL,
   };

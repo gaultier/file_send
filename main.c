@@ -1,21 +1,17 @@
+// Nothing here is platform specific: the headers a given system needs belong
+// to that system's file, next to the calls that need them. `errno.h` is the
+// exception that stays, because an `Error` carries an `errno` value and
+// `error_print` renders it.
 #include <assert.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <inttypes.h>
 #include <limits.h>
-#include <netinet/in.h>
-#include <pthread.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
-#include <sys/wait.h>
-#include <unistd.h>
 
 // The ARMv8 SHA-256 extension. Only the AArch64 spelling is implemented; every
 // other target falls back to the scalar block function below, which stays the
@@ -545,9 +541,20 @@ struct IO {
   Error (*map_file)(const IO *io, Slice_u8 path, FileOpenOptions opts,
                     Slice_u8 *dst);
   Error (*write_all_to_file)(const IO *io, Slice_u8 path, Slice_u8 data);
+  Error (*remove_file)(const IO *io, Slice_u8 path);
   usize (*get_page_size)(const IO *io);
   Error (*valloc)(const IO *io, usize bytes_count, u8 **res);
   Error (*vprotect_none)(const IO *io, void *ptr, usize size);
+  usize (*get_process_id)(const IO *io);
+
+  // Swallow this process's own standard output until the matching restore,
+  // which is handed back whatever `stdout_silence` produced. Only the test
+  // harness calls these, to keep a chatty run quiet; the program proper never
+  // redirects itself. They are slots and not three lines of `dup` in the
+  // harness because what it takes to do this is exactly the kind of thing
+  // that differs per platform.
+  Error (*stdout_silence)(const IO *io, i32 *dst_saved);
+  Error (*stdout_restore)(const IO *io, i32 saved);
 
   // The implementation's own state, reached by every slot above as
   // `io->ctx`. It is not the caller's: a callback's user data travels
