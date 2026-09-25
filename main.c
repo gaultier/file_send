@@ -5784,7 +5784,10 @@ int main(i32 argc, char *argv[]) {
       }
     }
   } else if (0 == strcmp(cmd, "gen-torrent")) {
-    assert(3 == argc);
+    if (3 != argc) {
+      fprintf(stderr, "missing argument\n");
+      return 1;
+    }
 
     const Slice_u8 file_path = {.data = (u8 *)argv[2], .len = strlen(argv[2])};
     Slice_u8 input = {0};
@@ -5823,6 +5826,19 @@ int main(i32 argc, char *argv[]) {
       return 1;
     }
   } else if (0 == strcmp(cmd, "share")) {
+    if (3 != argc) {
+      fprintf(stderr, "missing argument\n");
+      return 1;
+    }
+    const Slice_u8 file_path = {.data = (u8 *)argv[2], .len = strlen(argv[2])};
+    Slice_u8 input = {0};
+
+    Error err = io.map_file(NULL, file_path, FileOpenOptionsReadOnly, &input);
+    if (ErrKindNone != err.kind) {
+      error_print("failed to open file", err);
+      return 1;
+    }
+
     const Ipv4Addr listen_addr = {.port = 12345, .ip = 0};
     TorrentNetworkCtx ctx = {0};
     Error err_listen = io_listen_and_serve_tcp_ipv4(&io, &ctx, listen_addr,
