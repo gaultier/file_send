@@ -5284,6 +5284,63 @@ end:
 }
 
 __attribute__((warn_unused_result)) static Error
+torrent_make_torrent_file_data(Slice_u8 file_path, Slice_u8 file_data,
+                               Slice_u8 *dst_torrent, Arena *arena) {
+  // TODO: Consider passing a scratch arena for some allocations.
+
+  assert(dst_torrent);
+  assert(arena);
+
+  const Slice_u8 file_name = unix_path_last_component(file_path);
+
+  BencodeValue info_dict = {0};
+  PieceHash *piece_hashes = NULL;
+  usize piece_hashes_count = 0;
+  Slice_u8 pieces_root = {0};
+  assert(ErrKindNone == torrent_make_info_dict_v2(
+                            file_name, TORRENT_BLOCK_SIZE * 16, file_data,
+                            file_name, &info_dict, &pieces_root, &piece_hashes,
+                            &piece_hashes_count, arena)
+                            .kind);
+
+  bencode_print(info_dict, 0);
+  puts("");
+
+  Slice_u8 info_dict_encoded = {0};
+  assert(ErrKindNone ==
+         bencode_encode(info_dict, &info_dict_encoded, arena).kind);
+  // Bencode is binary: `%s` stops at the first NUL regardless of the
+  // precision given, so the bytes go out through `fwrite`.
+  printf("info dict encoded: ");
+  assert(info_dict_encoded.len ==
+         fwrite(info_dict_encoded.data, 1, info_dict_encoded.len, stdout));
+  puts("");
+
+  u8 info_hash[SHA256_DIGEST_LENGTH] = {0};
+  sha256_digest(info_dict_encoded, info_hash);
+
+  BencodeValue metainfo_dict = {0};
+  const char *const announce_url_cstr = "http://localhost:12345";
+  Slice_u8 announce_url =
+      slice_u8_make((u8 *)announce_url_cstr, strlen(announce_url_cstr));
+  assert(ErrKindNone == torrent_make_metainfo_dict_v2(
+                            pieces_root, announce_url, info_dict.v.list,
+                            piece_hashes, piece_hashes_count, &metainfo_dict,
+                            arena)
+                            .kind);
+
+  Slice_u8 metainfo_dict_encoded = {0};
+  assert(ErrKindNone ==
+         bencode_encode(metainfo_dict, &metainfo_dict_encoded, arena).kind);
+  printf("metainfo dict encoded: ");
+  assert(metainfo_dict_encoded.len == fwrite(metainfo_dict_encoded.data, 1,
+                                             metainfo_dict_encoded.len,
+                                             stdout));
+
+  return (Error){.kind = ErrKindNone};
+}
+
+__attribute__((warn_unused_result)) static Error
 torrent_client_on_accept(const IO *io, void *vctx, Ipv4Addr accept_addr,
                          i32 accept_socket) {
   assert(io);
