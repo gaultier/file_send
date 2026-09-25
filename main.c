@@ -126,10 +126,16 @@ int main(i32 argc, char *argv[]) {
           return 1;
         }
         sha256_digest(info_encoded, info_hash);
-        info_hash_slice =
-            (Slice_u8){.data = info_hash, .len = SHA256_DIGEST_LENGTH};
       }
+      info_hash_slice =
+          (Slice_u8){.data = info_hash, .len = SHA256_DIGEST_LENGTH};
     }
+
+    if (0 == info_hash_slice.len) {
+      fprintf(stderr, "info dict from .torrent data not found\n");
+      return 1;
+    }
+    fwrite(info_hash_slice.data, 1, info_hash_slice.len, stdout);
 
     i32 udp_socket = 0;
     {
