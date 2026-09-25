@@ -641,6 +641,64 @@ unix_write(void *ctx, i32 fd, u8 *buf, usize len, usize *dst_written) {
 
   return ErrNone;
 }
+__attribute__((warn_unused_result)) static Error
+unix_udp_multicast_open_ipv4(void *ctx, u32 ipv4, i32 *dst_fd) {
+  (void)ctx;
+
+  assert(dst_fd);
+
+  const i32 fd = socket(AF_INET, SOCK_DGRAM, 0);
+  if (-1 == fd) {
+    return unix_error_from_errno(errno);
+  }
+
+  const u8 ttl = 1;
+  if (-1 == setsockopt(fd, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl))) {
+    const Error err = unix_error_from_errno(errno);
+    (void)close(fd);
+    return err;
+  }
+
+  const struct in_addr iface = {.s_addr = htonl(ipv4)};
+  if (-1 ==
+      setsockopt(fd, IPPROTO_IP, IP_MULTICAST_IF, &iface, sizeof(iface))) {
+    const Error err = unix_error_from_errno(errno);
+    (void)close(fd);
+    return err;
+  }
+
+  *dst_fd = fd;
+
+  return ErrNone;
+}
+
+__attribute__((warn_unused_result)) static Error
+unix_udp_send_to_ipv4(void *ctx, i32 fd, Ipv4Addr addr, const u8 *buf,
+                      usize len, usize *dst_sent) {
+  (void)ctx;
+  assert(buf);
+  assert(dst_sent);
+
+  const struct sockaddr_in sock_addr_in = {
+      .sin_family = AF_INET,
+      .sin_port = htons(addr.port),
+      .sin_addr.s_addr = htonl(addr.ip),
+  };
+
+  isize ret = 0;
+  do {
+    ret = sendto(fd, buf, len, 0, (const struct sockaddr *)&sock_addr_in,
+                 sizeof(sock_addr_in));
+  } while (-1 == ret && EINTR == errno);
+
+  if (-1 == ret) {
+    return unix_error_from_errno(errno);
+  }
+
+  *dst_sent = (usize)ret;
+
+  return ErrNone;
+}
 
 // ---------- IO ----------
 
@@ -5225,12 +5283,38 @@ int main(i32 argc, char *argv[]) {
                                                stdout));
     puts("");
 
+    i32 udp_socket = 0;
+    {
+      Error err_udp = unix_udp_multicast_open_ipv4(NULL, 0, &udp_socket);
+      if (ErrNone != err_udp) {
+        fprintf(stderr, "failed to open UDP multicast socket: %d\n", err_udp);
+        return 1;
+      }
+    }
+    {
+      const u8 msg[] = "Hello!";
+      usize sent = 0;
+      const Ipv4Addr lsd_addr = {
+          .ip = 0xefc0988fUL, // 239.192.152.143
+          .port = 6771,
+      };
+
+      Error err_sendto = unix_udp_send_to_ipv4(NULL, udp_socket, lsd_addr, msg,
+                                               sizeof(msg), &sent);
+      if (ErrNone != err_sendto) {
+        fprintf(stderr, "failed to send UDP multicast message: %d\n",
+                err_sendto);
+        return 1;
+      }
+    }
+
     const Ipv4Addr listen_addr = {.port = 12345, .ip = 0};
     TorrentNetworkCtx ctx = {0};
     Error err_listen = io_listen_and_serve_tcp_ipv4(&io, &ctx, listen_addr,
                                                     torrent_client_on_accept);
     if (ErrNone != err_listen) {
       fprintf(stderr, "failed to listen and serve: %d\n", err_listen);
+      return 1;
     }
 
     const usize unused_bytes = (usize)arena.end - (usize)arena.start;

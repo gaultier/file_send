@@ -2,3 +2,5 @@
 - Benchmark with these build options: `-O2 -march=native -flto=full`
 - Follow the coding style https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE.md
 - Always use braces in loops and conditionals
+- Functions that return a value must use `__attribute__((warn_unused_result))`
+- Local variables and function pointer arguments must use `const` if possible
