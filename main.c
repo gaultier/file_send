@@ -787,7 +787,9 @@ unix_accept(void *ctx, i32 listen_socket, i32 *dst_accept_socket,
 typedef void *(*ThreadCallback)(void *data);
 
 __attribute__((warn_unused_result)) static Error
-unix_thread_create(void *ctx, ThreadCallback cb) {
+unix_thread_create(void *ctx, ThreadCallback cb, void *data) {
+  (void)ctx;
+
   assert(cb);
 
   // Nothing ever joins these threads, so the implementation has to reclaim
@@ -803,7 +805,7 @@ unix_thread_create(void *ctx, ThreadCallback cb) {
   pthread_t thread = {0};
   // Unlike every other wrapper here, the `pthread_*` calls return the error
   // number directly and leave `errno` untouched.
-  const i32 ret = pthread_create(&thread, &attr, cb, ctx);
+  const i32 ret = pthread_create(&thread, &attr, cb, data);
 
   assert(0 == pthread_attr_destroy(&attr));
 
@@ -1064,7 +1066,7 @@ typedef struct {
   Error (*tcp_bind_ipv4)(void *ctx, i32 listen_socket, Ipv4Addr addr);
   Error (*accept)(void *ctx, i32 listen_socket, i32 *dst_accept_socket,
                   Ipv4Addr *dst_accept_addr);
-  Error (*thread_create)(void *ctx, ThreadCallback cb);
+  Error (*thread_create)(void *ctx, ThreadCallback cb, void *data);
   Error (*close)(void *ctx, i32 fd);
   Error (*enable_socket_reuse)(void *ctx, i32 fd);
   Error (*read)(void *ctx, i32 fd, Slice_u8 data, usize *dst_read);
@@ -1130,6 +1132,7 @@ io_listen_and_serve_tcp_ipv4(const IO *io, void *cb_ctx,
     const Error err_reuse = io->enable_socket_reuse(io->ctx, listen_socket);
 
     if (ErrKindNone != err_reuse.kind) {
+      (void)io->close(io->ctx, listen_socket);
       return err_reuse;
     }
   }
@@ -2915,6 +2918,186 @@ torrent_gen_torrent_file_data(Slice_u8 file_path, Slice_u8 file_data,
   return (Error){.kind = ErrKindNone};
 }
 
+typedef struct TorrentNetworkCtx TorrentNetworkCtx;
+
+typedef struct {
+  // The caller's, passed through `io_listen_and_serve_tcp_ipv4`. The vtable's
+  // own context lives in `io->ctx`.
+  void *cb_ctx;
+  const IO *io;
+  TorrentNetworkCtx *network_ctx;
+  i32 socket;
+  Ipv4Addr addr;
+  // More: torrent, etc.
+} TorrentClientHandleCtx;
+
+#define TORRENT_CLIENTS_MAX 1024
+
+typedef u64 PoolSlotGroup;
+
+// Unit is bits.
+#define POOL_SLOTS_PER_GROUP (sizeof(PoolSlotGroup) * 8)
+_Static_assert(0 == (TORRENT_CLIENTS_MAX % POOL_SLOTS_PER_GROUP),
+               "must be a multiple");
+
+#define POOL_SLOT_GROUPS (TORRENT_CLIENTS_MAX / POOL_SLOTS_PER_GROUP)
+
+typedef struct {
+  // Bitset.
+  // Bit `i` of group `g` means: `slots[g * POOL_SLOTS_PER_GROUP + i]` is
+  // occupied.
+  PoolSlotGroup occupied[POOL_SLOT_GROUPS];
+  TorrentClientHandleCtx slots[TORRENT_CLIENTS_MAX];
+} TorrentClientHandleCtxPool;
+
+struct TorrentNetworkCtx {
+  TorrentClientHandleCtxPool pool;
+  // More...
+};
+
+__attribute__((warn_unused_result)) static TorrentClientHandleCtx *
+torrent_client_ctx_pool_acquire(TorrentClientHandleCtxPool *pool) {
+  assert(pool);
+
+  for (usize i = 0; i < POOL_SLOT_GROUPS; i++) {
+    // 'Relaxed' means that we sometimes can report the slot group as full when
+    // it's not. It's a TOCTOU window we accept and there is no easy fix.
+    const PoolSlotGroup slot_group =
+        __atomic_load_n(&pool->occupied[i], __ATOMIC_RELAXED);
+
+    const i32 first_unset_bit = __builtin_ffsll((i64)~slot_group);
+
+    // Slot full, keep scanning to find a free slot?
+    if (0 == first_unset_bit) {
+      continue;
+    }
+
+    const u32 bit_idx = (u32)(first_unset_bit - 1);
+    const PoolSlotGroup mask = 1ULL << bit_idx;
+
+    // Mark the slot as occupied.
+    const PoolSlotGroup prev =
+        __atomic_fetch_or(&pool->occupied[i], mask, __ATOMIC_ACQUIRE);
+
+    // Since there is only one concurrent caller of 'pool_acquire' no
+    // one could have concurrently acquired the slot that was free at the start
+    // of this loop iteration.
+    assert(0 == (prev & mask));
+
+    const usize slot_idx = i * POOL_SLOTS_PER_GROUP + bit_idx;
+    assert(slot_idx < TORRENT_CLIENTS_MAX);
+
+    TorrentClientHandleCtx *res = &pool->slots[slot_idx];
+    assert(0 == res->cb_ctx);
+    assert(0 == res->io);
+    assert(0 == res->network_ctx);
+    assert(0 == res->socket);
+    assert(0 == res->addr.ip);
+    assert(0 == res->addr.port);
+    return res;
+  }
+
+  return NULL;
+}
+
+static void torrent_client_ctx_pool_release(TorrentClientHandleCtxPool *pool,
+                                            TorrentClientHandleCtx *slot) {
+  assert(pool);
+  assert(slot);
+
+  assert(slot >= pool->slots);
+  const usize slot_idx = (usize)(slot - pool->slots);
+  assert(slot_idx < TORRENT_CLIENTS_MAX);
+
+  const usize slot_group_idx = slot_idx / POOL_SLOTS_PER_GROUP;
+  assert(slot_group_idx < POOL_SLOT_GROUPS);
+  const u32 bit_idx = slot_idx % POOL_SLOTS_PER_GROUP;
+
+  // We are still the owner so we are responsible for zeroing it.
+  memset(slot, 0, sizeof(*slot));
+
+  const PoolSlotGroup mask = ~(1ULL << bit_idx);
+  const PoolSlotGroup prev = __atomic_fetch_and(&pool->occupied[slot_group_idx],
+                                                mask, __ATOMIC_RELEASE);
+
+  // Sanity check against double release of the same slot: the slot was indeed
+  // occupied before.
+  assert(0 != (prev & ~mask));
+}
+
+static void *torrent_client_handle(void *vctx) {
+  assert(vctx);
+
+  TorrentClientHandleCtx *const client_ctx = vctx;
+  assert(client_ctx->io);
+
+  const u32 ip = client_ctx->addr.ip;
+  printf("accepted: %u.%u.%u.%u:%hu\n", ip >> 24 & 0xff, ip >> 16 & 0xff,
+         ip >> 8 & 0xff, ip >> 0 & 0xff, client_ctx->addr.port);
+
+  usize read_count = 0;
+  u8 buf[4096] = {0};
+  Slice_u8 slice_read = slice_u8_make(buf, sizeof(buf));
+
+  Error err = client_ctx->io->read(client_ctx->io->ctx, client_ctx->socket,
+                                   slice_read, &read_count);
+  if (ErrKindNone != err.kind) {
+    goto end;
+  }
+
+  const Slice_u8 slice_read_actual = slice_u8_take(slice_read, read_count);
+  printf("read: %.*s\n", (i32)slice_read_actual.len, slice_read_actual.data);
+
+end:
+  (void)client_ctx->io->close(client_ctx->io->ctx, client_ctx->socket);
+
+  puts("torrent_client_handle end");
+
+  // Responsible for freeing our context.
+  torrent_client_ctx_pool_release(&client_ctx->network_ctx->pool, client_ctx);
+
+  return NULL;
+}
+
+__attribute__((warn_unused_result)) static Error
+torrent_client_on_accept(const IO *io, void *vctx, Ipv4Addr accept_addr,
+                         i32 accept_socket) {
+  assert(io);
+  assert(vctx);
+  TorrentNetworkCtx *const network_ctx = vctx;
+
+  puts("accepted");
+
+  Error err = {.kind = ErrKindNone};
+  TorrentClientHandleCtx *const client_ctx =
+      torrent_client_ctx_pool_acquire(&network_ctx->pool);
+  if (!client_ctx) {
+    fprintf(stderr, "backpressure: no available pool slot for client\n");
+    (void)io->close(io->ctx, accept_socket);
+    return (Error){.kind = ErrKindOOM};
+  }
+
+  assert(client_ctx);
+  client_ctx->cb_ctx = vctx;
+  client_ctx->addr = accept_addr;
+  client_ctx->socket = accept_socket;
+  client_ctx->io = io;
+  client_ctx->network_ctx = network_ctx;
+
+  err = io->thread_create(io->ctx, torrent_client_handle, client_ctx);
+  if (ErrKindNone != err.kind) {
+    // The thread never started, so nothing else will free the context or hang
+    // up on the peer.
+    torrent_client_ctx_pool_release(&network_ctx->pool, client_ctx);
+    (void)io->close(io->ctx, accept_socket);
+  }
+
+  // Nothing to cleanup: the client handler finished successfully and is
+  // responsible for the cleanup.
+
+  return err;
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -3336,6 +3519,416 @@ static void test_arena_valloc_mocked(void) {
     assert(ErrOSKindPermission == arena_valloc(&io, 1, &arena).kind);
     assert(NULL == arena.start);
   }
+}
+
+// The server narrates to stdout. That is the point in production and noise in
+// a test, more so at a thousand connections, so it is swallowed for the
+// duration. `dup` has no vtable slot: this is the harness redirecting its own
+// output, not the program doing I/O.
+__attribute__((warn_unused_result)) static i32 test_stdout_silence(void) {
+  fflush(stdout);
+
+  const i32 saved = dup(STDOUT_FILENO);
+  assert(-1 != saved);
+
+  const i32 devnull = open("/dev/null", O_WRONLY);
+  assert(-1 != devnull);
+  assert(-1 != dup2(devnull, STDOUT_FILENO));
+  assert(0 == close(devnull));
+
+  return saved;
+}
+
+static void test_stdout_restore(i32 saved) {
+  fflush(stdout);
+  assert(-1 != dup2(saved, STDOUT_FILENO));
+  assert(0 == close(saved));
+}
+
+// A scripted `IO` for the TCP server. Every slot it fakes can be made to fail,
+// and `accept` is told in advance how many connections to hand over before it
+// stops: `io_listen_and_serve_tcp_ipv4` loops forever otherwise, so without
+// this there is no way to call it from a test at all.
+typedef struct {
+  // Failure injection, one per slot. `ErrKindNone` means "succeed".
+  ErrorKind socket_fails_with;
+  ErrorKind reuse_fails_with;
+  ErrorKind bind_fails_with;
+  ErrorKind listen_fails_with;
+  ErrorKind thread_create_fails_with;
+  ErrorKind read_fails_with;
+
+  // `accept` succeeds this many times, then reports `accept_ends_with` to
+  // unwind the loop. The call at `conn_reset_at` (1-based, 0 for never)
+  // reports a reset instead, which the server is meant to shrug off.
+  usize accept_success_max;
+  usize conn_reset_at;
+  ErrorKind accept_ends_with;
+  usize accept_handed_over;
+
+  // Run the handler on this thread instead of spawning one, so it is covered
+  // without the test having to join anything.
+  bool run_thread_inline;
+
+  usize socket_calls;
+  usize reuse_calls;
+  usize bind_calls;
+  usize listen_calls;
+  usize accept_calls;
+  usize close_calls;
+  usize thread_create_calls;
+  usize read_calls;
+
+  Ipv4Addr bound_addr;
+  i32 backlog;
+} TestServerCtx;
+
+__attribute__((warn_unused_result)) static Error
+test_server_socket(void *ctx, SocketDomain domain, SocketType type, i32 *fd) {
+  TestServerCtx *const c = ctx;
+  assert(c);
+  assert(fd);
+  assert(SocketDomainIpv4 == domain);
+  assert(SocketTypeTcp == type);
+
+  c->socket_calls += 1;
+  if (ErrKindNone != c->socket_fails_with) {
+    return (Error){.kind = c->socket_fails_with};
+  }
+
+  // A recognisable descriptor: a real one would never be this.
+  *fd = 4242;
+  return (Error){.kind = ErrKindNone};
+}
+
+__attribute__((warn_unused_result)) static Error
+test_server_enable_socket_reuse(void *ctx, i32 fd) {
+  TestServerCtx *const c = ctx;
+  assert(c);
+  assert(4242 == fd);
+
+  c->reuse_calls += 1;
+  return (Error){.kind = c->reuse_fails_with};
+}
+
+__attribute__((warn_unused_result)) static Error
+test_server_tcp_bind_ipv4(void *ctx, i32 fd, Ipv4Addr addr) {
+  TestServerCtx *const c = ctx;
+  assert(c);
+  assert(4242 == fd);
+
+  c->bind_calls += 1;
+  c->bound_addr = addr;
+  return (Error){.kind = c->bind_fails_with};
+}
+
+__attribute__((warn_unused_result)) static Error
+test_server_listen(void *ctx, i32 fd, i32 backlog) {
+  TestServerCtx *const c = ctx;
+  assert(c);
+  assert(4242 == fd);
+
+  c->listen_calls += 1;
+  c->backlog = backlog;
+  return (Error){.kind = c->listen_fails_with};
+}
+
+__attribute__((warn_unused_result)) static Error
+test_server_accept(void *ctx, i32 listen_socket, i32 *dst_accept_socket,
+                   Ipv4Addr *dst_accept_addr) {
+  TestServerCtx *const c = ctx;
+  assert(c);
+  assert(4242 == listen_socket);
+  assert(dst_accept_socket);
+  assert(dst_accept_addr);
+
+  c->accept_calls += 1;
+
+  if (c->accept_calls == c->conn_reset_at) {
+    return (Error){.kind = ErrKindConnReset};
+  }
+
+  // A reset hands over nothing, so it does not count against the budget.
+  if (c->accept_handed_over >= c->accept_success_max) {
+    return (Error){.kind = c->accept_ends_with};
+  }
+  c->accept_handed_over += 1;
+
+  *dst_accept_socket = (i32)(5000 + c->accept_calls);
+  *dst_accept_addr = (Ipv4Addr){.ip = 0x7f000001, .port = 4000};
+  return (Error){.kind = ErrKindNone};
+}
+
+__attribute__((warn_unused_result)) static Error test_server_close(void *ctx,
+                                                                   i32 fd) {
+  TestServerCtx *const c = ctx;
+  assert(c);
+  assert(fd > 0);
+
+  c->close_calls += 1;
+  return (Error){.kind = ErrKindNone};
+}
+
+__attribute__((warn_unused_result)) static Error
+test_server_thread_create(void *ctx, ThreadCallback cb, void *data) {
+  TestServerCtx *const c = ctx;
+  assert(c);
+  assert(cb);
+  assert(data);
+
+  c->thread_create_calls += 1;
+  if (ErrKindNone != c->thread_create_fails_with) {
+    return (Error){.kind = c->thread_create_fails_with};
+  }
+
+  if (c->run_thread_inline) {
+    (void)cb(data);
+  }
+  return (Error){.kind = ErrKindNone};
+}
+
+__attribute__((warn_unused_result)) static Error
+test_server_read(void *ctx, i32 fd, Slice_u8 data, usize *dst_read) {
+  TestServerCtx *const c = ctx;
+  assert(c);
+  assert(fd > 0);
+  assert(dst_read);
+
+  c->read_calls += 1;
+  if (ErrKindNone != c->read_fails_with) {
+    return (Error){.kind = c->read_fails_with};
+  }
+
+  const u8 msg[] = "hello";
+  assert(data.len >= sizeof(msg) - 1);
+  memcpy(data.data, msg, sizeof(msg) - 1);
+  *dst_read = sizeof(msg) - 1;
+
+  return (Error){.kind = ErrKindNone};
+}
+
+__attribute__((warn_unused_result)) static IO
+test_io_server_make(TestServerCtx *ctx) {
+  assert(ctx);
+
+  return (IO){
+      .socket = test_server_socket,
+      .enable_socket_reuse = test_server_enable_socket_reuse,
+      .tcp_bind_ipv4 = test_server_tcp_bind_ipv4,
+      .listen = test_server_listen,
+      .accept = test_server_accept,
+      .close = test_server_close,
+      .thread_create = test_server_thread_create,
+      .read = test_server_read,
+      .ctx = ctx,
+  };
+}
+
+// Setting up the listener: each step's failure stops the sequence and travels
+// back verbatim, and every failure that happens after the socket exists hands
+// the descriptor back.
+static void test_io_listen_and_serve_setup_failures(void) {
+  const Ipv4Addr addr = {.ip = 0x7f000001, .port = 12345};
+
+  const struct {
+    const char *name;
+    ErrorKind socket;
+    ErrorKind reuse;
+    ErrorKind bind;
+    ErrorKind listen;
+    ErrorKind expected;
+    usize expected_closes;
+  } cases[] = {
+      // No socket, so nothing to close.
+      {"socket", ErrKindTooManyFiles, ErrKindNone, ErrKindNone, ErrKindNone,
+       ErrKindTooManyFiles, 0},
+      {"reuse", ErrKindNone, ErrOSKindPermission, ErrKindNone, ErrKindNone,
+       ErrOSKindPermission, 1},
+      // The port left behind by a previous run is the expected failure here.
+      {"bind", ErrKindNone, ErrKindNone, ErrKindAddrInUse, ErrKindNone,
+       ErrKindAddrInUse, 1},
+      {"listen", ErrKindNone, ErrKindNone, ErrKindNone, ErrOSKindPermission,
+       ErrOSKindPermission, 1},
+  };
+
+  for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    TestServerCtx ctx = {
+        .socket_fails_with = cases[i].socket,
+        .reuse_fails_with = cases[i].reuse,
+        .bind_fails_with = cases[i].bind,
+        .listen_fails_with = cases[i].listen,
+        .accept_ends_with = ErrKindInvalidData,
+    };
+    const IO io = test_io_server_make(&ctx);
+    TorrentNetworkCtx network_ctx = {0};
+
+    const i32 saved = test_stdout_silence();
+    const Error err = io_listen_and_serve_tcp_ipv4(&io, &network_ctx, addr,
+                                                   torrent_client_on_accept);
+    test_stdout_restore(saved);
+
+    assert(cases[i].expected == err.kind);
+    assert(cases[i].expected_closes == ctx.close_calls);
+    // Nothing past the failing step ran.
+    assert(0 == ctx.accept_calls);
+  }
+
+  // The listener is bound to what it was asked for, with a backlog.
+  {
+    TestServerCtx ctx = {.accept_ends_with = ErrKindInvalidData};
+    const IO io = test_io_server_make(&ctx);
+    TorrentNetworkCtx network_ctx = {0};
+
+    const i32 saved = test_stdout_silence();
+    assert(ErrKindInvalidData ==
+           io_listen_and_serve_tcp_ipv4(&io, &network_ctx, addr,
+                                        torrent_client_on_accept)
+               .kind);
+    test_stdout_restore(saved);
+
+    assert(addr.ip == ctx.bound_addr.ip);
+    assert(addr.port == ctx.bound_addr.port);
+    assert(ctx.backlog > 0);
+    // The listener is closed on the way out.
+    assert(1 == ctx.close_calls);
+  }
+}
+
+// The accept loop and the handler behind it.
+static void test_io_listen_and_serve_accept(void) {
+  const Ipv4Addr addr = {.ip = 0x7f000001, .port = 12345};
+
+  // A peer that vanishes between the handshake and the `accept` is one dead
+  // connection, not a dead server: the loop goes back around. Nothing but a
+  // fake can produce that at a chosen moment.
+  {
+    TestServerCtx ctx = {.accept_success_max = 2,
+                         .conn_reset_at = 1,
+                         .accept_ends_with = ErrKindInvalidData};
+    const IO io = test_io_server_make(&ctx);
+    TorrentNetworkCtx network_ctx = {0};
+
+    const i32 saved = test_stdout_silence();
+    assert(ErrKindInvalidData ==
+           io_listen_and_serve_tcp_ipv4(&io, &network_ctx, addr,
+                                        torrent_client_on_accept)
+               .kind);
+    test_stdout_restore(saved);
+
+    // The reset was shrugged off, so both connections still arrived.
+    assert(2 == ctx.thread_create_calls);
+    assert(4 == ctx.accept_calls);
+  }
+
+  // A handler that cannot be started releases its slot and hangs up, rather
+  // than leaking either.
+  {
+    TestServerCtx ctx = {.accept_success_max = 3,
+                         .thread_create_fails_with = ErrKindOOM,
+                         .accept_ends_with = ErrKindInvalidData};
+    const IO io = test_io_server_make(&ctx);
+    TorrentNetworkCtx network_ctx = {0};
+
+    const i32 saved = test_stdout_silence();
+    assert(ErrKindInvalidData ==
+           io_listen_and_serve_tcp_ipv4(&io, &network_ctx, addr,
+                                        torrent_client_on_accept)
+               .kind);
+    test_stdout_restore(saved);
+
+    assert(3 == ctx.thread_create_calls);
+    // One per accepted connection, plus the listener itself.
+    assert(4 == ctx.close_calls);
+
+    // Every slot was handed back, so the pool is as empty as it started.
+    for (usize i = 0; i < POOL_SLOT_GROUPS; i++) {
+      assert(0 == network_ctx.pool.occupied[i]);
+    }
+  }
+
+  // Running the handler inline covers it without a second thread: it reads
+  // once and hangs up.
+  {
+    TestServerCtx ctx = {.accept_success_max = 1,
+                         .run_thread_inline = true,
+                         .accept_ends_with = ErrKindInvalidData};
+    const IO io = test_io_server_make(&ctx);
+    TorrentNetworkCtx network_ctx = {0};
+
+    const i32 saved = test_stdout_silence();
+    assert(ErrKindInvalidData ==
+           io_listen_and_serve_tcp_ipv4(&io, &network_ctx, addr,
+                                        torrent_client_on_accept)
+               .kind);
+    test_stdout_restore(saved);
+
+    assert(1 == ctx.read_calls);
+    assert(2 == ctx.close_calls);
+    for (usize i = 0; i < POOL_SLOT_GROUPS; i++) {
+      assert(0 == network_ctx.pool.occupied[i]);
+    }
+  }
+
+  // A read that fails still hangs up and still frees the slot.
+  {
+    TestServerCtx ctx = {.accept_success_max = 1,
+                         .run_thread_inline = true,
+                         .read_fails_with = ErrKindConnReset,
+                         .accept_ends_with = ErrKindInvalidData};
+    const IO io = test_io_server_make(&ctx);
+    TorrentNetworkCtx network_ctx = {0};
+
+    const i32 saved = test_stdout_silence();
+    assert(ErrKindInvalidData ==
+           io_listen_and_serve_tcp_ipv4(&io, &network_ctx, addr,
+                                        torrent_client_on_accept)
+               .kind);
+    test_stdout_restore(saved);
+
+    assert(1 == ctx.read_calls);
+    assert(2 == ctx.close_calls);
+    for (usize i = 0; i < POOL_SLOT_GROUPS; i++) {
+      assert(0 == network_ctx.pool.occupied[i]);
+    }
+  }
+}
+
+// Backpressure: one more connection than the pool holds. Reaching this with
+// real sockets would mean opening `TORRENT_CLIENTS_MAX` of them.
+static void test_torrent_client_pool_exhaustion(void) {
+  const Ipv4Addr addr = {.ip = 0x7f000001, .port = 12345};
+
+  // The pool is a megabyte or so of slots: too much for the stack.
+  static TorrentNetworkCtx network_ctx;
+  memset(&network_ctx, 0, sizeof(network_ctx));
+
+  TestServerCtx ctx = {.accept_success_max = TORRENT_CLIENTS_MAX + 1,
+                       .accept_ends_with = ErrKindInvalidData};
+  const IO io = test_io_server_make(&ctx);
+
+  const i32 saved = test_stdout_silence();
+  assert(ErrKindInvalidData ==
+         io_listen_and_serve_tcp_ipv4(&io, &network_ctx, addr,
+                                      torrent_client_on_accept)
+             .kind);
+  test_stdout_restore(saved);
+
+  // Nothing ever finishes, so the pool fills and the last connection is
+  // refused rather than overrunning the slots.
+  // `TORRENT_CLIENTS_MAX + 1` connections were handed over, one more than
+  // the pool holds, plus the call that ends the loop.
+  assert(TORRENT_CLIENTS_MAX + 2 == ctx.accept_calls);
+  assert(TORRENT_CLIENTS_MAX + 1 == ctx.accept_handed_over);
+  // The last one never reached `thread_create`: the pool refused it first.
+  assert(TORRENT_CLIENTS_MAX == ctx.thread_create_calls);
+
+  // Every group is full.
+  for (usize i = 0; i < POOL_SLOT_GROUPS; i++) {
+    assert(~(PoolSlotGroup)0 == network_ctx.pool.occupied[i]);
+  }
+
+  // The refused connection was hung up on, and so was the listener.
+  assert(2 == ctx.close_calls);
 }
 
 static void test_arena_valloc(void) {
@@ -6100,6 +6693,11 @@ static void test(const char *filter) {
       {"unix_error_from_errno", test_unix_error_from_errno},
       {"arena_valloc", test_arena_valloc},
       {"arena_valloc_mocked", test_arena_valloc_mocked},
+      {"io_listen_and_serve_setup_failures",
+       test_io_listen_and_serve_setup_failures},
+      {"io_listen_and_serve_accept", test_io_listen_and_serve_accept},
+      {"torrent_client_pool_exhaustion",
+       test_torrent_client_pool_exhaustion},
       {"error_kind_to_cstr", test_error_kind_to_cstr},
       {"io_open_errors", test_io_open_errors},
       {"io_file_round_trip", test_io_file_round_trip},
@@ -6155,186 +6753,6 @@ static void test(const char *filter) {
   }
 
   printf("%zu test(s) passed\n", run);
-}
-
-typedef struct TorrentNetworkCtx TorrentNetworkCtx;
-
-typedef struct {
-  // The caller's, passed through `io_listen_and_serve_tcp_ipv4`. The vtable's
-  // own context lives in `io->ctx`.
-  void *cb_ctx;
-  const IO *io;
-  TorrentNetworkCtx *network_ctx;
-  i32 socket;
-  Ipv4Addr addr;
-  // More: torrent, etc.
-} TorrentClientHandleCtx;
-
-#define TORRENT_CLIENTS_MAX 1024
-
-typedef u64 PoolSlotGroup;
-
-// Unit is bits.
-#define POOL_SLOTS_PER_GROUP (sizeof(PoolSlotGroup) * 8)
-_Static_assert(0 == (TORRENT_CLIENTS_MAX % POOL_SLOTS_PER_GROUP),
-               "must be a multiple");
-
-#define POOL_SLOT_GROUPS (TORRENT_CLIENTS_MAX / POOL_SLOTS_PER_GROUP)
-
-typedef struct {
-  // Bitset.
-  // Bit `i` of group `g` means: `slots[g * POOL_SLOTS_PER_GROUP + i]` is
-  // occupied.
-  PoolSlotGroup occupied[POOL_SLOT_GROUPS];
-  TorrentClientHandleCtx slots[TORRENT_CLIENTS_MAX];
-} TorrentClientHandleCtxPool;
-
-struct TorrentNetworkCtx {
-  TorrentClientHandleCtxPool pool;
-  // More...
-};
-
-__attribute__((warn_unused_result)) static TorrentClientHandleCtx *
-torrent_client_ctx_pool_acquire(TorrentClientHandleCtxPool *pool) {
-  assert(pool);
-
-  for (usize i = 0; i < POOL_SLOT_GROUPS; i++) {
-    // 'Relaxed' means that we sometimes can report the slot group as full when
-    // it's not. It's a TOCTOU window we accept and there is no easy fix.
-    const PoolSlotGroup slot_group =
-        __atomic_load_n(&pool->occupied[i], __ATOMIC_RELAXED);
-
-    const i32 first_unset_bit = __builtin_ffsll((i64)~slot_group);
-
-    // Slot full, keep scanning to find a free slot?
-    if (0 == first_unset_bit) {
-      continue;
-    }
-
-    const u32 bit_idx = (u32)(first_unset_bit - 1);
-    const PoolSlotGroup mask = 1ULL << bit_idx;
-
-    // Mark the slot as occupied.
-    const PoolSlotGroup prev =
-        __atomic_fetch_or(&pool->occupied[i], mask, __ATOMIC_ACQUIRE);
-
-    // Since there is only one concurrent caller of 'pool_acquire' no
-    // one could have concurrently acquired the slot that was free at the start
-    // of this loop iteration.
-    assert(0 == (prev & mask));
-
-    const usize slot_idx = i * POOL_SLOTS_PER_GROUP + bit_idx;
-    assert(slot_idx < TORRENT_CLIENTS_MAX);
-
-    TorrentClientHandleCtx *res = &pool->slots[slot_idx];
-    assert(0 == res->cb_ctx);
-    assert(0 == res->io);
-    assert(0 == res->network_ctx);
-    assert(0 == res->socket);
-    assert(0 == res->addr.ip);
-    assert(0 == res->addr.port);
-    return res;
-  }
-
-  return NULL;
-}
-
-static void torrent_client_ctx_pool_release(TorrentClientHandleCtxPool *pool,
-                                            TorrentClientHandleCtx *slot) {
-  assert(pool);
-  assert(slot);
-
-  assert(slot >= pool->slots);
-  const usize slot_idx = (usize)(slot - pool->slots);
-  assert(slot_idx < TORRENT_CLIENTS_MAX);
-
-  const usize slot_group_idx = slot_idx / POOL_SLOTS_PER_GROUP;
-  assert(slot_group_idx < POOL_SLOT_GROUPS);
-  const u32 bit_idx = slot_idx % POOL_SLOTS_PER_GROUP;
-
-  // We are still the owner so we are responsible for zeroing it.
-  memset(slot, 0, sizeof(*slot));
-
-  const PoolSlotGroup mask = ~(1ULL << bit_idx);
-  const PoolSlotGroup prev = __atomic_fetch_and(&pool->occupied[slot_group_idx],
-                                                mask, __ATOMIC_RELEASE);
-
-  // Sanity check against double release of the same slot: the slot was indeed
-  // occupied before.
-  assert(0 != (prev & ~mask));
-}
-
-static void *torrent_client_handle(void *vctx) {
-  assert(vctx);
-
-  TorrentClientHandleCtx *const client_ctx = vctx;
-  assert(client_ctx->io);
-
-  const u32 ip = client_ctx->addr.ip;
-  printf("accepted: %u.%u.%u.%u:%hu\n", ip >> 24 & 0xff, ip >> 16 & 0xff,
-         ip >> 8 & 0xff, ip >> 0 & 0xff, client_ctx->addr.port);
-
-  usize read_count = 0;
-  u8 buf[4096] = {0};
-  Slice_u8 slice_read = slice_u8_make(buf, sizeof(buf));
-
-  Error err = client_ctx->io->read(client_ctx->io->ctx, client_ctx->socket,
-                                   slice_read, &read_count);
-  if (ErrKindNone != err.kind) {
-    goto end;
-  }
-
-  const Slice_u8 slice_read_actual = slice_u8_take(slice_read, read_count);
-  printf("read: %.*s\n", (i32)slice_read_actual.len, slice_read_actual.data);
-
-end:
-  (void)client_ctx->io->close(client_ctx->io->ctx, client_ctx->socket);
-
-  puts("torrent_client_handle end");
-
-  // Responsible for freeing our context.
-  torrent_client_ctx_pool_release(&client_ctx->network_ctx->pool, client_ctx);
-
-  return NULL;
-}
-
-__attribute__((warn_unused_result)) static Error
-torrent_client_on_accept(const IO *io, void *vctx, Ipv4Addr accept_addr,
-                         i32 accept_socket) {
-  assert(io);
-  assert(vctx);
-  TorrentNetworkCtx *const network_ctx = vctx;
-
-  puts("accepted");
-
-  Error err = {.kind = ErrKindNone};
-  TorrentClientHandleCtx *const client_ctx =
-      torrent_client_ctx_pool_acquire(&network_ctx->pool);
-  if (!client_ctx) {
-    fprintf(stderr, "backpressure: no available pool slot for client\n");
-    (void)io->close(io->ctx, accept_socket);
-    return (Error){.kind = ErrKindOOM};
-  }
-
-  assert(client_ctx);
-  client_ctx->cb_ctx = vctx;
-  client_ctx->addr = accept_addr;
-  client_ctx->socket = accept_socket;
-  client_ctx->io = io;
-  client_ctx->network_ctx = network_ctx;
-
-  err = io->thread_create(client_ctx, torrent_client_handle);
-  if (ErrKindNone != err.kind) {
-    // The thread never started, so nothing else will free the context or hang
-    // up on the peer.
-    torrent_client_ctx_pool_release(&network_ctx->pool, client_ctx);
-    (void)io->close(io->ctx, accept_socket);
-  }
-
-  // Nothing to cleanup: the client handler finished successfully and is
-  // responsible for the cleanup.
-
-  return err;
 }
 
 int main(i32 argc, char *argv[]) {
