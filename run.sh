@@ -11,6 +11,7 @@ if [ $# -lt 1 ]; then
 fi
 
 MODE="$1"
+CMD="$2"
 shift
 
 CC="${CC:-clang}"
@@ -56,6 +57,14 @@ release)
   echo "unknown mode: $MODE" >&2
   usage
   ;;
+esac
+
+case "$CMD" in
+test)
+  MODE_CFLAGS="${MODE_CFLAGS} -DWITH_TESTS"
+  ;;
+*)
+;;
 esac
 
 set -x

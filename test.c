@@ -1,5 +1,7 @@
 #pragma once
 
+#ifdef WITH_TESTS
+
 #ifdef PLATFORM_UNIX
 #include "unix.c"
 #endif
@@ -4040,3 +4042,5 @@ static void test(const char *filter) {
 
   printf("%zu test(s) passed\n", run);
 }
+
+#endif

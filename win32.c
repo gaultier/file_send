@@ -1,10 +1,6 @@
 #pragma once
 #include "lib.c"
 
-// The Windows implementation of the `IO` vtable. Included by `main.c` next to
-// `unix.c`; whichever one matches the system supplies `io_platform_make` and
-// the other compiles to nothing.
-
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif

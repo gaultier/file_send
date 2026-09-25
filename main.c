@@ -1,3 +1,4 @@
+#include "lib.c"
 
 #ifdef PLATFORM_UNIX
 #include "unix.c"
@@ -24,9 +25,12 @@ int main(i32 argc, char *argv[]) {
   Arena scratch = {0};
   assert(ErrKindNone == arena_valloc(&io, 1 * MiB, &scratch).kind);
 
+#ifdef WITH_TESTS
   if (0 == strcmp(cmd, "test")) {
     test(argc > 2 ? argv[2] : NULL);
-  } else if (0 == strcmp(cmd, "broadcast")) {
+  } else
+#endif
+      if (0 == strcmp(cmd, "broadcast")) {
     i32 udp_socket = 0;
     {
       Error err_udp = io.udp_multicast_open_ipv4(&io, 0, &udp_socket);
