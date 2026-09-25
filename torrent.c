@@ -1327,7 +1327,7 @@ torrent_make_udp_broadcast_message(Slice_u8 url, u16 port, Slice_u8 info_hash,
 
   StringBuffer sb = {0};
   Error err = sb_make(100, arena, &sb);
-  if (ErrKindNone == err.kind) {
+  if (ErrKindNone != err.kind) {
     return err;
   }
 
