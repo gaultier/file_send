@@ -1392,7 +1392,9 @@ torrent_validate_info_dict(BencodeValue info_dict) {
       return (Error){.kind = ErrKindInvalidData};
     }
 
-    if (i > 2) {
+    // `i > 0`, not `i > 2`: `i` steps in twos, so `i == 2` is the first
+    // adjacent pair of keys and skipping it would let `d1:b..1:a..e` through.
+    if (i > 0) {
       const BencodeValue prev_k = l.data[i - 2];
       assert(BencodeKindString == prev_k.kind);
 

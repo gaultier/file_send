@@ -37,6 +37,16 @@ test_slice(const char *input) {
   return slice_u8_make((u8 *)input, strlen(input));
 }
 
+__attribute__((warn_unused_result)) static BencodeValue
+test_bencode_int(isize n) {
+  return (BencodeValue){.kind = BencodeKindInteger, .v.num = n};
+}
+
+__attribute__((warn_unused_result)) static BencodeValue
+test_bencode_str(const char *s) {
+  return (BencodeValue){.kind = BencodeKindString, .v.s = test_slice(s)};
+}
+
 // Is `needle` present in `haystack`? `memmem` is not C99, and an empty needle
 // is not a question this asks.
 __attribute__((warn_unused_result)) static bool
@@ -1757,7 +1767,7 @@ static void test_bencode_parse_binary(void) {
 
   // Dict keys are ordered by raw byte value, so 0x01 comes before 0x80. A
   // signed `char` comparison reads 0x80 as -128 and puts it first, which would
-  // accept the reversed pair and reject this one; `bytes_cmp` is checked on its
+  // accept the reversed pair and reject this one; `slice_u8_cmp` is checked on its
   // own, this checks that `bencode_parse` actually routes dict keys through it.
   {
     const struct {
@@ -1897,10 +1907,10 @@ static void test_bencode_parse_deep_dicts(void) {
   }
 }
 
-static void test_bytes_cmp(void) {
-  // A corpus in the order `bytes_cmp` must put it in. The embedded zeroes and
-  // the bytes above 0x7f are there on purpose: neither `strcmp` nor a signed
-  // char comparison orders these correctly.
+static void test_slice_u8_cmp(void) {
+  // A corpus in the order `slice_u8_cmp` must put it in. The embedded zeroes
+  // and the bytes above 0x7f are there on purpose: neither `strcmp` nor a
+  // signed char comparison orders these correctly.
   const struct {
     const char *data;
     usize len;
@@ -1927,10 +1937,10 @@ static void test_bytes_cmp(void) {
 
   for (usize i = 0; i < count; i++) {
     for (usize j = 0; j < count; j++) {
-      u8 *const a = (u8 *)sorted[i].data;
-      u8 *const b = (u8 *)sorted[j].data;
+      const Slice_u8 a = slice_u8_make((u8 *)sorted[i].data, sorted[i].len);
+      const Slice_u8 b = slice_u8_make((u8 *)sorted[j].data, sorted[j].len);
 
-      const i32 res = bytes_cmp(a, sorted[i].len, b, sorted[j].len);
+      const i32 res = slice_u8_cmp(a, b);
       if (i < j) {
         assert(res < 0);
       } else if (i > j) {
@@ -1940,7 +1950,7 @@ static void test_bytes_cmp(void) {
       }
 
       // Antisymmetric: swapping the arguments flips the sign.
-      const i32 swapped = bytes_cmp(b, sorted[j].len, a, sorted[i].len);
+      const i32 swapped = slice_u8_cmp(b, a);
       assert((res < 0) == (swapped > 0));
       assert((res > 0) == (swapped < 0));
       assert((0 == res) == (0 == swapped));
@@ -1950,10 +1960,11 @@ static void test_bytes_cmp(void) {
   // A NULL pointer is legal as long as the length is zero, and every empty
   // byte string is equal to every other one.
   {
-    assert(0 == bytes_cmp(NULL, 0, NULL, 0));
-    assert(0 == bytes_cmp(NULL, 0, (u8 *)"", 0));
-    assert(bytes_cmp(NULL, 0, (u8 *)"a", 1) < 0);
-    assert(bytes_cmp((u8 *)"a", 1, NULL, 0) > 0);
+    const Slice_u8 null_empty = slice_u8_make(NULL, 0);
+    assert(0 == slice_u8_cmp(null_empty, null_empty));
+    assert(0 == slice_u8_cmp(null_empty, test_slice("")));
+    assert(slice_u8_cmp(null_empty, test_slice("a")) < 0);
+    assert(slice_u8_cmp(test_slice("a"), null_empty) > 0);
   }
 
   // Longer than a word, differing only in the last byte.
@@ -1964,13 +1975,16 @@ static void test_bytes_cmp(void) {
     memset(y, 'z', sizeof(y));
     y[sizeof(y) - 1] = 'z' + 1;
 
-    assert(bytes_cmp(x, sizeof(x), y, sizeof(y)) < 0);
-    assert(bytes_cmp(y, sizeof(y), x, sizeof(x)) > 0);
+    const Slice_u8 sx = slice_u8_make(x, sizeof(x));
+    const Slice_u8 sy = slice_u8_make(y, sizeof(y));
+
+    assert(slice_u8_cmp(sx, sy) < 0);
+    assert(slice_u8_cmp(sy, sx) > 0);
 
     // Against itself, and against a prefix of itself.
-    assert(0 == bytes_cmp(x, sizeof(x), x, sizeof(x)));
-    assert(bytes_cmp(x, sizeof(x) - 1, x, sizeof(x)) < 0);
-    assert(bytes_cmp(x, sizeof(x), x, sizeof(x) - 1) > 0);
+    assert(0 == slice_u8_cmp(sx, sx));
+    assert(slice_u8_cmp(slice_u8_take(sx, sizeof(x) - 1), sx) < 0);
+    assert(slice_u8_cmp(sx, slice_u8_take(sx, sizeof(x) - 1)) > 0);
   }
 }
 
@@ -2886,6 +2900,301 @@ static void test_encode_isize_base_10_round_trip(void) {
 }
 
 // ---------------------------------------------------------------------------
+// torrent_validate_info_dict
+// ---------------------------------------------------------------------------
+
+__attribute__((warn_unused_result)) static BencodeValue
+test_bencode_dict(BencodeValue *items, usize len) {
+  return (BencodeValue){.kind = BencodeKindDict,
+                        .v.list = {.data = items, .len = len}};
+}
+
+static void test_torrent_validate_info_dict(void) {
+  // Key ordering, which is the whole job: bencode wants dict keys strictly
+  // ascending by raw byte value, with no duplicates. The pair that goes wrong
+  // is varied across the dict on purpose -- the first adjacent pair is as easy
+  // to skip as the last.
+  {
+    const struct {
+      const char *k0;
+      const char *k1;
+      const char *k2;
+      bool ok;
+    } cases[] = {
+        // Sorted.
+        {"a", "b", "c", true},
+        {"file tree", "meta version", "name", true},
+        // The very first adjacent pair out of order.
+        {"b", "a", "c", false},
+        // The last one.
+        {"a", "c", "b", false},
+        // Duplicates are not ascending either, at either position.
+        {"a", "a", "b", false},
+        {"a", "b", "b", false},
+        {"a", "a", "a", false},
+        // A prefix sorts before what extends it, whichever way round.
+        {"a", "aa", "aaa", true},
+        {"aa", "a", "b", false},
+        {"a", "aaa", "aa", false},
+        // Compared as unsigned bytes: 0x01 before 0x80, never the reverse.
+        {"\x01", "\x80", "\xff", true},
+        {"\x80", "\x01", "\xff", false},
+    };
+
+    for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+      BencodeValue items[] = {
+          test_bencode_str(cases[i].k0), test_bencode_int(1),
+          test_bencode_str(cases[i].k1), test_bencode_int(2),
+          test_bencode_str(cases[i].k2), test_bencode_int(3),
+      };
+      const BencodeValue dict =
+          test_bencode_dict(items, sizeof(items) / sizeof(items[0]));
+
+      assert((ErrKindNone == torrent_validate_info_dict(dict).kind) ==
+             cases[i].ok);
+    }
+  }
+
+  // Two keys, so there is exactly one adjacent pair to compare and nothing
+  // else can stand in for it.
+  {
+    const struct {
+      const char *k0;
+      const char *k1;
+      bool ok;
+    } cases[] = {
+        {"a", "b", true},
+        {"b", "a", false},
+        {"a", "a", false},
+        {"name", "piece length", true},
+        {"piece length", "name", false},
+    };
+
+    for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+      BencodeValue items[] = {
+          test_bencode_str(cases[i].k0), test_bencode_int(1),
+          test_bencode_str(cases[i].k1), test_bencode_int(2),
+      };
+      const BencodeValue dict =
+          test_bencode_dict(items, sizeof(items) / sizeof(items[0]));
+
+      assert((ErrKindNone == torrent_validate_info_dict(dict).kind) ==
+             cases[i].ok);
+    }
+  }
+
+  // One pair has no ordering to check and is accepted.
+  {
+    BencodeValue items[] = {test_bencode_str("name"), test_bencode_int(1)};
+    assert(ErrKindNone == torrent_validate_info_dict(test_bencode_dict(items, 2))
+                              .kind);
+  }
+
+  // An info dict with nothing in it carries none of the keys a torrent needs.
+  {
+    assert(ErrKindInvalidData ==
+           torrent_validate_info_dict(test_bencode_dict(NULL, 0)).kind);
+  }
+
+  // An odd child count is a key without a value.
+  {
+    BencodeValue items[] = {test_bencode_str("a"), test_bencode_int(1),
+                            test_bencode_str("b")};
+    assert(ErrKindInvalidData ==
+           torrent_validate_info_dict(test_bencode_dict(items, 3)).kind);
+  }
+
+  // Keys are strings, at every position, whatever else they might be.
+  {
+    for (usize bad = 0; bad < 3; bad++) {
+      BencodeValue items[] = {
+          test_bencode_str("a"), test_bencode_int(1),
+          test_bencode_str("b"), test_bencode_int(2),
+          test_bencode_str("c"), test_bencode_int(3),
+      };
+      // An integer where the key should be.
+      items[bad * 2] = test_bencode_int(7);
+
+      assert(ErrKindInvalidData ==
+             torrent_validate_info_dict(
+                 test_bencode_dict(items, sizeof(items) / sizeof(items[0])))
+                 .kind);
+    }
+  }
+
+  // A value may be anything, including a dict or a list: only keys are
+  // constrained.
+  {
+    BencodeValue inner[] = {test_bencode_str("length"), test_bencode_int(1)};
+    BencodeValue items[] = {
+        test_bencode_str("file tree"), test_bencode_dict(inner, 2),
+        test_bencode_str("name"),      test_bencode_str("x"),
+        test_bencode_str("piece length"), test_bencode_int(262144),
+    };
+    assert(ErrKindNone == torrent_validate_info_dict(
+                              test_bencode_dict(items, 6))
+                              .kind);
+  }
+}
+
+// `torrent_find_info_dict_in_metainfo` and `sha256_encode_hex_trunc` are only
+// reached from `main`, so the suite never ran a line of either until now.
+
+static void test_torrent_find_info_dict_in_metainfo(void) {
+  BencodeValue info_children[] = {test_bencode_str("name"),
+                                  test_bencode_str("x")};
+  const BencodeValue info = test_bencode_dict(info_children, 2);
+
+  // Found, wherever in the dict it sits.
+  {
+    BencodeValue first[] = {test_bencode_str("info"), info,
+                            test_bencode_str("zzz"), test_bencode_int(1)};
+    BencodeValue *const got =
+        torrent_find_info_dict_in_metainfo(test_bencode_dict(first, 4));
+    assert(got == &first[1]);
+    assert(BencodeKindDict == got->kind);
+  }
+  {
+    BencodeValue later[] = {test_bencode_str("announce"),
+                            test_bencode_str("http://x"),
+                            test_bencode_str("info"),
+                            info,
+                            test_bencode_str("zzz"),
+                            test_bencode_int(1)};
+    assert(&later[3] ==
+           torrent_find_info_dict_in_metainfo(test_bencode_dict(later, 6)));
+  }
+
+  // A pointer into the caller's list, not a copy: `main` hashes what it finds,
+  // so it has to be the same value the metainfo holds.
+  {
+    BencodeValue items[] = {test_bencode_str("info"), info};
+    BencodeValue *const got =
+        torrent_find_info_dict_in_metainfo(test_bencode_dict(items, 2));
+    assert(got == &items[1]);
+    got->v.list.len = 0;
+    assert(0 == items[1].v.list.len);
+  }
+
+  // Not found.
+  {
+    // No such key.
+    BencodeValue none[] = {test_bencode_str("announce"), test_bencode_int(1)};
+    assert(NULL ==
+           torrent_find_info_dict_in_metainfo(test_bencode_dict(none, 2)));
+
+    // The key is there but the value is not a dict.
+    BencodeValue not_dict[] = {test_bencode_str("info"), test_bencode_int(1)};
+    assert(NULL ==
+           torrent_find_info_dict_in_metainfo(test_bencode_dict(not_dict, 2)));
+
+    // A key that is not a string cannot be "info".
+    BencodeValue bad_key[] = {test_bencode_int(1), info};
+    assert(NULL ==
+           torrent_find_info_dict_in_metainfo(test_bencode_dict(bad_key, 2)));
+
+    // "info" as a *value* is not a key.
+    BencodeValue as_value[] = {test_bencode_str("a"), test_bencode_str("info"),
+                               test_bencode_str("b"), info};
+    assert(NULL == torrent_find_info_dict_in_metainfo(
+                       test_bencode_dict(as_value, 4)));
+
+    // A near miss, and an empty metainfo. (Not `near`: `windows.h` still
+    // defines that, and `far`, from the 16-bit memory models.)
+    BencodeValue almost[] = {test_bencode_str("infos"), info};
+    assert(NULL ==
+           torrent_find_info_dict_in_metainfo(test_bencode_dict(almost, 2)));
+    assert(NULL ==
+           torrent_find_info_dict_in_metainfo(test_bencode_dict(NULL, 0)));
+  }
+}
+
+static void test_sha256_encode_hex_trunc(void) {
+  // The real digest of the info dict of a torrent this program generated;
+  // libtorrent reports the truncated form as the torrent's v1-style hash.
+  {
+    u8 digest[SHA256_DIGEST_LENGTH] = {0};
+    const char *const full =
+        "363b69d66ad2d57cbd51c2f27156aef8d0e68a7057d3dd8a5e911bcbb77483e3";
+    for (usize i = 0; i < SHA256_DIGEST_LENGTH; i++) {
+      u8 byte = 0;
+      for (usize n = 0; n < 2; n++) {
+        const char c = full[i * 2 + n];
+        const u8 nibble = (u8)(c <= '9' ? c - '0' : c - 'a' + 10);
+        byte = (u8)((byte << 4) | nibble);
+      }
+      digest[i] = byte;
+    }
+
+    u8 hex[40] = {0};
+    sha256_encode_hex_trunc(digest, hex);
+
+    // 20 bytes in, 40 characters out: the tail of the digest is dropped.
+    assert(0 == memcmp(hex, "363b69d66ad2d57cbd51c2f27156aef8d0e68a70", 40));
+  }
+
+  // Nibble order, at the values where swapping the two halves of a byte shows.
+  {
+    const struct {
+      u8 byte;
+      const char *expected;
+    } cases[] = {
+        {0x00, "00"}, {0x01, "01"}, {0x0f, "0f"}, {0xf0, "f0"},
+        {0x10, "10"}, {0xab, "ab"}, {0x7f, "7f"}, {0x80, "80"},
+        {0xff, "ff"},
+    };
+
+    for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+      u8 digest[SHA256_DIGEST_LENGTH] = {0};
+      digest[0] = cases[i].byte;
+
+      u8 hex[40] = {0};
+      sha256_encode_hex_trunc(digest, hex);
+
+      assert(0 == memcmp(hex, cases[i].expected, 2));
+      // Everything else was a zero byte, so everything else is '0'.
+      for (usize j = 2; j < sizeof(hex); j++) {
+        assert('0' == hex[j]);
+      }
+    }
+  }
+
+  // Only the first 20 bytes are read: the last 12 cannot change the output.
+  {
+    u8 a[SHA256_DIGEST_LENGTH] = {0};
+    u8 b[SHA256_DIGEST_LENGTH] = {0};
+    memset(a, 0x5a, sizeof(a));
+    memset(b, 0x5a, sizeof(b));
+    memset(b + 20, 0xff, sizeof(b) - 20);
+
+    u8 hex_a[40] = {0};
+    u8 hex_b[40] = {0};
+    sha256_encode_hex_trunc(a, hex_a);
+    sha256_encode_hex_trunc(b, hex_b);
+
+    assert(0 == memcmp(hex_a, hex_b, sizeof(hex_a)));
+    for (usize i = 0; i < sizeof(hex_a); i += 2) {
+      assert(0 == memcmp(hex_a + i, "5a", 2));
+    }
+  }
+
+  // The lowercase alphabet, which is what BEP 14 and every client expect.
+  {
+    u8 digest[SHA256_DIGEST_LENGTH] = {0};
+    memset(digest, 0xbe, sizeof(digest));
+
+    u8 hex[40] = {0};
+    sha256_encode_hex_trunc(digest, hex);
+
+    for (usize i = 0; i < sizeof(hex); i++) {
+      const bool is_lower_hex =
+          (hex[i] >= '0' && hex[i] <= '9') || (hex[i] >= 'a' && hex[i] <= 'f');
+      assert(is_lower_hex);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // torrent_make_udp_broadcast_message
 // ---------------------------------------------------------------------------
 
@@ -3323,16 +3632,6 @@ static void test_bencode_encode_once(BencodeValue b, const char *expected) {
   for (usize i = written; i < cap; i++) {
     assert('#' == dst.data[i]);
   }
-}
-
-__attribute__((warn_unused_result)) static BencodeValue
-test_bencode_int(isize n) {
-  return (BencodeValue){.kind = BencodeKindInteger, .v.num = n};
-}
-
-__attribute__((warn_unused_result)) static BencodeValue
-test_bencode_str(const char *s) {
-  return (BencodeValue){.kind = BencodeKindString, .v.s = test_slice(s)};
 }
 
 static void test_bencode_encode_leaves(void) {
@@ -4571,7 +4870,7 @@ static void test(const char *filter) {
       {"bencode_parse_binary", test_bencode_parse_binary},
       {"bencode_parse_dict_keys", test_bencode_parse_dict_keys},
       {"bencode_parse_deep_dicts", test_bencode_parse_deep_dicts},
-      {"bytes_cmp", test_bytes_cmp},
+      {"slice_u8_cmp", test_slice_u8_cmp},
       {"bencode_validate_dict", test_bencode_validate_dict},
       {"sha256_vectors", test_sha256_vectors},
       {"sha256_million_a", test_sha256_million_a},
@@ -4592,6 +4891,10 @@ static void test(const char *filter) {
       {"encode_isize_base_10", test_encode_isize_base_10},
       {"encode_isize_base_10_exact_fit", test_encode_isize_base_10_exact_fit},
       {"encode_isize_base_10_round_trip", test_encode_isize_base_10_round_trip},
+      {"torrent_validate_info_dict", test_torrent_validate_info_dict},
+      {"torrent_find_info_dict_in_metainfo",
+       test_torrent_find_info_dict_in_metainfo},
+      {"sha256_encode_hex_trunc", test_sha256_encode_hex_trunc},
       {"torrent_make_udp_broadcast_message",
        test_torrent_make_udp_broadcast_message},
       {"sb_make", test_sb_make},
