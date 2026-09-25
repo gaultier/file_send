@@ -71,6 +71,8 @@ typedef enum {
   // No route to the destination. On macOS this is also how a denied Local
   // Network privacy grant surfaces, so it is not always a routing problem.
   ErrKindHostUnreachable,
+
+  ErrKindConnectionReset,
 } ErrorKind;
 
 typedef struct {
@@ -107,6 +109,9 @@ error_kind_to_cstr(ErrorKind kind) {
     return "too many open files";
   case ErrKindHostUnreachable:
     return "host unreachable";
+  case ErrKindConnectionReset:
+    return "connection reset";
+    break;
   }
 
   assert(0 && "unreachable");
@@ -228,6 +233,11 @@ __attribute__((warn_unused_result)) static bool slice_u8_is_empty(Slice_u8 s) {
   return NULL == s.data || 0 == s.len;
 }
 
+__attribute__((warn_unused_result)) static Slice_u8
+slice_u8_from_cstr(char *s) {
+  return (Slice_u8){.data = (u8 *)s, .len = strlen(s)};
+}
+
 __attribute__((warn_unused_result)) static bool
 slice_u8_contains_byte(Slice_u8 s, u8 byte) {
   if (slice_u8_is_empty(s)) {
@@ -346,6 +356,44 @@ slice_u8_consume(Slice_u8 *slice, u8 expected) {
 
   slice_u8_advance(slice, 1);
   return (Error){.kind = ErrKindNone};
+}
+
+__attribute__((warn_unused_result)) static Error
+path_with_ext(Slice_u8 path, Slice_u8 ext, Slice_u8 *dst, Arena *arena) {
+  if (!path.data || path.len) {
+    return (Error){.kind = ErrKindInvalidData};
+  }
+
+  assert(ext.data);
+  assert(ext.len > 0);
+  assert(dst->data);
+
+  for (usize i = path.len; i > 0; i--) {
+    u8 c = path.data[i - 1];
+    if ('.' == c) {
+      const usize dst_len = /* Left */ ((i - 2 > 0) ? (i - 2) : 0) +
+                            1 /* Path separator */ + ext.len /* Extension */;
+      dst->data = arena_alloc(arena, __alignof__(u8), sizeof(u8), dst_len);
+      if (!dst->data) {
+        return (Error){.kind = ErrKindOOM};
+      }
+
+      // Copy left.
+      if (i - 2 > 0) {
+        memcpy(dst->data, path.data, i - 2);
+      }
+
+      dst->data[i - 1] = '.';
+
+      // Copy right.
+      assert(i + /* Overflow? */ ext.len < dst_len);
+      memcpy(dst->data + i, ext.data, ext.len);
+
+      dst->len = dst_len;
+    }
+  }
+
+  return (Error){.kind = ErrKindInvalidData};
 }
 // ---------- Unix ----------
 
@@ -558,6 +606,7 @@ __attribute__((warn_unused_result)) static Error unix_listen(void *ctx, i32 fd,
 
 typedef enum {
   FileOpenOptionsReadOnly = 1,
+  FileOpenOptionsWriteOnly = 2,
 } FileOpenOptions;
 
 __attribute__((warn_unused_result)) static Error
@@ -568,7 +617,9 @@ unix_open(void *ctx, Slice_u8 path, FileOpenOptions options, i32 *fd) {
 
   i32 unix_options = 0;
   if (FileOpenOptionsReadOnly & options) {
-    unix_options |= O_RDONLY;
+    unix_options = O_RDONLY;
+  } else if (FileOpenOptionsWriteOnly & options) {
+    unix_options = O_WRONLY;
   }
 
   // FILE_PATH_MAX
@@ -852,6 +903,8 @@ unix_map_file(void *ctx, Slice_u8 path, FileOpenOptions opts, Slice_u8 *dst) {
   i32 unix_opts = 0;
   if (opts & FileOpenOptionsReadOnly) {
     unix_opts = PROT_READ;
+  } else if (opts & FileOpenOptionsWriteOnly) {
+    unix_opts = PROT_WRITE;
   }
 
   void *const data = mmap(NULL, file_size, unix_opts, MAP_PRIVATE, fd, 0);
@@ -861,6 +914,50 @@ unix_map_file(void *ctx, Slice_u8 path, FileOpenOptions opts, Slice_u8 *dst) {
 
   dst->data = data;
   dst->len = file_size;
+
+  return (Error){.kind = ErrKindNone};
+}
+
+__attribute__((warn_unused_result)) static Error
+unix_write_all_to_file(void *ctx, Slice_u8 path, Slice_u8 data) {
+  (void)ctx;
+
+  // TODO: Should we still 'touch' the file?
+  if (!data.data || data.len == 0) {
+    return (Error){.kind = ErrKindNone};
+  }
+
+  Error err = {0};
+
+  i32 fd = 0;
+  err = unix_open(NULL, path, FileOpenOptionsReadOnly, &fd);
+  if (ErrKindNone != err.kind) {
+    return unix_error_from_errno(errno);
+  }
+
+  Slice_u8 remaining = data;
+
+  for (; remaining.len > 0;) {
+    const isize ret = write(fd, remaining.data, remaining.len);
+
+    // Retry?
+    if (-1 == ret && EINTR == errno) {
+      continue;
+    }
+
+    if (-1 == ret) {
+      return unix_error_from_errno(errno);
+    }
+
+    assert(ret >= 0);
+    if (0 == ret) {
+      return (Error){.kind = ErrKindConnReset};
+    }
+
+    assert(ret > 0);
+
+    slice_u8_advance(&remaining, (usize)ret);
+  }
 
   return (Error){.kind = ErrKindNone};
 }
@@ -882,6 +979,7 @@ typedef struct {
   Error (*file_size)(void *ctx, i32 fd, usize *dst_size);
   Error (*map_file)(void *ctx, Slice_u8 path, FileOpenOptions opts,
                     Slice_u8 *dst);
+  Error (*write_all_to_file)(void *ctx, Slice_u8 path, Slice_u8 data);
 } IO;
 
 __attribute__((warn_unused_result)) static IO io_unix_make(void) {
@@ -898,6 +996,7 @@ __attribute__((warn_unused_result)) static IO io_unix_make(void) {
       .write = unix_write,
       .file_size = unix_file_size,
       .map_file = unix_map_file,
+      .write_all_to_file = unix_write_all_to_file,
   };
 }
 
@@ -5510,6 +5609,14 @@ int main(i32 argc, char *argv[]) {
                                         &arena);
     if (ErrKindNone != err.kind) {
       error_print("failed to generate torrent file data", err);
+      return 1;
+    }
+
+    Slice_u8 torrent_file_path = {0};
+    err = path_with_ext(file_path, slice_u8_from_cstr((char *)"torrent"),
+                        &torrent_file_path, &arena);
+    if (ErrKindNone != err.kind) {
+      error_print("failed to compute the torrent path", err);
       return 1;
     }
 
