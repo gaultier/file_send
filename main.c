@@ -358,14 +358,52 @@ slice_u8_consume(Slice_u8 *slice, u8 expected) {
   return (Error){.kind = ErrKindNone};
 }
 
+// The extension of the last component of `path`, dot included, or an empty
+// slice when there is none. The result borrows from `path`: nothing is
+// copied, and it is always a suffix of the input.
+//
+// The extension is what follows the last `.` of the *last* component, so a
+// dot inside a directory name is not one: `/x/y.z/f` has no extension. A `.`
+// that starts the last component marks a hidden file rather than an empty
+// stem, so `.bashrc` has none while `.config.json` has `.json`.
+//
+// The dot belongs to the result so that an empty extension (`a.`, which
+// yields `.`) stays distinguishable from no extension at all (`a`, which
+// yields nothing). This is Go's `filepath.Ext`; note that `path_with_ext`
+// takes its replacement *without* the dot, the way Rust's
+// `Path::set_extension` does.
+__attribute__((warn_unused_result)) static Slice_u8
+path_get_ext(Slice_u8 path) {
+  if (!path.data || 0 == path.len) {
+    return (Slice_u8){0};
+  }
+
+  // Start of the last component. Everything before it is directories, whose
+  // dots must not be mistaken for an extension separator.
+  usize base = 0;
+  for (usize i = path.len; i > 0; i--) {
+    if ('/' == path.data[i - 1]) {
+      base = i;
+      break;
+    }
+  }
+
+  // The scan stops at `base + 1` rather than `base` so a leading dot stays
+  // part of the name, per the hidden file rule above.
+  for (usize i = path.len; i > base + 1; i--) {
+    if ('.' == path.data[i - 1]) {
+      return slice_u8_make(path.data + i - 1, path.len - (i - 1));
+    }
+  }
+
+  return (Slice_u8){0};
+}
+
 // Replace the path's extension with `ext`, or append one when the path has
 // none. `ext` is given without the leading dot.
 //
-// The extension is what follows the last `.` of the *last* component, so a
-// dot inside a directory name is not one. A `.` that starts the last
-// component marks a hidden file rather than an empty stem, so `.bashrc` gains
-// an extension instead of losing its name. Both rules match Go's
-// `filepath.Ext` and Rust's `Path::with_extension`.
+// What counts as the existing extension is `path_get_ext`'s business; see
+// there for the directory and hidden file rules.
 //
 // `.` and `..` fall out of those rules as ordinary names and come back as
 // `..<ext>`; callers pass real file paths, so the case is pinned by the tests
@@ -381,33 +419,17 @@ path_with_ext(Slice_u8 path, Slice_u8 ext, Slice_u8 *dst, Arena *arena) {
     return (Error){.kind = ErrKindInvalidData};
   }
 
-  // Start of the last component. Everything before it is directories, whose
-  // dots must not be mistaken for an extension separator.
-  usize base = 0;
-  for (usize i = path.len; i > 0; i--) {
-    if ('/' == path.data[i - 1]) {
-      base = i;
-      break;
-    }
-  }
-
   // A trailing separator leaves no name to put an extension on.
-  if (base == path.len) {
+  if ('/' == path.data[path.len - 1]) {
     return (Error){.kind = ErrKindInvalidData};
   }
 
-  // How much of `path` is kept, the dot itself excluded. The scan stops at
-  // `base + 1` rather than `base` so a leading dot stays part of the name,
-  // per the hidden file rule above.
-  usize stem_len = path.len;
-  for (usize i = path.len; i > base + 1; i--) {
-    if ('.' == path.data[i - 1]) {
-      stem_len = i - 1;
-      break;
-    }
-  }
+  // How much of `path` is kept, the dot itself excluded. The extension always
+  // starts at index one or later, so at least one byte of name survives.
+  const Slice_u8 old_ext = path_get_ext(path);
+  assert(old_ext.len < path.len);
+  const usize stem_len = path.len - old_ext.len;
   assert(stem_len > 0);
-  assert(stem_len <= path.len);
 
   usize dst_len = 0;
   assert(!__builtin_add_overflow(stem_len, ext.len, &dst_len));
@@ -3226,6 +3248,87 @@ static void test_unix_path_last_component(void) {
   }
 }
 
+static void test_path_get_ext(void) {
+  // Expectations generated with Go's `filepath.Ext`. A `NULL` expectation
+  // means "no extension": `slice_u8_eq_cstr` reads it as "empty", and an
+  // empty C string cannot be used here because a zero length one is not a
+  // valid argument to it.
+  const struct {
+    const char *input;
+    const char *expected;
+  } cases[] = {
+      // The usual case: the dot is part of the result.
+      {"a.pdf", ".pdf"},
+      {"/a/b/c.zip", ".zip"},
+      {"dtrace_tips.pdf", ".pdf"},
+
+      // No dot at all in the last component.
+      {"a", NULL},
+      {"Makefile", NULL},
+      {"/a/b/c", NULL},
+
+      // Only the last dot counts.
+      {"a.b.c", ".c"},
+      {"traces.jsonl.zip", ".zip"},
+
+      // A trailing dot is an empty extension, which is not the same as no
+      // extension: this is why the dot is kept in the result.
+      {"a.", "."},
+
+      // A dot in a directory is not an extension separator.
+      {"/x/y.z/f", NULL},
+      {"/x/y.z/f.pdf", ".pdf"},
+      {"a.b/c", NULL},
+
+      // A leading dot marks a hidden file, so the name is not an extension...
+      {".bashrc", NULL},
+      {"/a/.bashrc", NULL},
+      // ... but a hidden file may still carry one of its own.
+      {".config.json", ".json"},
+      {"/a/.config.json", ".json"},
+
+      // `.` and `..` are treated as ordinary names; see the note on
+      // `path_with_ext`.
+      {".", NULL},
+      {"..", "."},
+
+      // Nothing to extract from a path that has no last component.
+      {"", NULL},
+      {"/", NULL},
+      {"//", NULL},
+      {"a/", NULL},
+      {"/a/b/", NULL},
+
+      // Separators repeated inside the path are left alone.
+      {"a//b.pdf", ".pdf"},
+  };
+
+  for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    const Slice_u8 path = test_slice(cases[i].input);
+    const Slice_u8 got = path_get_ext(path);
+
+    assert(slice_u8_eq_cstr(got, cases[i].expected));
+
+    // Nothing is copied: a non-empty result is always a suffix of the input.
+    if (!slice_u8_is_empty(got)) {
+      assert(got.data >= path.data);
+      assert(got.data + got.len == path.data + path.len);
+      assert('.' == got.data[0]);
+    }
+  }
+
+  // A null slice is the same as an empty one.
+  assert(slice_u8_is_empty(path_get_ext(slice_u8_make(NULL, 0))));
+
+  // The input is passed by value, so the caller's slice is untouched.
+  {
+    Slice_u8 path = test_slice("/a/b/c.zip");
+    const Slice_u8 got = path_get_ext(path);
+    assert(slice_u8_eq_cstr(got, ".zip"));
+    assert(10 == path.len);
+  }
+}
+
 static void test_path_with_ext(void) {
   // Expectations generated with Go's
   // `strings.TrimSuffix(p, filepath.Ext(p)) + "." + ext`.
@@ -5466,6 +5569,7 @@ static void test(const char *filter) {
       {"arena_valloc", test_arena_valloc},
       {"slice_u8", test_slice_u8},
       {"unix_path_last_component", test_unix_path_last_component},
+      {"path_get_ext", test_path_get_ext},
       {"path_with_ext", test_path_with_ext},
       {"ascii_num_parse", test_ascii_num_parse},
       {"bencode_parse_num", test_bencode_parse_num},
@@ -5830,7 +5934,14 @@ int main(i32 argc, char *argv[]) {
       fprintf(stderr, "missing argument\n");
       return 1;
     }
-    const Slice_u8 file_path = {.data = (u8 *)argv[2], .len = strlen(argv[2])};
+    const Slice_u8 file_path = slice_u8_from_cstr(argv[2]);
+
+    const Slice_u8 file_ext = path_get_ext(file_path);
+    if (!slice_u8_eq_cstr(file_ext, "torrent")) {
+      fprintf(stderr, "provided file is not a .torrent file: %s\n", argv[2]);
+      return 1;
+    }
+
     Slice_u8 input = {0};
 
     Error err = io.map_file(NULL, file_path, FileOpenOptionsReadOnly, &input);
