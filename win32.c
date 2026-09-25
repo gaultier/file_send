@@ -4,8 +4,6 @@
 // The Windows implementation of the `IO` vtable. Included by `main.c` next to
 // `unix.c`; whichever one matches the system supplies `io_platform_make` and
 // the other compiles to nothing.
-#if defined(_WIN32)
-#define PLATFORM_WIN32 1
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN

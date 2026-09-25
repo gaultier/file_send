@@ -2,6 +2,26 @@
 
 #include "lib.c"
 
+// The ARMv8 SHA-256 extension. Only the AArch64 spelling is implemented; every
+// other target falls back to the scalar block function below, which stays the
+// reference the vector one is checked against.
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#elif defined(__linux__)
+#include <sys/auxv.h>
+// glibc defines this in `bits/hwcap.h`, musl does not; it is ABI, not a header
+// detail.
+#ifndef HWCAP_SHA2
+#define HWCAP_SHA2 (1 << 6)
+#endif
+#endif
+#define SHA256_HAS_NEON 1
+#else
+#define SHA256_HAS_NEON 0
+#endif
+
 // ---------------------------------------------------------------------------
 // SHA-256
 // ---------------------------------------------------------------------------

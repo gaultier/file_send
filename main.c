@@ -1,9 +1,10 @@
 
+#ifdef PLATFORM_UNIX
 #include "unix.c"
-#include "win32.c"
+#endif
 
-#if !defined(PLATFORM_UNIX) && !defined(PLATFORM_WIN32)
-#error "no IO implementation for this platform"
+#ifdef PLATFORM_WIN32
+#include "win32.c"
 #endif
 
 #include "torrent.c"

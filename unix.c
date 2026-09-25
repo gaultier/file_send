@@ -2,22 +2,6 @@
 
 #include "lib.c"
 
-// The Unix implementation of the `IO` vtable, plus the `errno` mapping every
-// wrapper here shares. Included by `main.c` after `struct IO` is complete, so
-// the composites below can reach the other slots through `io`.
-
-// Everything here is `mmap`, `socket` and `pthread`, so the whole file
-// compiles to nothing off Unix and the Windows port supplies its own
-// `io_*_make` instead. Apple's compilers never define `__unix__`, so Darwin
-// has to be named on its own; `defined()` and not a bare macro because
-// `-Wundef` is an error.
-#if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
-#define PLATFORM_UNIX 1
-
-// Inside the guard, so a system that is not this one never sees them. The
-// feature-test macros that decide what these expose are set on the command
-// line, in `run.sh`, because they have to be in place before the first
-// header of the translation unit.
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <pthread.h>
@@ -702,5 +686,3 @@ __attribute__((warn_unused_result)) static IO io_platform_make(void) {
       .ctx = NULL,
   };
 }
-
-#endif // Unix

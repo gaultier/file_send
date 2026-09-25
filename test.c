@@ -1,5 +1,13 @@
 #pragma once
 
+#ifdef PLATFORM_UNIX
+#include "unix.c"
+#endif
+
+#ifdef PLATFORM_WIN32
+#include "win32.c"
+#endif
+
 // The whole test suite, plus the mock `IO` implementations it runs the real
 // code against. Included by `main.c` last, so a test can reach anything the
 // program defines.
@@ -338,7 +346,8 @@ test_io_vprotect_none(const IO *io, void *ptr, usize size) {
 
 // Only the slots `arena_valloc` reaches for; the rest stay null so that a
 // call to any of them crashes rather than silently doing something real.
-__attribute__((warn_unused_result)) static IO test_io_platform_make(TestIoCtx *ctx) {
+__attribute__((warn_unused_result)) static IO
+test_io_platform_make(TestIoCtx *ctx) {
   assert(ctx);
 
   return (IO){
@@ -3879,7 +3888,8 @@ static void test_io_composites_mocked(void) {
   // A failed `fstat` on a descriptor that just opened: unreachable with a
   // real file, and it is the path that has to hand the descriptor back.
   {
-    TestFileCtx ctx = {.real = io_platform_make(), .file_size_fails_with = ErrKindRange};
+    TestFileCtx ctx = {.real = io_platform_make(),
+                       .file_size_fails_with = ErrKindRange};
     const IO io = test_io_file_make(&ctx);
     Slice_u8 got = {0};
 
@@ -3910,8 +3920,9 @@ static void test_io_composites_mocked(void) {
   // A signal before any progress is not a failure: the call is reissued and
   // the same bytes go out.
   {
-    TestFileCtx ctx = {
-        .real = io_platform_make(), .write_chunk = 2, .write_interrupted_at = 2};
+    TestFileCtx ctx = {.real = io_platform_make(),
+                       .write_chunk = 2,
+                       .write_interrupted_at = 2};
     const IO io = test_io_file_make(&ctx);
 
     assert(ErrKindNone == io.write_all_to_file(&io, path, data).kind);
@@ -3940,7 +3951,8 @@ static void test_io_composites_mocked(void) {
 
   // A failed write reports, and still closes.
   {
-    TestFileCtx ctx = {.real = io_platform_make(), .write_fails_with = ErrKindConnReset};
+    TestFileCtx ctx = {.real = io_platform_make(),
+                       .write_fails_with = ErrKindConnReset};
     const IO io = test_io_file_make(&ctx);
 
     assert(ErrKindConnReset == io.write_all_to_file(&io, path, data).kind);
