@@ -61,6 +61,11 @@ typedef enum {
   ErrKindTooManyFiles,
 } ErrorKind;
 
+typedef struct {
+  ErrorKind kind;
+  u64 data;
+} Error;
+
 __attribute__((warn_unused_result)) static bool char_is_digit_ascii(u8 c) {
   return '0' <= c && c <= '9';
 }
