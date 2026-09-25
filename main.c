@@ -4948,11 +4948,14 @@ static void test(const char *filter) {
   printf("%zu test(s) passed\n", run);
 }
 
+typedef struct TorrentNetworkCtx TorrentNetworkCtx;
+
 typedef struct {
   void *ctx;
   const IO *io;
   i32 socket;
   Ipv4Addr addr;
+  TorrentNetworkCtx *network_ctx;
   // More: torrent, etc.
 } TorrentClientHandleCtx;
 
@@ -4975,13 +4978,18 @@ typedef struct {
   TorrentClientHandleCtx slots[TORRENT_CLIENTS_MAX];
 } TorrentClientHandleCtxPool;
 
+struct TorrentNetworkCtx {
+  TorrentClientHandleCtxPool pool;
+  // More...
+};
+
 __attribute__((warn_unused_result)) static TorrentClientHandleCtx *
 torrent_client_ctx_pool_acquire(TorrentClientHandleCtxPool *pool) {
   assert(pool);
 
   for (usize i = 0; i < POOL_SLOT_GROUPS; i++) {
     // 'Relaxed' means that we sometimes can report the slot group as full when
-    // it's not.
+    // it's not. It's a TOCTOU window we accept and there is no easy fix.
     const PoolSlotGroup slot_group =
         __atomic_load_n(&pool->occupied[i], __ATOMIC_RELAXED);
 
@@ -5040,62 +5048,75 @@ static void torrent_client_ctx_pool_release(TorrentClientHandleCtxPool *pool,
                                                 mask, __ATOMIC_RELEASE);
 
   // Sanity check: the slot was indeed marked as not occupied.
-  assert(prev & mask);
+  assert(0 == (prev & mask));
 }
 
 static void *torrent_client_handle(void *vctx) {
   assert(vctx);
 
-  TorrentClientHandleCtx *const ctx = vctx;
-  assert(ctx->io);
+  TorrentClientHandleCtx *const client_ctx = vctx;
+  assert(client_ctx->io);
 
   printf("torrent_client_handle");
-  const u32 ip = ctx->addr.ip;
+  const u32 ip = client_ctx->addr.ip;
   printf("accepted: %u.%u.%u.%u:%hu\n", ip >> 24 & 0xff, ip >> 16 & 0xff,
-         ip >> 8 & 0xff, ip >> 0 & 0xff, ctx->addr.port);
+         ip >> 8 & 0xff, ip >> 0 & 0xff, client_ctx->addr.port);
 
   const char msg[] = "hello, world!";
   usize written = 0;
-  Error err_write = ctx->io->write(ctx->ctx, ctx->socket, (u8 *)msg,
-                                   sizeof(msg) - 1, &written);
+  Error err_write = client_ctx->io->write(client_ctx->ctx, client_ctx->socket,
+                                          (u8 *)msg, sizeof(msg) - 1, &written);
   if (ErrNone == err_write) {
     goto end;
   }
 
 end:
-  (void)ctx->io->close(ctx->ctx, ctx->socket);
+  (void)client_ctx->io->close(client_ctx->ctx, client_ctx->socket);
 
   puts("torrent_client_handle end");
 
   // Responsible for freeing our context.
-  free(ctx);
+  torrent_client_ctx_pool_release(&client_ctx->network_ctx->pool, client_ctx);
 
   return NULL;
 }
 
 __attribute__((warn_unused_result)) static Error
-torrent_client_on_accept(const IO *io, void *ctx, Ipv4Addr accept_addr,
+torrent_client_on_accept(const IO *io, void *vctx, Ipv4Addr accept_addr,
                          i32 accept_socket) {
+  assert(io);
+  assert(vctx);
+  TorrentNetworkCtx *const network_ctx = vctx;
 
   puts("accepted");
 
-  // FIXME: Pool.
-  TorrentClientHandleCtx *client_ctx = malloc(sizeof(TorrentClientHandleCtx));
+  Error err = ErrNone;
+  TorrentClientHandleCtx *const client_ctx =
+      torrent_client_ctx_pool_acquire(&network_ctx->pool);
+  if (!client_ctx) {
+    fprintf(stderr, "backpressure: no available pool slot for client\n");
+    goto end;
+  }
+
   assert(client_ctx);
-  client_ctx->ctx = ctx;
+  client_ctx->ctx = vctx;
   client_ctx->addr = accept_addr;
   client_ctx->socket = accept_socket;
   client_ctx->io = io;
+  client_ctx->network_ctx = network_ctx;
 
-  const Error err_thread = io->thread_create(client_ctx, torrent_client_handle);
-  if (ErrNone != err_thread) {
+  err = io->thread_create(client_ctx, torrent_client_handle);
+  if (ErrNone != err) {
     // The thread never started, so nothing else will free the context or hang
     // up on the peer.
-    free(client_ctx);
-    (void)io->close(ctx, accept_socket);
+    // Fallthrough on the cleanup block.
   }
 
-  return err_thread;
+end:
+  torrent_client_ctx_pool_release(&network_ctx->pool, client_ctx);
+  (void)io->close(vctx, accept_socket);
+
+  return err;
 }
 
 int main(i32 argc, char *argv[]) {
@@ -5200,7 +5221,8 @@ int main(i32 argc, char *argv[]) {
     puts("");
 
     const Ipv4Addr listen_addr = {.port = 12345, .ip = 0};
-    Error err_listen = io_listen_and_serve_tcp_ipv4(&io, NULL, listen_addr,
+    TorrentNetworkCtx ctx = {0};
+    Error err_listen = io_listen_and_serve_tcp_ipv4(&io, &ctx, listen_addr,
                                                     torrent_client_on_accept);
     if (ErrNone != err_listen) {
       fprintf(stderr, "failed to lsiten and serve: %d\n", err_listen);
