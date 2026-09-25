@@ -3,6 +3,8 @@
 -gsplit-dwarf
 -march=native
 -std=c99
+-D_POSIX_C_SOURCE=200809L
+-D_DARWIN_C_SOURCE
 -Wall
 -Wextra
 -Wsign-conversion

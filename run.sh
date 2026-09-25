@@ -17,7 +17,15 @@ CC="${CC:-clang}"
 
 # Shared by every mode: the warning set does not vary, so a release build can
 # never compile something a debug build rejects.
-CFLAGS="-std=c99 -fpie -fno-omit-frame-pointer
+#
+# `-std=c99` alone asks libc for ISO C and nothing more, which on glibc and musl
+# hides `strerror_r`, `SSIZE_MAX` and the rest of POSIX. `_POSIX_C_SOURCE`
+# selects POSIX.1-2008 explicitly, and picks the XSI `strerror_r` over glibc's
+# `char *` one. Darwin reads a bare `_POSIX_C_SOURCE` as "strict POSIX only" and
+# then hides its own extensions, `sysctlbyname` included, so `_DARWIN_C_SOURCE`
+# puts those back; it is inert everywhere else.
+CFLAGS="-std=c99 -D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE
+-fpie -fno-omit-frame-pointer
 -Wall -Wextra -Werror
 -Wconversion -Wsign-conversion -Wshadow -Wundef -Wcast-align -Wwrite-strings
 -Wstrict-prototypes -Wmissing-prototypes -Wmissing-declarations
