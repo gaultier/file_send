@@ -1,0 +1,3 @@
+- first bind the TCP socket, then broadcast the port over UDP
+- peer protocol
+- listen for UDP broadcasts
