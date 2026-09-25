@@ -912,3 +912,18 @@ sb_append_usize_within_cap(StringBuffer *sb, usize n) {
 
   return true;
 }
+
+static void sha256_encode_hex_trunc(u8 digest[32 /* SHA256_DIGEST_LENGTH */],
+                                    u8 dst[40]) {
+  const usize trunc = 20;
+  const u8 lut[] = "0123456789abcdef";
+
+  for (usize i = 0; i < trunc; i++) {
+    const u8 byte = digest[i];
+    const u8 c1 = byte & 15; // i.e. `% 16`.
+    const u8 c2 = byte >> 4; // i.e. `/ 16`
+
+    dst[i * 2] = lut[c2];
+    dst[i * 2 + 1] = lut[c1];
+  }
+}

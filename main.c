@@ -111,8 +111,8 @@ int main(i32 argc, char *argv[]) {
       return 1;
     }
     // TODO: More validation on `metainfo_dict`.
-    Slice_u8 info_hash_slice = {0};
-    u8 info_hash[SHA256_DIGEST_LENGTH] = {0};
+    Slice_u8 info_hash_hex_trunc_slice = {0};
+    u8 info_hash_hex_trunc[40] = {0};
 
     for (usize i = 1; i < metainfo_dict.v.list.len; i += 2) {
       BencodeValue k = metainfo_dict.v.list.data[i - 1];
@@ -125,17 +125,24 @@ int main(i32 argc, char *argv[]) {
           error_print("failed to encode info", err);
           return 1;
         }
+
+        u8 info_hash[SHA256_DIGEST_LENGTH] = {0};
         sha256_digest(info_encoded, info_hash);
+
+        sha256_encode_hex_trunc(info_hash, info_hash_hex_trunc);
+
+        info_hash_hex_trunc_slice = (Slice_u8){
+            .data = info_hash_hex_trunc, .len = sizeof(info_hash_hex_trunc)};
+        break;
       }
-      info_hash_slice =
-          (Slice_u8){.data = info_hash, .len = SHA256_DIGEST_LENGTH};
     }
 
-    if (0 == info_hash_slice.len) {
+    if (0 == info_hash_hex_trunc_slice.len) {
       fprintf(stderr, "info dict from .torrent data not found\n");
       return 1;
     }
-    fwrite(info_hash_slice.data, 1, info_hash_slice.len, stdout);
+    fwrite(info_hash_hex_trunc_slice.data, 1, info_hash_hex_trunc_slice.len,
+           stdout);
 
     i32 udp_socket = 0;
     {
@@ -148,8 +155,8 @@ int main(i32 argc, char *argv[]) {
 
     Slice_u8 udp_msg = {0};
     err = torrent_make_udp_broadcast_message(
-        slice_u8_from_cstr("(239.192.152.143"), 12345, info_hash_slice, &arena,
-        &udp_msg);
+        slice_u8_from_cstr("(239.192.152.143"), 12345,
+        info_hash_hex_trunc_slice, &arena, &udp_msg);
     if (ErrKindNone != err.kind) {
       error_print("failed to craft UDP multicast message", err);
       return 1;
