@@ -358,41 +358,73 @@ slice_u8_consume(Slice_u8 *slice, u8 expected) {
   return (Error){.kind = ErrKindNone};
 }
 
+// Replace the path's extension with `ext`, or append one when the path has
+// none. `ext` is given without the leading dot.
+//
+// The extension is what follows the last `.` of the *last* component, so a
+// dot inside a directory name is not one. A `.` that starts the last
+// component marks a hidden file rather than an empty stem, so `.bashrc` gains
+// an extension instead of losing its name. Both rules match Go's
+// `filepath.Ext` and Rust's `Path::with_extension`.
+//
+// `.` and `..` fall out of those rules as ordinary names and come back as
+// `..<ext>`; callers pass real file paths, so the case is pinned by the tests
+// rather than special cased.
 __attribute__((warn_unused_result)) static Error
 path_with_ext(Slice_u8 path, Slice_u8 ext, Slice_u8 *dst, Arena *arena) {
+  assert(dst);
+  assert(arena);
+  assert(ext.data);
+  assert(ext.len > 0);
+
   if (!path.data || 0 == path.len) {
     return (Error){.kind = ErrKindInvalidData};
   }
 
-  assert(ext.data);
-  assert(ext.len > 0);
-
+  // Start of the last component. Everything before it is directories, whose
+  // dots must not be mistaken for an extension separator.
+  usize base = 0;
   for (usize i = path.len; i > 0; i--) {
-    u8 c = path.data[i - 1];
-    if ('.' == c) {
-      const usize dst_len = /* Left */ ((i - 2 > 0) ? (i - 2) : 0) +
-                            1 /* Path separator */ + ext.len /* Extension */;
-      dst->data = arena_alloc(arena, __alignof__(u8), sizeof(u8), dst_len);
-      if (!dst->data) {
-        return (Error){.kind = ErrKindOOM};
-      }
-
-      // Copy left.
-      if (i - 2 > 0) {
-        memcpy(dst->data, path.data, i - 2);
-      }
-
-      dst->data[i - 1] = '.';
-
-      // Copy right.
-      assert(i + /* Overflow? */ ext.len < dst_len);
-      memcpy(dst->data + i, ext.data, ext.len);
-
-      dst->len = dst_len;
+    if ('/' == path.data[i - 1]) {
+      base = i;
+      break;
     }
   }
 
-  return (Error){.kind = ErrKindInvalidData};
+  // A trailing separator leaves no name to put an extension on.
+  if (base == path.len) {
+    return (Error){.kind = ErrKindInvalidData};
+  }
+
+  // How much of `path` is kept, the dot itself excluded. The scan stops at
+  // `base + 1` rather than `base` so a leading dot stays part of the name,
+  // per the hidden file rule above.
+  usize stem_len = path.len;
+  for (usize i = path.len; i > base + 1; i--) {
+    if ('.' == path.data[i - 1]) {
+      stem_len = i - 1;
+      break;
+    }
+  }
+  assert(stem_len > 0);
+  assert(stem_len <= path.len);
+
+  usize dst_len = 0;
+  assert(!__builtin_add_overflow(stem_len, ext.len, &dst_len));
+  assert(!__builtin_add_overflow(dst_len, 1 /* The dot. */, &dst_len));
+
+  u8 *const data = arena_alloc(arena, __alignof__(u8), sizeof(u8), dst_len);
+  if (!data) {
+    return (Error){.kind = ErrKindOOM};
+  }
+
+  memcpy(data, path.data, stem_len);
+  data[stem_len] = '.';
+  memcpy(data + stem_len + 1, ext.data, ext.len);
+
+  *dst = slice_u8_make(data, dst_len);
+
+  return (Error){.kind = ErrKindNone};
 }
 // ---------- Unix ----------
 
@@ -606,6 +638,7 @@ __attribute__((warn_unused_result)) static Error unix_listen(void *ctx, i32 fd,
 typedef enum {
   FileOpenOptionsReadOnly = 1,
   FileOpenOptionsWriteOnly = 2,
+  FileOpenOptionsCreate = 4,
 } FileOpenOptions;
 
 __attribute__((warn_unused_result)) static Error
@@ -619,6 +652,9 @@ unix_open(void *ctx, Slice_u8 path, FileOpenOptions options, i32 *fd) {
     unix_options = O_RDONLY;
   } else if (FileOpenOptionsWriteOnly & options) {
     unix_options = O_WRONLY;
+  }
+  if (FileOpenOptionsCreate & options) {
+    unix_options = O_CREAT;
   }
 
   // FILE_PATH_MAX
@@ -929,7 +965,8 @@ unix_write_all_to_file(void *ctx, Slice_u8 path, Slice_u8 data) {
   Error err = {0};
 
   i32 fd = 0;
-  err = unix_open(NULL, path, FileOpenOptionsReadOnly, &fd);
+  err = unix_open(NULL, path, FileOpenOptionsReadOnly | FileOpenOptionsCreate,
+                  &fd);
   if (ErrKindNone != err.kind) {
     return unix_error_from_errno(errno);
   }
@@ -945,12 +982,14 @@ unix_write_all_to_file(void *ctx, Slice_u8 path, Slice_u8 data) {
     }
 
     if (-1 == ret) {
-      return unix_error_from_errno(errno);
+      err = unix_error_from_errno(errno);
+      goto end;
     }
 
     assert(ret >= 0);
     if (0 == ret) {
-      return (Error){.kind = ErrKindConnReset};
+      err = (Error){.kind = ErrKindConnReset};
+      goto end;
     }
 
     assert(ret > 0);
@@ -958,7 +997,10 @@ unix_write_all_to_file(void *ctx, Slice_u8 path, Slice_u8 data) {
     slice_u8_advance(&remaining, (usize)ret);
   }
 
-  return (Error){.kind = ErrKindNone};
+end:
+  close(fd);
+
+  return err;
 }
 
 // ---------- IO ----------
@@ -3173,6 +3215,151 @@ static void test_unix_path_last_component(void) {
   }
 }
 
+static void test_path_with_ext(void) {
+  // Expectations generated with Go's
+  // `strings.TrimSuffix(p, filepath.Ext(p)) + "." + ext`.
+  const struct {
+    const char *input;
+    const char *ext;
+    const char *expected;
+  } cases[] = {
+      // The usual case: the last component has an extension, it is replaced.
+      {"a.pdf", "torrent", "a.torrent"},
+      {"dtrace_tips.pdf", "torrent", "dtrace_tips.torrent"},
+      {"/a/b/c.zip", "torrent", "/a/b/c.torrent"},
+      {"./a.pdf", "torrent", "./a.torrent"},
+      {"../a.pdf", "torrent", "../a.torrent"},
+
+      // No extension at all: one is appended rather than the call failing.
+      {"a", "torrent", "a.torrent"},
+      {"/a/b/c", "torrent", "/a/b/c.torrent"},
+      {"Makefile", "torrent", "Makefile.torrent"},
+
+      // Only the last dot counts, the earlier ones are part of the name.
+      {"a.b.c", "torrent", "a.b.torrent"},
+      {"traces.jsonl.zip", "torrent", "traces.jsonl.torrent"},
+
+      // A trailing dot is an empty extension, and is still replaced.
+      {"a.", "torrent", "a.torrent"},
+
+      // A dot in a directory is not an extension separator: the last
+      // component owns the extension, or has none.
+      {"/x/y.z/f.pdf", "torrent", "/x/y.z/f.torrent"},
+      {"/x/y.z/f", "torrent", "/x/y.z/f.torrent"},
+      {"a.b/c", "torrent", "a.b/c.torrent"},
+
+      // A leading dot marks a hidden file, not an empty stem, so the name
+      // survives and the extension is appended.
+      {".bashrc", "torrent", ".bashrc.torrent"},
+      {"/a/.bashrc", "torrent", "/a/.bashrc.torrent"},
+      // ... but a hidden file may still carry an extension of its own.
+      {".config.json", "torrent", ".config.torrent"},
+      {"/a/.config.json", "torrent", "/a/.config.torrent"},
+
+      // `.` and `..` are treated as ordinary names; see the note on the
+      // function. Pinned so the behaviour cannot drift unnoticed.
+      {".", "torrent", "..torrent"},
+      {"..", "torrent", "..torrent"},
+
+      // The extension is copied verbatim: no dot is stripped from it, and a
+      // single byte is as good as any other.
+      {"a.pdf", "x", "a.x"},
+      {"a.pdf", ".hidden", "a..hidden"},
+
+      // Separators repeated inside the path are left alone.
+      {"a//b.pdf", "torrent", "a//b.torrent"},
+  };
+
+  for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    Arena arena = test_arena(256);
+    Slice_u8 got = {0};
+
+    assert(ErrKindNone == path_with_ext(test_slice(cases[i].input),
+                                        test_slice(cases[i].ext), &got, &arena)
+                              .kind);
+    assert(slice_u8_eq_cstr(got, cases[i].expected));
+
+    // The result is a fresh copy, never a view into the input.
+    assert(got.data != test_slice(cases[i].input).data);
+  }
+
+  // An empty path has no name to extend.
+  {
+    Arena arena = test_arena(256);
+    Slice_u8 got = {0};
+    assert(ErrKindInvalidData ==
+           path_with_ext(test_slice(""), test_slice("torrent"), &got, &arena)
+               .kind);
+    assert(slice_u8_is_empty(got));
+  }
+
+  // A null slice is the same as an empty one.
+  {
+    Arena arena = test_arena(256);
+    Slice_u8 got = {0};
+    assert(ErrKindInvalidData == path_with_ext(slice_u8_make(NULL, 0),
+                                               test_slice("torrent"), &got,
+                                               &arena)
+                                     .kind);
+  }
+
+  // A trailing separator leaves no last component.
+  {
+    const char *const inputs[] = {"/", "//", "a/", "/a/b/", "a/b///"};
+
+    for (usize i = 0; i < sizeof(inputs) / sizeof(inputs[0]); i++) {
+      Arena arena = test_arena(256);
+      Slice_u8 got = {0};
+      assert(ErrKindInvalidData == path_with_ext(test_slice(inputs[i]),
+                                                 test_slice("torrent"), &got,
+                                                 &arena)
+                                       .kind);
+    }
+  }
+
+  // Out of memory is reported rather than asserted, and leaves `dst` alone.
+  {
+    u8 mem[8] = {0};
+    Arena arena = arena_from_mem(mem, sizeof(mem));
+    Slice_u8 got = {0};
+
+    // "a.torrent" is nine bytes, one more than the arena holds.
+    assert(ErrKindOOM == path_with_ext(test_slice("a.pdf"),
+                                       test_slice("torrent"), &got, &arena)
+                             .kind);
+    assert(slice_u8_is_empty(got));
+  }
+
+  // The input is passed by value and only read: the caller's slice and the
+  // bytes behind it are untouched.
+  {
+    Arena arena = test_arena(256);
+    char input[] = "/a/b/c.zip";
+    const Slice_u8 path = slice_u8_make((u8 *)input, sizeof(input) - 1);
+    Slice_u8 got = {0};
+
+    assert(ErrKindNone ==
+           path_with_ext(path, test_slice("torrent"), &got, &arena).kind);
+    assert(slice_u8_eq_cstr(got, "/a/b/c.torrent"));
+    assert(slice_u8_eq_cstr(path, "/a/b/c.zip"));
+    assert(0 == strcmp(input, "/a/b/c.zip"));
+  }
+
+  // The result is exactly as long as it claims: the arena bump matches the
+  // reported length, so nothing is written past the end.
+  {
+    Arena arena = test_arena(256);
+    const u8 *const before = arena.start;
+    Slice_u8 got = {0};
+
+    assert(ErrKindNone == path_with_ext(test_slice("a.pdf"),
+                                        test_slice("torrent"), &got, &arena)
+                              .kind);
+    assert(9 == got.len);
+    assert((usize)(arena.start - before) == got.len);
+  }
+}
+
 static void test_ascii_num_parse(void) {
   const struct {
     const char *input;
@@ -5268,6 +5455,7 @@ static void test(const char *filter) {
       {"arena_valloc", test_arena_valloc},
       {"slice_u8", test_slice_u8},
       {"unix_path_last_component", test_unix_path_last_component},
+      {"path_with_ext", test_path_with_ext},
       {"ascii_num_parse", test_ascii_num_parse},
       {"bencode_parse_num", test_bencode_parse_num},
       {"bencode_parse_string", test_bencode_parse_string},
@@ -5619,7 +5807,11 @@ int main(i32 argc, char *argv[]) {
       return 1;
     }
 
-    fwrite(torrent_file_data.data, 1, torrent_file_data.len, stdout);
+    err = io.write_all_to_file(NULL, torrent_file_path, torrent_file_data);
+    if (ErrKindNone != err.kind) {
+      error_print("failed to write torrent file", err);
+      return 1;
+    }
   } else if (0 == strcmp(cmd, "share")) {
     const Ipv4Addr listen_addr = {.port = 12345, .ip = 0};
     TorrentNetworkCtx ctx = {0};
