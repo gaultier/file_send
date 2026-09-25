@@ -561,7 +561,7 @@ typedef enum {
 } FileOpenOptions;
 
 __attribute__((warn_unused_result)) static Error
-unix_open(void *ctx, char *path, FileOpenOptions options, i32 *fd) {
+unix_open(void *ctx, Slice_u8 path, FileOpenOptions options, i32 *fd) {
   (void)ctx;
 
   assert(fd);
@@ -571,9 +571,23 @@ unix_open(void *ctx, char *path, FileOpenOptions options, i32 *fd) {
     unix_options |= O_RDONLY;
   }
 
+  // FILE_PATH_MAX
+  char unix_path[4096] = {0};
+  const usize unix_path_max_len = sizeof(unix_path) - 1;
+
+  if (!path.data || 0 == path.len) {
+    return (Error){.kind = ErrKindInvalidData};
+  }
+
+  if (path.len > unix_path_max_len) {
+    return (Error){.kind = ErrKindRange, .data = sizeof(unix_path_max_len)};
+  }
+
+  memcpy(unix_path, path.data, path.len);
+
   i32 ret = 0;
   do {
-    ret = open(path, unix_options);
+    ret = open(unix_path, unix_options);
   } while (-1 == ret && EINTR == errno);
 
   if (-1 == ret) {
@@ -816,12 +830,47 @@ unix_file_size(void *ctx, i32 fd, usize *dst_size) {
   return (Error){.kind = ErrKindNone};
 }
 
+__attribute__((warn_unused_result)) static Error
+unix_map_file(void *ctx, Slice_u8 path, FileOpenOptions opts, Slice_u8 *dst) {
+  (void)ctx;
+  assert(dst);
+
+  Error err = {0};
+
+  i32 fd = 0;
+  err = unix_open(NULL, path, FileOpenOptionsReadOnly, &fd);
+  if (ErrKindNone != err.kind) {
+    return unix_error_from_errno(errno);
+  }
+
+  usize file_size = 0;
+  err = unix_file_size(NULL, fd, &file_size);
+  if (ErrKindNone != err.kind) {
+    return unix_error_from_errno(errno);
+  }
+
+  i32 unix_opts = 0;
+  if (opts & FileOpenOptionsReadOnly) {
+    unix_opts = PROT_READ;
+  }
+
+  void *const data = mmap(NULL, file_size, unix_opts, MAP_PRIVATE, fd, 0);
+  if ((void *)-1 == data) {
+    return unix_error_from_errno(errno);
+  }
+
+  dst->data = data;
+  dst->len = file_size;
+
+  return (Error){.kind = ErrKindNone};
+}
+
 // ---------- IO ----------
 
 typedef struct {
   Error (*socket)(void *ctx, SocketDomain domain, SocketType type, i32 *fd);
   Error (*listen)(void *ctx, i32 fd, i32 backlog);
-  Error (*open)(void *ctx, char *path, FileOpenOptions options, i32 *fd);
+  Error (*open)(void *ctx, Slice_u8 path, FileOpenOptions options, i32 *fd);
   Error (*tcp_bind_ipv4)(void *ctx, i32 listen_socket, Ipv4Addr addr);
   Error (*accept)(void *ctx, i32 listen_socket, i32 *dst_accept_socket,
                   Ipv4Addr *dst_accept_addr);
@@ -831,6 +880,8 @@ typedef struct {
   Error (*read)(void *ctx, i32 fd, u8 *buf, usize len, usize *dst_read);
   Error (*write)(void *ctx, i32 fd, u8 *buf, usize len, usize *dst_written);
   Error (*file_size)(void *ctx, i32 fd, usize *dst_size);
+  Error (*map_file)(void *ctx, Slice_u8 path, FileOpenOptions opts,
+                    Slice_u8 *dst);
 } IO;
 
 __attribute__((warn_unused_result)) static IO io_unix_make(void) {
@@ -846,6 +897,7 @@ __attribute__((warn_unused_result)) static IO io_unix_make(void) {
       .read = unix_read,
       .write = unix_write,
       .file_size = unix_file_size,
+      .map_file = unix_map_file,
   };
 }
 
@@ -5431,33 +5483,22 @@ int main(i32 argc, char *argv[]) {
   } else if (0 == strcmp(cmd, "gen-torrent")) {
     assert(3 == argc);
 
-    i32 fd = 0;
-    assert(ErrKindNone ==
-           io.open(NULL, argv[2], FileOpenOptionsReadOnly, &fd).kind);
-
-    usize file_size = 0;
-    {
-      Error err = io.file_size(NULL, fd, &file_size);
-      if (ErrKindNone != err.kind) {
-        error_print("failed to get file size", err);
-        return 1;
-      }
-    }
-
-    void *const input_data =
-        mmap(NULL, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    assert((void *)-1 != input_data);
-
-    const Slice_u8 input = slice_u8_make((u8 *)input_data, file_size);
     const Slice_u8 file_path = {.data = (u8 *)argv[2], .len = strlen(argv[2])};
+    Slice_u8 input = {0};
+
+    Error err = io.map_file(NULL, file_path, FileOpenOptionsReadOnly, &input);
+    if (ErrKindNone != err.kind) {
+      error_print("failed to open file", err);
+      return 1;
+    }
 
     u8 announce_url_cstr[] = "http://localhost:12345";
     Slice_u8 announce_url =
         slice_u8_make(announce_url_cstr, sizeof(announce_url_cstr) - 1);
 
     Slice_u8 torrent_file_data = {0};
-    Error err = torrent_gen_torrent_file_data(file_path, input, announce_url,
-                                              &torrent_file_data, &arena);
+    err = torrent_gen_torrent_file_data(file_path, input, announce_url,
+                                        &torrent_file_data, &arena);
     if (ErrKindNone != err.kind) {
       error_print("failed to generate torrent file data", err);
       return 1;
