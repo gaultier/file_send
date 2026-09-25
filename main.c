@@ -114,33 +114,26 @@ int main(i32 argc, char *argv[]) {
     Slice_u8 info_hash_hex_trunc_slice = {0};
     u8 info_hash_hex_trunc[40] = {0};
 
-    for (usize i = 1; i < metainfo_dict.v.list.len; i += 2) {
-      BencodeValue k = metainfo_dict.v.list.data[i - 1];
-      BencodeValue v = metainfo_dict.v.list.data[i];
-      if (BencodeKindString == k.kind && slice_u8_eq_cstr(k.v.s, "info") &&
-          BencodeKindDict == v.kind) {
-        Slice_u8 info_encoded = {0};
-        err = bencode_encode(v, &info_encoded, &scratch);
-        if (ErrKindNone != err.kind) {
-          error_print("failed to encode info", err);
-          return 1;
-        }
-
-        u8 info_hash[SHA256_DIGEST_LENGTH] = {0};
-        sha256_digest(info_encoded, info_hash);
-
-        sha256_encode_hex_trunc(info_hash, info_hash_hex_trunc);
-
-        info_hash_hex_trunc_slice = (Slice_u8){
-            .data = info_hash_hex_trunc, .len = sizeof(info_hash_hex_trunc)};
-        break;
-      }
-    }
-
-    if (0 == info_hash_hex_trunc_slice.len) {
+    const BencodeValue *const info_dict =
+        torrent_find_info_dict_in_metainfo(metainfo_dict);
+    if (!info_dict) {
       fprintf(stderr, "info dict from .torrent data not found\n");
       return 1;
     }
+    Slice_u8 info_encoded = {0};
+    err = bencode_encode(*info_dict, &info_encoded, &scratch);
+    if (ErrKindNone != err.kind) {
+      error_print("failed to encode info", err);
+      return 1;
+    }
+
+    u8 info_hash[SHA256_DIGEST_LENGTH] = {0};
+    sha256_digest(info_encoded, info_hash);
+
+    sha256_encode_hex_trunc(info_hash, info_hash_hex_trunc);
+
+    info_hash_hex_trunc_slice = (Slice_u8){.data = info_hash_hex_trunc,
+                                           .len = sizeof(info_hash_hex_trunc)};
     fwrite(info_hash_hex_trunc_slice.data, 1, info_hash_hex_trunc_slice.len,
            stdout);
     puts("");

@@ -1358,14 +1358,14 @@ torrent_make_udp_broadcast_message(Slice_u8 url, u16 port, Slice_u8 info_hash,
   return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static BencodeList /* Actually a dict */ *
+__attribute__((warn_unused_result)) static BencodeValue *
 torrent_find_info_dict_in_metainfo(BencodeValue metainfo) {
   for (usize i = 1; i < metainfo.v.list.len; i += 2) {
     BencodeValue *const k = &metainfo.v.list.data[i - 1];
     BencodeValue *const v = &metainfo.v.list.data[i];
     if (BencodeKindString == k->kind && slice_u8_eq_cstr(k->v.s, "info") &&
         BencodeKindDict == v->kind) {
-      return &v->v.list;
+      return v;
     }
   }
   return NULL;
