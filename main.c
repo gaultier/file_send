@@ -4953,9 +4953,9 @@ typedef struct TorrentNetworkCtx TorrentNetworkCtx;
 typedef struct {
   void *ctx;
   const IO *io;
+  TorrentNetworkCtx *network_ctx;
   i32 socket;
   Ipv4Addr addr;
-  TorrentNetworkCtx *network_ctx;
   // More: torrent, etc.
 } TorrentClientHandleCtx;
 
@@ -5018,6 +5018,7 @@ torrent_client_ctx_pool_acquire(TorrentClientHandleCtxPool *pool) {
     TorrentClientHandleCtx *res = &pool->slots[slot_idx];
     assert(0 == res->ctx);
     assert(0 == res->io);
+    assert(0 == res->network_ctx);
     assert(0 == res->socket);
     assert(0 == res->addr.ip);
     assert(0 == res->addr.port);
@@ -5064,8 +5065,9 @@ static void *torrent_client_handle(void *vctx) {
 
   const char msg[] = "hello, world!";
   usize written = 0;
-  Error err_write = client_ctx->io->write(client_ctx->ctx, client_ctx->socket,
-                                          (u8 *)msg, sizeof(msg) - 1, &written);
+  const Error err_write =
+      client_ctx->io->write(client_ctx->ctx, client_ctx->socket, (u8 *)msg,
+                            sizeof(msg) - 1, &written);
   if (ErrNone == err_write) {
     goto end;
   }
@@ -5095,7 +5097,8 @@ torrent_client_on_accept(const IO *io, void *vctx, Ipv4Addr accept_addr,
       torrent_client_ctx_pool_acquire(&network_ctx->pool);
   if (!client_ctx) {
     fprintf(stderr, "backpressure: no available pool slot for client\n");
-    goto end;
+    (void)io->close(vctx, accept_socket);
+    return ErrOOM;
   }
 
   assert(client_ctx);
@@ -5109,12 +5112,12 @@ torrent_client_on_accept(const IO *io, void *vctx, Ipv4Addr accept_addr,
   if (ErrNone != err) {
     // The thread never started, so nothing else will free the context or hang
     // up on the peer.
-    // Fallthrough on the cleanup block.
+    torrent_client_ctx_pool_release(&network_ctx->pool, client_ctx);
+    (void)io->close(vctx, accept_socket);
   }
 
-end:
-  torrent_client_ctx_pool_release(&network_ctx->pool, client_ctx);
-  (void)io->close(vctx, accept_socket);
+  // Nothing to cleanup: the client handler finished successfully and is
+  // responsible for the cleanup.
 
   return err;
 }
