@@ -5048,8 +5048,9 @@ static void torrent_client_ctx_pool_release(TorrentClientHandleCtxPool *pool,
   const PoolSlotGroup prev = __atomic_fetch_and(&pool->occupied[slot_group_idx],
                                                 mask, __ATOMIC_RELEASE);
 
-  // Sanity check: the slot was indeed marked as not occupied.
-  assert(0 == (prev & mask));
+  // Sanity check against double release of the same slot: the slot was indeed
+  // occupied before.
+  assert(0 != (prev & ~mask));
 }
 
 static void *torrent_client_handle(void *vctx) {
@@ -5058,7 +5059,6 @@ static void *torrent_client_handle(void *vctx) {
   TorrentClientHandleCtx *const client_ctx = vctx;
   assert(client_ctx->io);
 
-  printf("torrent_client_handle");
   const u32 ip = client_ctx->addr.ip;
   printf("accepted: %u.%u.%u.%u:%hu\n", ip >> 24 & 0xff, ip >> 16 & 0xff,
          ip >> 8 & 0xff, ip >> 0 & 0xff, client_ctx->addr.port);
@@ -5071,6 +5071,8 @@ static void *torrent_client_handle(void *vctx) {
   if (ErrNone == err_write) {
     goto end;
   }
+
+  // Some more logic here...
 
 end:
   (void)client_ctx->io->close(client_ctx->ctx, client_ctx->socket);
