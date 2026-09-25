@@ -120,6 +120,13 @@ int main(i32 argc, char *argv[]) {
       fprintf(stderr, "info dict from .torrent data not found\n");
       return 1;
     }
+
+    err = torrent_validate_info_dict(*info_dict);
+    if (ErrKindNone != err.kind) {
+      error_print("invalid info dictionary from .torrent data", err);
+      return 1;
+    }
+
     Slice_u8 info_encoded = {0};
     err = bencode_encode(*info_dict, &info_encoded, &scratch);
     if (ErrKindNone != err.kind) {

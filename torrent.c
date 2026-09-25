@@ -136,29 +136,29 @@ bencode_parse_string(Slice_u8 *input, BencodeValue *res) {
 // Bytes are compared as unsigned values, so `0x80` sorts after `0x7f`. This
 // is a total order over arbitrary bytes, embedded zeroes included, and it is
 // the ordering bencode requires of dict keys.
-__attribute__((warn_unused_result)) static i32
-bytes_cmp(const u8 *a, usize a_len, const u8 *b, usize b_len) {
-  if (0 != a_len) {
-    assert(a);
+__attribute__((warn_unused_result)) static i32 slice_u8_cmp(Slice_u8 a,
+                                                            Slice_u8 b) {
+  if (0 != a.len) {
+    assert(a.data);
   }
-  if (0 != b_len) {
-    assert(b);
+  if (0 != b.len) {
+    assert(b.data);
   }
 
   // Not `memcmp`: it is undefined to hand it a NULL pointer even for a length
   // of zero, and an empty byte string is legal here.
-  const usize len = a_len < b_len ? a_len : b_len;
+  const usize len = a.len < b.len ? a.len : b.len;
   for (usize i = 0; i < len; i++) {
-    if (a[i] != b[i]) {
-      return a[i] < b[i] ? -1 : 1;
+    if (a.data[i] != b.data[i]) {
+      return a.data[i] < b.data[i] ? -1 : 1;
     }
   }
 
   // Equal up to the shorter length: the prefix sorts first.
-  if (a_len == b_len) {
+  if (a.len == b.len) {
     return 0;
   }
-  return a_len < b_len ? -1 : 1;
+  return a.len < b.len ? -1 : 1;
 }
 
 __attribute__((warn_unused_result)) static Error
@@ -181,9 +181,9 @@ bencode_validate_dict(BencodeList list) {
 
     if (i > 1) {
       const BencodeValue previous = list.data[i - 2];
+      assert(BencodeKindString == previous.kind);
 
-      if (bytes_cmp(previous.v.s.data, previous.v.s.len, key.v.s.data,
-                    key.v.s.len) >= 0) {
+      if (slice_u8_cmp(previous.v.s, key.v.s) >= 0) {
         return (Error){.kind = ErrKindInvalidData};
       }
     }
@@ -1361,12 +1361,47 @@ torrent_make_udp_broadcast_message(Slice_u8 url, u16 port, Slice_u8 info_hash,
 __attribute__((warn_unused_result)) static BencodeValue *
 torrent_find_info_dict_in_metainfo(BencodeValue metainfo) {
   for (usize i = 1; i < metainfo.v.list.len; i += 2) {
-    BencodeValue *const k = &metainfo.v.list.data[i - 1];
+    const BencodeValue k = metainfo.v.list.data[i - 1];
     BencodeValue *const v = &metainfo.v.list.data[i];
-    if (BencodeKindString == k->kind && slice_u8_eq_cstr(k->v.s, "info") &&
+    if (BencodeKindString == k.kind && slice_u8_eq_cstr(k.v.s, "info") &&
         BencodeKindDict == v->kind) {
       return v;
     }
   }
   return NULL;
+}
+
+__attribute__((warn_unused_result)) static Error
+torrent_validate_info_dict(BencodeValue info_dict) {
+  assert(BencodeKindDict == info_dict.kind);
+
+  const BencodeList l = info_dict.v.list;
+
+  if (0 == l.len) {
+    return (Error){.kind = ErrKindInvalidData};
+  }
+
+  if (0 != l.len % 2) {
+    return (Error){.kind = ErrKindInvalidData};
+  }
+
+  for (usize i = 1; i < l.len; i += 2) {
+    const BencodeValue k = l.data[i * 2];
+    // BencodeValue v = l.data[i * 2 + 1];
+
+    if (BencodeKindString != k.kind) {
+      return (Error){.kind = ErrKindInvalidData};
+    }
+
+    if (i > 2) {
+      const BencodeValue prev_k = l.data[(i - 1) * 2];
+      assert(BencodeKindString == prev_k.kind);
+
+      if (slice_u8_cmp(prev_k.v.s, k.v.s) >= 0) {
+        return (Error){.kind = ErrKindInvalidData};
+      }
+    }
+  }
+
+  return (Error){.kind = ErrKindNone};
 }
