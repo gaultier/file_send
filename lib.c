@@ -800,3 +800,74 @@ __attribute__((warn_unused_result)) static Error ascii_num_parse(Slice_u8 *data,
 
   assert(0 && "unreachable");
 }
+
+__attribute__((warn_unused_result)) static usize usize_digits_base_10(usize n) {
+  usize digits = 1;
+  while (n >= 10) {
+    n /= 10;
+    digits += 1;
+  }
+
+  return digits;
+}
+
+// `-ISIZE_MIN` is not representable as an `isize`, so the magnitude is taken
+// in `usize`, where it always is. Conversion of a negative value to an
+// unsigned type is modular, so subtracting it from zero yields exactly the
+// magnitude, `ISIZE_MIN` included.
+__attribute__((warn_unused_result)) static usize isize_magnitude(isize n) {
+  return n < 0 ? (usize)0 - (usize)n : (usize)n;
+}
+
+// Decimal width including the sign, the mirror of `usize_digits_base_10`.
+__attribute__((warn_unused_result)) static usize isize_digits_base_10(isize n) {
+  return (n < 0 ? 1 : 0) + usize_digits_base_10(isize_magnitude(n));
+}
+
+// The digits are written at the *front* of `dst`, so a caller can encode
+// straight into its own output buffer instead of copying out of a scratch
+// one. Base 10 yields the least significant digit first, hence the up front
+// width.
+__attribute__((warn_unused_result)) static usize
+encode_usize_base_10(usize n, Slice_u8 dst) {
+  assert(dst.data);
+
+  const usize digits = usize_digits_base_10(n);
+  assert(dst.len >= digits);
+
+  u8 *end = dst.data + digits;
+
+  do {
+    assert(end > dst.data);
+
+    const usize digit = n % 10;
+    *(--end) = (u8)(digit + '0');
+
+    n /= 10;
+  } while (n > 0);
+
+  // The width matched the digits actually written, at the front of `dst`.
+  assert(end == dst.data);
+
+  return digits;
+}
+
+__attribute__((warn_unused_result)) static usize
+encode_isize_base_10(isize n, Slice_u8 dst) {
+  assert(dst.data);
+
+  const bool negative = n < 0;
+  const usize magnitude = isize_magnitude(n);
+
+  if (!negative) {
+    return encode_usize_base_10(magnitude, dst);
+  }
+
+  assert(dst.len >= 1);
+  dst.data[0] = '-';
+
+  const usize digits =
+      encode_usize_base_10(magnitude, slice_u8_make(dst.data + 1, dst.len - 1));
+
+  return 1 + digits;
+}
