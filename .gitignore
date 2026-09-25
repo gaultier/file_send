@@ -3,3 +3,4 @@ a.out*
 *.dwo
 .DS_Store
 *.obj
+*.pdb
