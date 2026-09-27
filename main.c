@@ -12,6 +12,7 @@
 #include "win32.c"
 #endif
 
+#include "log.c"
 #include "torrent.c"
 
 #ifdef WITH_TESTS
@@ -229,7 +230,9 @@ int main(i32 argc, char *argv[]) {
     // bytes those characters spell. `info_hash` outlives the event loop below,
     // so the slice onto it stays good for as long as any connection does.
     TorrentNetworkCtx ctx = {
-        .info_hash = slice_u8_make(info_hash, TORRENT_INFO_HASH_LEN)};
+        .info_hash = slice_u8_make(info_hash, TORRENT_INFO_HASH_LEN),
+        .log_level_mask = LogLevelError | LogLevelInfo | LogLevelDebug,
+    };
     IoServer server = {0};
     Error err_listen = io_listen_and_serve_tcp_ipv4(
         io, &server, &ctx, listen_addr, torrent_peer_on_accept);

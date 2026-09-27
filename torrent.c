@@ -1,6 +1,7 @@
 #pragma once
 
 #include "lib.c"
+#include "log.c"
 #include "sha2.c"
 
 // ---------- Bencode ----------
@@ -1217,9 +1218,9 @@ typedef struct {
   // a write is still with the kernel, and one completion holds one operation.
   IoCompletion completion_close;
 
-  // What the kernel is still holding. Each completion carries one operation at a
-  // time, and both the read path and the write path drive the tick, so without
-  // this the tick arms a second read over the one already in flight.
+  // What the kernel is still holding. Each completion carries one operation at
+  // a time, and both the read path and the write path drive the tick, so
+  // without this the tick arms a second read over the one already in flight.
   bool read_in_flight;
   bool write_in_flight;
   // The connection is over; the hang-up is waiting for the operations above to
@@ -1237,6 +1238,7 @@ typedef struct {
   u8 id[20];
   // More: torrent, etc.
   TorrentPeerState state;
+  Logger logger;
 } TorrentPeer;
 
 #define TORRENT_PEERS_MAX 1024
@@ -1261,12 +1263,13 @@ typedef struct {
 struct TorrentNetworkCtx {
   TorrentpeerHandleCtxPool pool;
   Slice_u8 info_hash;
+  u32 log_level_mask;
   // More...
 };
 
 // The most messages a full receive buffer can hold. A keep-alive is four bytes
-// of length and nothing behind it, and nothing on the wire is shorter, so this is
-// the bound on how many come out of one read.
+// of length and nothing behind it, and nothing on the wire is shorter, so this
+// is the bound on how many come out of one read.
 #define TORRENT_PEER_MSGS_PER_BUF_MAX (TORRENT_PEER_RECV_BUF_CAP / sizeof(u32))
 
 // The payload of a `request` or a `cancel`: three `u32`s, and nothing else is a
@@ -1282,12 +1285,12 @@ struct TorrentNetworkCtx {
 // One message off the front of `*data`, if a whole one is there.
 //
 // Three answers, and a caller needs all three. An error is a peer talking
-// nonsense, and the connection is over. `*present` false with no error is "not
-// yet": fewer bytes have arrived than the message needs, and `*data` is left
-// exactly as it was so that the same call works once more of it turns up -- TCP
-// cuts a stream wherever it likes, and half a message is the ordinary case, not
-// a broken peer. `*present` true is one message parsed, with `*data` advanced
-// past it and `*dst_msg` filled in.
+// nonsense, and the connection is over. `*present` false with no error is
+// "not yet": fewer bytes have arrived than the message needs, and `*data`
+// is left exactly as it was so that the same call works once more of it
+// turns up -- TCP cuts a stream wherever it likes, and half a message is
+// the ordinary case, not a broken peer. `*present` true is one message
+// parsed, with `*data` advanced past it and `*dst_msg` filled in.
 __attribute__((warn_unused_result)) static Error
 torrent_peer_parse_message(Slice_u8 *data, TorrentPeerMessage *dst_msg,
                            bool *present) {
@@ -1298,8 +1301,8 @@ torrent_peer_parse_message(Slice_u8 *data, TorrentPeerMessage *dst_msg,
   *present = false;
 
   // A copy, and `*data` is only moved on at the very end: a message that turns
-  // out to be half-arrived must leave the caller's slice untouched, or the bytes
-  // it did consume are lost before the rest ever gets here.
+  // out to be half-arrived must leave the caller's slice untouched, or the
+  // bytes it did consume are lost before the rest ever gets here.
   Slice_u8 remaining = *data;
 
   u32 msg_size = 0;
@@ -1322,8 +1325,8 @@ torrent_peer_parse_message(Slice_u8 *data, TorrentPeerMessage *dst_msg,
     return (Error){.kind = ErrKindNone};
   }
 
-  // The length counts the tag and the payload, so the whole of it has to be here
-  // before any of it is read.
+  // The length counts the tag and the payload, so the whole of it has to be
+  // here before any of it is read.
   if (remaining.len < msg_size) {
     return (Error){.kind = ErrKindNone};
   }
@@ -1411,8 +1414,8 @@ torrent_peer_parse_message(Slice_u8 *data, TorrentPeerMessage *dst_msg,
 
   *present = true;
   *data = remaining;
-  // A message was taken, so the caller's slice is strictly shorter: that is what
-  // keeps the loop that calls this from running for ever.
+  // A message was taken, so the caller's slice is strictly shorter: that is
+  // what keeps the loop that calls this from running for ever.
   assert(data->len < remaining.len + msg_size + sizeof(msg_size));
 
   return (Error){.kind = ErrKindNone};
@@ -1490,10 +1493,10 @@ static void torrent_peer_ctx_pool_release(TorrentpeerHandleCtxPool *pool,
   pool->occupied[slot_group_idx] &= ~mask;
 }
 
-// Everything that is true of a live connection, wherever one is looked at. Called
-// at the top of each of its callbacks: a slot is reached only through them, so a
-// field that goes wrong is caught at the next one rather than wherever it happens
-// to show.
+// Everything that is true of a live connection, wherever one is looked at.
+// Called at the top of each of its callbacks: a slot is reached only through
+// them, so a field that goes wrong is caught at the next one rather than
+// wherever it happens to show.
 static void torrent_peer_assert_invariants(const TorrentPeer *peer) {
   assert(peer);
   assert(peer->io);
@@ -1507,8 +1510,8 @@ static void torrent_peer_assert_invariants(const TorrentPeer *peer) {
   assert(peer->recv_len <= TORRENT_PEER_RECV_BUF_CAP);
   assert(peer->send_len <= TORRENT_PEER_SEND_BUF_CAP);
 
-  // Each completion finds its way back to this slot, which is how every callback
-  // above gets its `peer`.
+  // Each completion finds its way back to this slot, which is how every
+  // callback above gets its `peer`.
   assert(peer->completion_read.ctx == peer);
   assert(peer->completion_write.ctx == peer);
   assert(peer->completion_close.ctx == peer);
@@ -1517,9 +1520,9 @@ static void torrent_peer_assert_invariants(const TorrentPeer *peer) {
   assert(TorrentPeerStateInitial != peer->state ||
          (0 == peer->recv_len && 0 == peer->send_len));
 
-  // What the buffers hold beyond that is not invariant: a read reports before the
-  // tick that drains it, so between the two there is a whole handshake, or a
-  // whole message, still sitting there.
+  // What the buffers hold beyond that is not invariant: a read reports before
+  // the tick that drains it, so between the two there is a whole handshake, or
+  // a whole message, still sitting there.
 }
 
 // A connection, one callback at a time.
@@ -1532,8 +1535,8 @@ static void torrent_peer_on_close(IoCompletion *completion, Error err,
   TorrentPeer *const peer_ctx = completion->ctx;
   torrent_peer_assert_invariants(peer_ctx);
   assert(&peer_ctx->completion_close == completion);
-  // The hang-up is the last thing to happen on a connection, so nothing else can
-  // still be pointing into the slot that is about to be handed back.
+  // The hang-up is the last thing to happen on a connection, so nothing else
+  // can still be pointing into the slot that is about to be handed back.
   assert(peer_ctx->closing);
   assert(!peer_ctx->read_in_flight);
   assert(!peer_ctx->write_in_flight);
@@ -1700,8 +1703,9 @@ static void torrent_peer_on_write(IoCompletion *completion, Error err,
     return;
   }
 
-  // Drop what went out, keeping what did not at the front of the buffer. A short
-  // write is the ordinary case on a socket whose send buffer is nearly full.
+  // Drop what went out, keeping what did not at the front of the buffer. A
+  // short write is the ordinary case on a socket whose send buffer is nearly
+  // full.
   assert(res <= peer->send_len);
   const usize unsent = peer->send_len - res;
   memmove(peer->send_buf, peer->send_buf + res, unsent);
@@ -1785,9 +1789,9 @@ static void torrent_peer_queue_handshake(TorrentPeer *peer) {
 //
 // Each state either has what it needs and moves on, or asks for one more
 // operation and returns. What it must never do is ask for an operation that is
-// already in flight: a completion holds one at a time, and both the read and the
-// write path come through here, so the two would otherwise arm the same read
-// twice over.
+// already in flight: a completion holds one at a time, and both the read and
+// the write path come through here, so the two would otherwise arm the same
+// read twice over.
 static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
   torrent_peer_assert_invariants(peer);
   assert(io == peer->io);
@@ -1841,9 +1845,9 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
     // several, and a peer that sent three and then went quiet would otherwise
     // have two of them sitting unread for as long as it stayed quiet.
     // Bounded, and not `for (;;)`: a full buffer holds at most
-    // `TORRENT_PEER_MSGS_PER_BUF_MAX` messages, so one more pass than that finds
-    // nothing left. A loop that could run longer than its own input is a loop
-    // that can run for ever.
+    // `TORRENT_PEER_MSGS_PER_BUF_MAX` messages, so one more pass than that
+    // finds nothing left. A loop that could run longer than its own input is a
+    // loop that can run for ever.
     bool drained = false;
     for (usize i = 0; i < TORRENT_PEER_MSGS_PER_BUF_MAX + 1; i++) {
       const usize recv_len_before = peer->recv_len;
@@ -1871,9 +1875,9 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
       memmove(peer->recv_buf, peer->recv_buf + consumed, recv.len);
       peer->recv_len = recv.len;
 
-      // The buffer is strictly shorter than it was, which is this loop's only way
-      // out: a pass that reported a message without taking it out of the buffer
-      // would run here for ever on the same bytes.
+      // The buffer is strictly shorter than it was, which is this loop's only
+      // way out: a pass that reported a message without taking it out of the
+      // buffer would run here for ever on the same bytes.
       assert(peer->recv_len < recv_len_before);
 
       // TODO: act on the message.
@@ -1938,6 +1942,8 @@ static void torrent_peer_init(TorrentPeer *peer, IO *io,
   // TODO: a real peer id, generated once for the process. Two peers sharing one
   // makes a remote think it has connected to itself.
   peer->id[0] = 1;
+  peer->logger =
+      log_make(network_ctx->log_level_mask, slice_u8_from_cstr("[peer] "));
 }
 
 static void torrent_peer_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
@@ -1962,6 +1968,7 @@ static void torrent_peer_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
   }
 
   torrent_peer_init(peer_ctx, io, network_ctx, accept_addr, accept_socket);
+  log(peer_ctx->logger, LogLevelInfo, "accepted");
 
   // Nothing buffered yet and the initial state, so the tick's first move is the
   // read that waits for the handshake. It hangs up on the peer itself if that
