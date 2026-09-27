@@ -1196,14 +1196,18 @@ typedef struct {
   i32 socket;
   Ipv4Addr addr;
 
-  // The one operation this connection has in flight. One, because a connection
-  // does one thing at a time; in the slot, because the implementation holds on
-  // to it until the callback runs and the slot is what outlives that.
-  IoCompletion completion;
+  IoCompletion completion_read;
+  // TODO: Pipelining?
+  IoCompletion completion_write;
+
   u8 recv_buf[TORRENT_PEER_RECV_BUF_CAP];
   usize recv_len;
 
+  u8 send_buf[TORRENT_PEER_RECV_BUF_CAP];
+  usize send_len;
+
   Slice_u8 info_hash;
+  u8 id[20];
   // More: torrent, etc.
   TorrentPeerState state;
 } TorrentPeer;
@@ -1333,8 +1337,8 @@ torrent_peer_ctx_pool_acquire(TorrentpeerHandleCtxPool *pool) {
     assert(0 == res->addr.port);
     // Nothing is in flight on a free slot, so nothing is pointing at its
     // completion either.
-    assert(IoActionKindNone == res->completion.action.kind);
-    assert(NULL == res->completion.cb);
+    assert(IoActionKindNone == res->completion_read.action.kind);
+    assert(NULL == res->completion_read.cb);
     return res;
   }
 
@@ -1391,7 +1395,7 @@ static void torrent_peer_close(TorrentPeer *peer_ctx) {
 
   IO *const io = peer_ctx->io;
 
-  const Error err = io->close(io, &peer_ctx->completion, peer_ctx->socket,
+  const Error err = io->close(io, &peer_ctx->completion_read, peer_ctx->socket,
                               torrent_peer_on_close);
   if (ErrKindNone != err.kind) {
     // The close was never submitted, so `torrent_peer_on_close` will not run:
@@ -1461,8 +1465,38 @@ torrent_peer_read(TorrentPeer *peer, IO *io) {
       slice_u8_make(peer->recv_buf + peer->recv_len,
                     TORRENT_PEER_RECV_BUF_CAP - peer->recv_len);
 
-  return io->read(io, &peer->completion, peer->socket, dst,
+  return io->read(io, &peer->completion_read, peer->socket, dst,
                   torrent_peer_on_read);
+}
+
+static void torrent_peer_on_write(IoCompletion *completion, Error err,
+                                  usize res) {
+  assert(completion);
+
+  TorrentPeer *const peer = completion->ctx;
+  assert(peer);
+  assert(TORRENT_INFO_HASH_LEN == peer->info_hash.len);
+  assert(peer->send_len <= TORRENT_PEER_RECV_BUF_CAP);
+
+  if (ErrKindNone != err.kind) {
+    error_print("failed to write to a peer", err);
+    torrent_peer_close(peer);
+    return;
+  }
+
+  // Nothing written and nothing wrong is end of file: the peer hung up. Asking
+  // again would answer 0 for ever, since a descriptor at end of file stays
+  // readable.
+  if (0 == res) {
+    torrent_peer_close(peer);
+    return;
+  }
+
+  memmove(peer->send_buf, peer->send_buf + res, res);
+  assert(!__builtin_sub_overflow(peer->send_len, res, &peer->send_len));
+  assert(peer->send_len <= TORRENT_PEER_RECV_BUF_CAP);
+
+  torrent_peer_tick(peer, peer->io);
 }
 
 static void torrent_peer_on_read(IoCompletion *completion, Error err,
@@ -1500,6 +1534,25 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
 
   switch (peer->state) {
   case TorrentPeerStateInitial: {
+    assert(0 == peer->send_len);
+    // Send the handshake.
+    {
+      Slice_u8 send = slice_u8_make(peer->send_buf, TORRENT_PEER_HANDSHAKE_LEN);
+      memcpy(send.data,
+             "\x13"
+             "BitTorrent protocol\0\0\0\0\0\0\0\0",
+             28);
+      memcpy(send.data + 28, peer->info_hash.data, 20);
+      memcpy(send.data + 48, peer->id, 20);
+
+      const Error err = io->write(io, &peer->completion_write, peer->socket,
+                                  send, torrent_peer_on_write);
+      if (ErrKindNone != err.kind) {
+        torrent_peer_close(peer);
+        return;
+      }
+    }
+
     if (peer->recv_len < TORRENT_PEER_HANDSHAKE_LEN) {
       const Error err = torrent_peer_read(peer, io);
       if (ErrKindNone != err.kind) {
@@ -1583,7 +1636,8 @@ static void torrent_peer_init(TorrentPeer *peer, IO *io,
   peer->socket = socket;
   peer->io = io;
   peer->network_ctx = network_ctx;
-  peer->completion.ctx = peer;
+  peer->completion_read.ctx = peer;
+  peer->completion_write.ctx = peer;
   peer->info_hash = network_ctx->info_hash;
 }
 
