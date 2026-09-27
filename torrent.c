@@ -1196,6 +1196,8 @@ typedef struct TorrentNetworkCtx TorrentNetworkCtx;
 
 #define TORRENT_PEER_RECV_BUF_CAP 1024
 
+#define TORRENT_PEER_SEND_BUF_CAP 1024
+
 typedef struct {
   // The caller's, passed through `io_listen_and_serve_tcp_ipv4`.
   void *cb_ctx;
@@ -1207,11 +1209,24 @@ typedef struct {
   IoCompletion completion_read;
   // TODO: Pipelining?
   IoCompletion completion_write;
+  // The close reuses neither of those: a hang-up can be decided while a read or
+  // a write is still with the kernel, and one completion holds one operation.
+  IoCompletion completion_close;
+
+  // What the kernel is still holding. Each completion carries one operation at a
+  // time, and both the read path and the write path drive the tick, so without
+  // this the tick arms a second read over the one already in flight.
+  bool read_in_flight;
+  bool write_in_flight;
+  // The connection is over; the hang-up is waiting for the operations above to
+  // report before it can be submitted, because the slot cannot be handed back
+  // while a completion inside it is still registered.
+  bool closing;
 
   u8 recv_buf[TORRENT_PEER_RECV_BUF_CAP];
   usize recv_len;
 
-  u8 send_buf[TORRENT_PEER_RECV_BUF_CAP];
+  u8 send_buf[TORRENT_PEER_SEND_BUF_CAP];
   usize send_len;
 
   Slice_u8 info_hash;
@@ -1414,6 +1429,13 @@ torrent_peer_ctx_pool_acquire(TorrentpeerHandleCtxPool *pool) {
     // completion either.
     assert(IoActionKindNone == res->completion_read.action.kind);
     assert(NULL == res->completion_read.cb);
+    assert(IoActionKindNone == res->completion_write.action.kind);
+    assert(NULL == res->completion_write.cb);
+    assert(IoActionKindNone == res->completion_close.action.kind);
+    assert(NULL == res->completion_close.cb);
+    assert(!res->read_in_flight);
+    assert(!res->write_in_flight);
+    assert(!res->closing);
     return res;
   }
 
@@ -1455,6 +1477,11 @@ static void torrent_peer_on_close(IoCompletion *completion, Error err,
   TorrentPeer *const peer_ctx = completion->ctx;
   assert(peer_ctx);
   assert(peer_ctx->network_ctx);
+  // The hang-up is the last thing to happen on a connection, so nothing else can
+  // still be pointing into the slot that is about to be handed back.
+  assert(peer_ctx->closing);
+  assert(!peer_ctx->read_in_flight);
+  assert(!peer_ctx->write_in_flight);
 
   // Whatever hanging up reported is of no use to anyone: the connection is
   // over, and there is nothing left to do differently.
@@ -1463,14 +1490,26 @@ static void torrent_peer_on_close(IoCompletion *completion, Error err,
 
 // Hang up and hand the slot back. Every way a connection can end goes through
 // here, so the slot is released exactly once however it ended.
+// End the connection. Called from wherever a connection turns out to be over,
+// which is any of the callbacks, so it has to cope with being called while
+// another operation is still with the kernel: the descriptor cannot be closed
+// under a registration that still points at this slot. The last callback to
+// report comes back here and finishes the job.
 static void torrent_peer_close(TorrentPeer *peer_ctx) {
   assert(peer_ctx);
   assert(peer_ctx->io);
   assert(peer_ctx->network_ctx);
 
+  peer_ctx->closing = true;
+
+  // Something is still in flight. Its callback sees `closing` and comes back.
+  if (peer_ctx->read_in_flight || peer_ctx->write_in_flight) {
+    return;
+  }
+
   IO *const io = peer_ctx->io;
 
-  const Error err = io->close(io, &peer_ctx->completion_read, peer_ctx->socket,
+  const Error err = io->close(io, &peer_ctx->completion_close, peer_ctx->socket,
                               torrent_peer_on_close);
   if (ErrKindNone != err.kind) {
     // The close was never submitted, so `torrent_peer_on_close` will not run:
@@ -1528,6 +1567,9 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io);
 static void torrent_peer_on_read(IoCompletion *completion, Error err,
                                  usize res);
 
+static void torrent_peer_on_write(IoCompletion *completion, Error err,
+                                  usize res);
+
 // Wait for more from the peer, after the bytes already buffered: a read aimed
 // at the front of the buffer would overwrite a message that is still arriving.
 __attribute__((warn_unused_result)) static Error
@@ -1535,13 +1577,42 @@ torrent_peer_read(TorrentPeer *peer, IO *io) {
   assert(peer);
   assert(io);
   assert(peer->recv_len < TORRENT_PEER_RECV_BUF_CAP);
+  assert(!peer->read_in_flight);
+  assert(!peer->closing);
 
   const Slice_u8 dst =
       slice_u8_make(peer->recv_buf + peer->recv_len,
                     TORRENT_PEER_RECV_BUF_CAP - peer->recv_len);
 
-  return io->read(io, &peer->completion_read, peer->socket, dst,
-                  torrent_peer_on_read);
+  const Error err = io->read(io, &peer->completion_read, peer->socket, dst,
+                             torrent_peer_on_read);
+  if (ErrKindNone == err.kind) {
+    peer->read_in_flight = true;
+  }
+
+  return err;
+}
+
+// Send what is in the send buffer. One write at a time, like the read: what a
+// short write leaves behind goes out from the callback.
+__attribute__((warn_unused_result)) static Error
+torrent_peer_write(TorrentPeer *peer, IO *io) {
+  assert(peer);
+  assert(io);
+  assert(peer->send_len > 0);
+  assert(peer->send_len <= TORRENT_PEER_SEND_BUF_CAP);
+  assert(!peer->write_in_flight);
+  assert(!peer->closing);
+
+  const Slice_u8 src = slice_u8_make(peer->send_buf, peer->send_len);
+
+  const Error err = io->write(io, &peer->completion_write, peer->socket, src,
+                              torrent_peer_on_write);
+  if (ErrKindNone == err.kind) {
+    peer->write_in_flight = true;
+  }
+
+  return err;
 }
 
 static void torrent_peer_on_write(IoCompletion *completion, Error err,
@@ -1551,9 +1622,18 @@ static void torrent_peer_on_write(IoCompletion *completion, Error err,
   TorrentPeer *const peer = completion->ctx;
   assert(peer);
   assert(TORRENT_INFO_HASH_LEN == peer->info_hash.len);
-  // No unexpected write.
+  assert(peer->write_in_flight);
+  // Nothing is written that was not asked for.
   assert(peer->send_len > 0);
-  assert(peer->send_len <= TORRENT_PEER_RECV_BUF_CAP);
+  assert(peer->send_len <= TORRENT_PEER_SEND_BUF_CAP);
+
+  peer->write_in_flight = false;
+
+  // The hang-up was waiting for this to report.
+  if (peer->closing) {
+    torrent_peer_close(peer);
+    return;
+  }
 
   if (ErrKindNone != err.kind) {
     error_print("failed to write to a peer", err);
@@ -1561,20 +1641,19 @@ static void torrent_peer_on_write(IoCompletion *completion, Error err,
     return;
   }
 
-  // Nothing written and nothing wrong is end of file: the peer hung up. Asking
-  // again would answer 0 for ever, since a descriptor at end of file stays
-  // readable.
+  // A write that takes nothing is not progress, and going back with the same
+  // bytes would take nothing again: there is no way forward on this connection.
   if (0 == res) {
     torrent_peer_close(peer);
     return;
   }
 
-  printf("res=%zu send_len=%zu\n", res, peer->send_len);
+  // Drop what went out, keeping what did not at the front of the buffer. A short
+  // write is the ordinary case on a socket whose send buffer is nearly full.
   assert(res <= peer->send_len);
-  assert(res <= TORRENT_PEER_RECV_BUF_CAP);
-  memmove(peer->send_buf, peer->send_buf + res, res);
-  peer->send_len -= res;
-  assert(peer->send_len <= TORRENT_PEER_RECV_BUF_CAP);
+  const usize unsent = peer->send_len - res;
+  memmove(peer->send_buf, peer->send_buf + res, unsent);
+  peer->send_len = unsent;
 
   torrent_peer_tick(peer, peer->io);
 }
@@ -1586,7 +1665,16 @@ static void torrent_peer_on_read(IoCompletion *completion, Error err,
   TorrentPeer *const peer = completion->ctx;
   assert(peer);
   assert(TORRENT_INFO_HASH_LEN == peer->info_hash.len);
+  assert(peer->read_in_flight);
   assert(peer->recv_len <= TORRENT_PEER_RECV_BUF_CAP);
+
+  peer->read_in_flight = false;
+
+  // The hang-up was waiting for this to report.
+  if (peer->closing) {
+    torrent_peer_close(peer);
+    return;
+  }
 
   if (ErrKindNone != err.kind) {
     error_print("failed to read from a peer", err);
@@ -1608,45 +1696,52 @@ static void torrent_peer_on_read(IoCompletion *completion, Error err,
   torrent_peer_tick(peer, peer->io);
 }
 
+// Put our own handshake in the send buffer. 68 bytes, the same shape as the one
+// a peer sends us.
+static void torrent_peer_queue_handshake(TorrentPeer *peer) {
+  assert(peer);
+  assert(0 == peer->send_len);
+  assert(TORRENT_INFO_HASH_LEN == peer->info_hash.len);
+  _Static_assert(TORRENT_PEER_HANDSHAKE_LEN <= TORRENT_PEER_SEND_BUF_CAP,
+                 "the handshake has to fit");
+
+  u8 *const dst = peer->send_buf;
+  memcpy(dst,
+         "\x13"
+         "BitTorrent protocol",
+         20);
+  // The 8 reserved bytes: no extension is claimed yet.
+  memset(dst + 20, 0, 8);
+  memcpy(dst + 28, peer->info_hash.data, TORRENT_INFO_HASH_LEN);
+  memcpy(dst + 48, peer->id, TORRENT_PEER_ID_LEN);
+
+  peer->send_len = TORRENT_PEER_HANDSHAKE_LEN;
+}
+
+// One pass of the state machine, run from whichever callback has just reported.
+//
+// Each state either has what it needs and moves on, or asks for one more
+// operation and returns. What it must never do is ask for an operation that is
+// already in flight: a completion holds one at a time, and both the read and the
+// write path come through here, so the two would otherwise arm the same read
+// twice over.
 static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
   assert(peer);
   assert(io);
+  assert(!peer->closing);
 
   switch (peer->state) {
   case TorrentPeerStateInitial: {
-    printf("send_len=%zu\n", peer->send_len);
-    assert(0 == peer->send_len);
-    // Send the handshake.
-    {
-      Slice_u8 send = slice_u8_make(peer->send_buf, TORRENT_PEER_HANDSHAKE_LEN);
-      memcpy(send.data,
-             "\x13"
-             "BitTorrent protocol\0\0\0\0\0\0\0\0",
-             28);
-      memcpy(send.data + 28, peer->info_hash.data, 20);
-      memcpy(send.data + 48, peer->id, 20);
-      peer->send_len = send.len;
-
-      const Error err = io->write(io, &peer->completion_write, peer->socket,
-                                  send, torrent_peer_on_write);
-      if (ErrKindNone != err.kind) {
-        torrent_peer_close(peer);
-        return;
-      }
-    }
-
+    torrent_peer_queue_handshake(peer);
     peer->state = TorrentPeerStateSentHandshake;
   }
 
+    // Ours is queued; theirs is what the next state waits for, and it may
+    // already be in the buffer.
     __attribute__((fallthrough));
   case TorrentPeerStateSentHandshake: {
     if (peer->recv_len < TORRENT_PEER_HANDSHAKE_LEN) {
-      const Error err = torrent_peer_read(peer, io);
-      if (ErrKindNone != err.kind) {
-        torrent_peer_close(peer);
-        return;
-      }
-      return;
+      break;
     }
 
     // Exactly the handshake and not a byte more: a peer is free to put its
@@ -1661,7 +1756,7 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
       torrent_peer_close(peer);
       return;
     }
-    printf("received valid handshake\n");
+    assert(TORRENT_PEER_ID_LEN == peer_id.len);
 
     peer->state = TorrentPeerStateHandshaked;
 
@@ -1679,28 +1774,59 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
     // instead of waiting for a read it may not need.
     __attribute__((fallthrough));
   case TorrentPeerStateHandshaked: {
-    Slice_u8 recv = slice_u8_make(peer->recv_buf, peer->recv_len);
-    TorrentPeerMessage msg = {0};
-    bool present = false;
-    Error err = torrent_peer_parse_message(&recv, &msg, &present);
+    // Every whole message in the buffer, not just the first: one read can carry
+    // several, and a peer that sent three and then went quiet would otherwise
+    // have two of them sitting unread for as long as it stayed quiet.
+    for (;;) {
+      Slice_u8 recv = slice_u8_make(peer->recv_buf, peer->recv_len);
+      TorrentPeerMessage msg = {0};
+      bool present = false;
 
-    if (ErrKindNone != err.kind) {
-      torrent_peer_close(peer);
-      return;
-    }
+      const Error err = torrent_peer_parse_message(&recv, &msg, &present);
+      if (ErrKindNone != err.kind) {
+        error_print("failed to parse a peer message", err);
+        torrent_peer_close(peer);
+        return;
+      }
 
-    if (present) {
-      __builtin_dump_struct(&msg, &printf);
-    }
+      if (!present) {
+        break;
+      }
 
-    err = torrent_peer_read(peer, io);
-    if (ErrKindNone != err.kind) {
-      torrent_peer_close(peer);
-      return;
+      // Drop what was parsed, keeping the rest at the front of the buffer.
+      assert(recv.len <= peer->recv_len);
+      memmove(peer->recv_buf, peer->recv_buf + (peer->recv_len - recv.len),
+              recv.len);
+      peer->recv_len = recv.len;
+
+      // TODO: act on the message.
     }
-    puts("[D010]");
-    return;
   } break;
+  }
+
+  // The two operations, in the one place each is asked for. Both are guarded by
+  // what is already in flight, because a completion holds one operation at a
+  // time and the callbacks of both come back through here.
+  if (peer->send_len > 0 && !peer->write_in_flight) {
+    const Error err = torrent_peer_write(peer, io);
+    if (ErrKindNone != err.kind) {
+      error_print("failed to write to a peer", err);
+      torrent_peer_close(peer);
+      return;
+    }
+  }
+
+  // Nothing more to be had from what has arrived, so wait for more of it. The
+  // buffer cannot already be full: a message too big for it is refused as
+  // malformed, and everything smaller has been taken out of it above.
+  assert(peer->recv_len < TORRENT_PEER_RECV_BUF_CAP);
+  if (!peer->read_in_flight) {
+    const Error err = torrent_peer_read(peer, io);
+    if (ErrKindNone != err.kind) {
+      error_print("failed to read from a peer", err);
+      torrent_peer_close(peer);
+      return;
+    }
   }
 }
 
@@ -1726,7 +1852,10 @@ static void torrent_peer_init(TorrentPeer *peer, IO *io,
   peer->network_ctx = network_ctx;
   peer->completion_read.ctx = peer;
   peer->completion_write.ctx = peer;
+  peer->completion_close.ctx = peer;
   peer->info_hash = network_ctx->info_hash;
+  // TODO: a real peer id, generated once for the process. Two peers sharing one
+  // makes a remote think it has connected to itself.
   peer->id[0] = 1;
 }
 

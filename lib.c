@@ -376,23 +376,6 @@ slice_u8_consume_u8(Slice_u8 *slice, u8 *dst) {
 }
 
 __attribute__((warn_unused_result)) static bool
-slice_u8_consume_n(Slice_u8 *slice, Slice_u8 *dst) {
-  assert(slice);
-  assert(dst);
-  assert(dst->data || 0 == dst->len);
-
-  if (slice->len < dst->len) {
-    return false;
-  }
-
-  memmove(dst->data, slice->data, dst->len);
-
-  slice_u8_advance(slice, dst->len);
-
-  return true;
-}
-
-__attribute__((warn_unused_result)) static bool
 slice_u8_consume_u32_be(Slice_u8 *slice, u32 *dst) {
   assert(slice);
   assert(dst);
