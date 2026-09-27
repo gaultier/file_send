@@ -390,7 +390,7 @@ slice_u8_consume_n(Slice_u8 *slice, Slice_u8 *dst) {
     return false;
   }
 
-  memcpy(dst, slice->data, dst->len);
+  memmove(dst->data, slice->data, dst->len);
 
   slice_u8_advance(slice, dst->len);
 
@@ -398,11 +398,16 @@ slice_u8_consume_n(Slice_u8 *slice, Slice_u8 *dst) {
 }
 
 __attribute__((warn_unused_result)) static bool
-slice_u8_consume_u32(Slice_u8 *slice, u32 *dst) {
+slice_u8_consume_u32_be(Slice_u8 *slice, u32 *dst) {
   assert(slice);
+  assert(dst);
 
   Slice_u8 dst_slice = {.data = (u8 *)dst, .len = sizeof(*dst)};
-  return slice_u8_consume_n(slice, &dst_slice);
+  const bool res = slice_u8_consume_n(slice, &dst_slice);
+
+  ntohl(*dst);
+
+  return res;
 }
 
 // The extension of the last component of `path`, dot included, or an empty

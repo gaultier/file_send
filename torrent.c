@@ -1241,10 +1241,13 @@ torrent_peer_parse_message(Slice_u8 *data, TorrentPeerMessage *dst_msg,
   assert(dst_msg);
   assert(present);
 
+  puts(__func__);
+
   u32 msg_size = 0;
-  if (!slice_u8_consume_u32(data, &msg_size)) {
+  if (!slice_u8_consume_u32_be(data, &msg_size)) {
     return (Error){.kind = ErrKindNone};
   }
+  printf("[D001] %u\n", msg_size);
 
   // Keep-alive?
   if (0 == msg_size) {
@@ -1252,12 +1255,11 @@ torrent_peer_parse_message(Slice_u8 *data, TorrentPeerMessage *dst_msg,
     return (Error){.kind = ErrKindNone};
   }
 
-  msg_size = ntohl(msg_size);
-
   u8 msg_tag = 0;
   if (!slice_u8_consume_u8(data, &msg_tag)) {
     return (Error){.kind = ErrKindInvalidData};
   }
+  printf("[D001] %u\n", msg_tag);
 
   memcpy(dst_msg, 0, sizeof(*dst_msg));
 
@@ -1270,7 +1272,7 @@ torrent_peer_parse_message(Slice_u8 *data, TorrentPeerMessage *dst_msg,
     return (Error){.kind = ErrKindNone};
 
   case TorrentMessageKindHave:
-    if (!slice_u8_consume_u32(data, &dst_msg->v.have)) {
+    if (!slice_u8_consume_u32_be(data, &dst_msg->v.have)) {
       return (Error){.kind = ErrKindInvalidData};
     }
 
@@ -1278,13 +1280,13 @@ torrent_peer_parse_message(Slice_u8 *data, TorrentPeerMessage *dst_msg,
 
   case TorrentMessageKindRequest:
   case TorrentMessageKindCancel:
-    if (!slice_u8_consume_u32(data, &dst_msg->v.idx_begin_len.idx)) {
+    if (!slice_u8_consume_u32_be(data, &dst_msg->v.idx_begin_len.idx)) {
       return (Error){.kind = ErrKindInvalidData};
     }
-    if (!slice_u8_consume_u32(data, &dst_msg->v.idx_begin_len.begin)) {
+    if (!slice_u8_consume_u32_be(data, &dst_msg->v.idx_begin_len.begin)) {
       return (Error){.kind = ErrKindInvalidData};
     }
-    if (!slice_u8_consume_u32(data, &dst_msg->v.idx_begin_len.len)) {
+    if (!slice_u8_consume_u32_be(data, &dst_msg->v.idx_begin_len.len)) {
       return (Error){.kind = ErrKindInvalidData};
     }
 
@@ -1547,9 +1549,15 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
       return;
     }
 
-    __builtin_dump_struct(&msg, &printf);
+    if (present) {
+      __builtin_dump_struct(&msg, &printf);
+    }
 
-    torrent_peer_close(peer);
+    err = torrent_peer_read(peer, io);
+    if (ErrKindNone != err.kind) {
+      torrent_peer_close(peer);
+      return;
+    }
     return;
   } break;
   }
