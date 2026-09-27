@@ -462,6 +462,7 @@ io_platform_make(Arena *arena, const Env *env, IoBackend backend, IO **dst) {
 
   case IoBackendEpoll:
   case IoBackendIoUring:
+  case IoBackendIocp:
     return (Error){.kind = ErrKindUnsupported};
   }
 

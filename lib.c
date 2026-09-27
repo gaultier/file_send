@@ -715,6 +715,9 @@ typedef enum {
   // different `#ifdef` inside the same one.
   IoBackendEpoll,
   IoBackendIoUring,
+  // Win32. Like io_uring and unlike the other two, the kernel makes the
+  // syscall, so it is a completion port and not a readiness loop.
+  IoBackendIocp,
 } IoBackend;
 
 __attribute__((warn_unused_result)) static const char *
@@ -728,6 +731,8 @@ io_backend_to_cstr(IoBackend backend) {
     return "epoll";
   case IoBackendIoUring:
     return "io_uring";
+  case IoBackendIocp:
+    return "iocp";
   }
 
   assert(0 && "unreachable");

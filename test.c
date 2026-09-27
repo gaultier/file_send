@@ -4823,7 +4823,8 @@ static void test_error_kind_to_cstr(void) {
   };
 
   const IoBackend backends[] = {IoBackendDefault, IoBackendKqueue,
-                                IoBackendEpoll, IoBackendIoUring};
+                                IoBackendEpoll, IoBackendIoUring,
+                                IoBackendIocp};
   for (usize i = 0; i < sizeof(backends) / sizeof(backends[0]); i++) {
     const char *const got = io_backend_to_cstr(backends[i]);
     assert(got);
@@ -4841,7 +4842,7 @@ static void test_error_kind_to_cstr(void) {
     Arena arena = test_arena(256 * KiB);
     usize supported = 0;
     const IoBackend named[] = {IoBackendKqueue, IoBackendEpoll,
-                               IoBackendIoUring};
+                               IoBackendIoUring, IoBackendIocp};
 
     for (usize i = 0; i < sizeof(named) / sizeof(named[0]); i++) {
       IO *io = NULL;

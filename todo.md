@@ -13,7 +13,14 @@
       alive until the kernel is done with it.
     - pick the default at runtime, by asking the running kernel, rather than
       at build time.
-  - Win32 (IOCP) `io_platform_make`; `win32.c` is still on the old vtable
+  - Win32: `win32.c` builds and links on both targets, and every slot of both
+    vtables is null, so it faults on first use. In order: `Env`'s memory
+    (`GetSystemInfo`, `VirtualAlloc`, `VirtualProtect`), which is what `main`
+    needs before anything else; then the rest of `Env`; then IOCP for `IO`,
+    which like io_uring has the kernel make the syscall, so an overlapped
+    operation starts at submission and `GetQueuedCompletionStatusEx` collects
+    what finished. A `WITH_TESTS` build stays Unix-only until then: the fakes
+    in `test.c` call `unix_*` directly.
   - a timer operation, so `ErrKindTooManyFiles` on accept can back off instead
     of bringing the listener down
   - `accept4` with `SOCK_NONBLOCK` on Linux, and `EPOLL_CTL_ADD` without the

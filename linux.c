@@ -534,6 +534,7 @@ io_platform_make(Arena *arena, const Env *env, IoBackend backend, IO **dst) {
     return (Error){.kind = ErrKindUnsupported};
 
   case IoBackendKqueue:
+  case IoBackendIocp:
     return (Error){.kind = ErrKindUnsupported};
   }
 
