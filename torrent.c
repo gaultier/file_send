@@ -1875,10 +1875,13 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
 
       const Error err = torrent_peer_parse_message(&recv, &msg, &present);
       if (ErrKindNone != err.kind) {
+        log(peer->logger, LogLevelError, "received invalid message");
         error_print("failed to parse a peer message", err);
         torrent_peer_close(peer);
         return;
       }
+      log(peer->logger, LogLevelDebug, "received message: present=%d kind=%d",
+          present, msg.kind);
 
       // What is left is the start of a message that has not all arrived, and it
       // stays where it is until the rest of it does.
