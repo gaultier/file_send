@@ -1778,6 +1778,8 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
     // several, and a peer that sent three and then went quiet would otherwise
     // have two of them sitting unread for as long as it stayed quiet.
     for (;;) {
+      const usize recv_len_before = peer->recv_len;
+
       Slice_u8 recv = slice_u8_make(peer->recv_buf, peer->recv_len);
       TorrentPeerMessage msg = {0};
       bool present = false;
@@ -1789,15 +1791,21 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
         return;
       }
 
+      // What is left is the start of a message that has not all arrived, and it
+      // stays where it is until the rest of it does.
       if (!present) {
         break;
       }
 
       // Drop what was parsed, keeping the rest at the front of the buffer.
-      assert(recv.len <= peer->recv_len);
-      memmove(peer->recv_buf, peer->recv_buf + (peer->recv_len - recv.len),
-              recv.len);
+      const usize consumed = recv_len_before - recv.len;
+      memmove(peer->recv_buf, peer->recv_buf + consumed, recv.len);
       peer->recv_len = recv.len;
+
+      // The buffer is strictly shorter than it was, which is this loop's only way
+      // out: a pass that reported a message without taking it out of the buffer
+      // would run here for ever on the same bytes.
+      assert(peer->recv_len < recv_len_before);
 
       // TODO: act on the message.
     }
