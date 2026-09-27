@@ -18,7 +18,8 @@ __attribute__((warn_unused_result)) static Logger log_make(u32 level_mask,
                                                            Slice_u8 prefix) {
   Logger logger = {.level_mask = level_mask};
   memcpy(&logger.prefix, prefix.data,
-         prefix.len < sizeof(prefix) ? prefix.len : sizeof(prefix));
+         prefix.len < sizeof(logger.prefix) ? prefix.len
+                                            : sizeof(logger.prefix));
 
   return logger;
 }
