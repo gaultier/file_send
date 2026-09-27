@@ -1260,6 +1260,11 @@ struct TorrentNetworkCtx {
   // More...
 };
 
+// The most messages a full receive buffer can hold. A keep-alive is four bytes
+// of length and nothing behind it, and nothing on the wire is shorter, so this is
+// the bound on how many come out of one read.
+#define TORRENT_PEER_MSGS_PER_BUF_MAX (TORRENT_PEER_RECV_BUF_CAP / sizeof(u32))
+
 // The payload of a `request` or a `cancel`: three `u32`s, and nothing else is a
 // legal length for one.
 #define TORRENT_PEER_MSG_IDX_BEGIN_LEN_SIZE (1 + 3 * sizeof(u32))
@@ -1323,11 +1328,13 @@ torrent_peer_parse_message(Slice_u8 *data, TorrentPeerMessage *dst_msg,
   // claims is the peer's mistake and not a short read.
   Slice_u8 body = slice_u8_take(remaining, msg_size);
   slice_u8_advance(&remaining, msg_size);
+  assert(msg_size == body.len);
+  assert(remaining.len < data->len);
 
   u8 msg_tag = 0;
-  if (!slice_u8_consume_u8(&body, &msg_tag)) {
-    return (Error){.kind = ErrKindInvalidData};
-  }
+  // The length is at least 1 and the body is that long, so the tag is there.
+  assert(slice_u8_consume_u8(&body, &msg_tag));
+  assert(msg_size - 1 == body.len);
 
   memset(dst_msg, 0, sizeof(*dst_msg));
 
@@ -1341,6 +1348,7 @@ torrent_peer_parse_message(Slice_u8 *data, TorrentPeerMessage *dst_msg,
       return (Error){.kind = ErrKindInvalidData};
     }
     dst_msg->kind = msg_tag;
+    assert(0 == body.len);
     break;
 
   case TorrentMessageKindHave:
@@ -1349,6 +1357,7 @@ torrent_peer_parse_message(Slice_u8 *data, TorrentPeerMessage *dst_msg,
     }
     dst_msg->kind = msg_tag;
     assert(slice_u8_consume_u32_be(&body, &dst_msg->v.have));
+    assert(0 == body.len);
     break;
 
   case TorrentMessageKindBitfield:
@@ -1356,6 +1365,7 @@ torrent_peer_parse_message(Slice_u8 *data, TorrentPeerMessage *dst_msg,
     // themselves are skipped for now.
     // TODO: keep them.
     dst_msg->kind = msg_tag;
+    assert(msg_size - 1 == body.len);
     break;
 
   case TorrentMessageKindRequest:
@@ -1367,6 +1377,7 @@ torrent_peer_parse_message(Slice_u8 *data, TorrentPeerMessage *dst_msg,
     assert(slice_u8_consume_u32_be(&body, &dst_msg->v.idx_begin_len.idx));
     assert(slice_u8_consume_u32_be(&body, &dst_msg->v.idx_begin_len.begin));
     assert(slice_u8_consume_u32_be(&body, &dst_msg->v.idx_begin_len.len));
+    assert(0 == body.len);
     break;
 
   case TorrentMessageKindPiece:
@@ -1378,6 +1389,10 @@ torrent_peer_parse_message(Slice_u8 *data, TorrentPeerMessage *dst_msg,
     dst_msg->kind = msg_tag;
     assert(slice_u8_consume_u32_be(&body, &dst_msg->v.piece.idx));
     assert(slice_u8_consume_u32_be(&body, &dst_msg->v.piece.begin));
+    // What is left is the block, which is why a `piece` with nothing left is
+    // refused above.
+    assert(body.len > 0);
+    assert(msg_size - TORRENT_PEER_MSG_PIECE_HEADER_SIZE == body.len);
     // TODO: keep the block.
     break;
 
@@ -1387,8 +1402,14 @@ torrent_peer_parse_message(Slice_u8 *data, TorrentPeerMessage *dst_msg,
     return (Error){.kind = ErrKindInvalidData};
   }
 
+  // Every path out of the switch either set a kind or reported an error.
+  assert(msg_tag == (u8)dst_msg->kind);
+
   *present = true;
   *data = remaining;
+  // A message was taken, so the caller's slice is strictly shorter: that is what
+  // keeps the loop that calls this from running for ever.
+  assert(data->len < remaining.len + msg_size + sizeof(msg_size));
 
   return (Error){.kind = ErrKindNone};
 }
