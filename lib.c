@@ -252,24 +252,31 @@ slice_u8_contains_byte(Slice_u8 s, u8 byte) {
   return NULL != memchr(s.data, byte, s.len);
 }
 
+__attribute__((warn_unused_result)) static bool slice_u8_eq(Slice_u8 a,
+                                                            Slice_u8 b) {
+  if (a.len != b.len) {
+    return false;
+  }
+  if (0 == a.len) {
+    assert(0 == b.len);
+    return true;
+  }
+
+  assert(a.data);
+  assert(a.len > 0);
+  assert(b.data > 0);
+  assert(b.len > 0);
+  assert(a.len == b.len);
+
+  return 0 == memcmp(a.data, b.data, a.len);
+}
+
 __attribute__((warn_unused_result)) static bool
 slice_u8_eq_cstr(Slice_u8 s, const char *cstr) {
   if (!cstr) {
     return slice_u8_is_empty(s);
   }
-
-  const usize cstr_len = strlen(cstr);
-
-  if (cstr_len != s.len) {
-    return false;
-  }
-
-  assert(s.data);
-  assert(s.len > 0);
-  assert(cstr_len > 0);
-  assert(cstr_len == s.len);
-
-  return 0 == memcmp(s.data, cstr, s.len);
+  return slice_u8_eq(s, slice_u8_from_cstr(cstr));
 }
 
 // Peek at the first byte of `slice`, leaving it in place.
@@ -313,6 +320,17 @@ slice_u8_take(Slice_u8 input, usize count) {
   assert(count <= input.len);
 
   return (Slice_u8){.data = input.data, .len = count};
+}
+
+__attribute__((warn_unused_result)) static bool
+slice_u8_starts_with(Slice_u8 s, Slice_u8 prefix) {
+  if (s.len < prefix.len) {
+    return false;
+  }
+
+  return slice_u8_eq(prefix, slice_u8_take(s, prefix.len));
+
+  return true;
 }
 
 __attribute__((warn_unused_result)) static Slice_u8 slice_u8_make(u8 *data,
@@ -658,10 +676,10 @@ struct IoCompletion {
 
 // Every slot here submits an operation and returns at once, without making the
 // syscall: that happens on the next turn of the loop. An `Error` from a slot
-// means the operation was never submitted and its callback will never run -- the
-// only reason for one is that the implementation has no room left to take the
-// operation, which is backpressure and not a failure of the operation. Anything
-// the operation itself has to report reaches the callback.
+// means the operation was never submitted and its callback will never run --
+// the only reason for one is that the implementation has no room left to take
+// the operation, which is backpressure and not a failure of the operation.
+// Anything the operation itself has to report reaches the callback.
 //
 // libuv makes the write syscall in `uv_write` itself and only waits for
 // writability if that answers `EAGAIN`, while leaving a read to wait
@@ -677,9 +695,9 @@ struct IoCompletion {
 //   - For a read it would be worse, not better: attempting at submission leaves
 //     less time for data to arrive than attempting a turn later does.
 //   - The callback has to stay deferred either way -- libuv defers it too, via
-//     `write_completed_queue` -- so an operation the slot completed itself needs
-//     its answer kept until the loop delivers it, which is three more fields on
-//     every completion.
+//     `write_completed_queue` -- so an operation the slot completed itself
+//     needs its answer kept until the loop delivers it, which is three more
+//     fields on every completion.
 //   - And it is only safe while nothing else is pending on that descriptor, or
 //     the stream reorders. libuv guards on `empty_queue` for exactly that.
 //
@@ -724,9 +742,9 @@ struct IO {
 };
 
 // Which multiplexer an `IO` is built on. A platform may have more than one, and
-// they are not interchangeable in what they cost or in what they can do, only in
-// what they promise: whichever one a caller picks, the `IO` above it behaves the
-// same.
+// they are not interchangeable in what they cost or in what they can do, only
+// in what they promise: whichever one a caller picks, the `IO` above it behaves
+// the same.
 typedef enum {
   // Whatever the platform's own answer is. The only thing a caller with no
   // reason to prefer one should ask for.
@@ -765,8 +783,8 @@ io_backend_to_cstr(IoBackend backend) {
 
 // On success `*dst` is the implementation, allocated out of `arena` and holding
 // on to `env`, so both have to outlive it. A `backend` this platform was not
-// built with is `ErrKindUnsupported`, which is the whole of what a caller has to
-// handle to ask for one.
+// built with is `ErrKindUnsupported`, which is the whole of what a caller has
+// to handle to ask for one.
 //
 // Allocated, and not a value handed back the way an `Env` is, because an `IO`
 // is an object and not just a vtable: the Darwin one owns a kqueue and the list
@@ -787,9 +805,8 @@ io_platform_make(Arena *arena, const Env *env, IoBackend backend, IO **dst);
 // `main`. The startup path has nothing to do until the file it was pointed at
 // is mapped, and a test checking what one syscall reports has nothing to do
 // either.
-__attribute__((warn_unused_result)) static Error io_run_until(IO *io,
-                                                             const bool *done,
-                                                             usize tick_ns) {
+__attribute__((warn_unused_result)) static Error
+io_run_until(IO *io, const bool *done, usize tick_ns) {
   assert(io);
   assert(done);
   assert(tick_ns > 0);
@@ -842,7 +859,7 @@ static void io_once_init(IoOnce *once) {
 // rather than what the waiting itself did: a caller that cannot turn the loop
 // has bigger trouble than the operation, and gets that error instead.
 __attribute__((warn_unused_result)) static Error io_once_wait(IO *io,
-                                                             IoOnce *once) {
+                                                              IoOnce *once) {
   assert(io);
   assert(once);
 
@@ -898,8 +915,8 @@ static void io_map_file_close(IoMapFile *ctx) {
   assert(ctx->io);
   assert(ctx->fd >= 0);
 
-  const Error err = ctx->io->close(ctx->io, &ctx->completion, ctx->fd,
-                                   io_map_file_on_close);
+  const Error err =
+      ctx->io->close(ctx->io, &ctx->completion, ctx->fd, io_map_file_on_close);
   if (ErrKindNone != err.kind) {
     // The close was never submitted, so nothing else is going to finish this.
     // The descriptor is leaked, which is the lesser of the two problems.
@@ -1185,16 +1202,14 @@ typedef struct {
   bool done;
 } IoServer;
 
-static void io_server_on_accept(IoCompletion *completion, Error err,
-                                usize res);
+static void io_server_on_accept(IoCompletion *completion, Error err, usize res);
 
 // Wait for the next connection. The listener holds exactly one accept at a
 // time: a second would be a second completion, and one connection arriving at
 // a time is all a single thread can do anything with.
 static void io_server_arm(IoServer *server);
 
-static void io_server_on_close(IoCompletion *completion, Error err,
-                               usize res) {
+static void io_server_on_close(IoCompletion *completion, Error err, usize res) {
   assert(completion);
   (void)err;
   (void)res;
@@ -1230,9 +1245,9 @@ static void io_server_arm(IoServer *server) {
   assert(server);
   assert(server->io);
 
-  const Error err = server->io->accept(server->io, &server->completion,
-                                       server->listen_socket,
-                                       io_server_on_accept);
+  const Error err =
+      server->io->accept(server->io, &server->completion, server->listen_socket,
+                         io_server_on_accept);
   if (ErrKindNone != err.kind) {
     io_server_shutdown(server, err);
   }
@@ -1293,15 +1308,13 @@ io_listen_and_serve_tcp_ipv4(IO *io, IoServer *server, void *cb_ctx,
 
   const Env *const env = io->env;
 
-  *server = (IoServer){.io = io,
-                       .cb_ctx = cb_ctx,
-                       .on_accept = on_accept,
-                       .listen_socket = -1};
+  *server = (IoServer){
+      .io = io, .cb_ctx = cb_ctx, .on_accept = on_accept, .listen_socket = -1};
   server->completion.ctx = server;
 
   {
-    const Error err =
-        env->socket(env, SocketDomainIpv4, SocketTypeTcp, &server->listen_socket);
+    const Error err = env->socket(env, SocketDomainIpv4, SocketTypeTcp,
+                                  &server->listen_socket);
     if (ErrKindNone != err.kind) {
       // No socket, so nothing to hand back and nothing to wait for.
       server->err = err;
@@ -1322,7 +1335,8 @@ io_listen_and_serve_tcp_ipv4(IO *io, IoServer *server, void *cb_ctx,
   {
     // A port left behind by a previous run is an ordinary answer, not a bug in
     // this process, so it travels back as an `Error`.
-    const Error err = env->tcp_bind_ipv4(env, server->listen_socket, listen_addr);
+    const Error err =
+        env->tcp_bind_ipv4(env, server->listen_socket, listen_addr);
     if (ErrKindNone != err.kind) {
       io_server_shutdown(server, err);
       return err;

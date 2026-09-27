@@ -1139,6 +1139,19 @@ torrent_gen_torrent_file_data(Slice_u8 file_path, Slice_u8 file_data,
   return (Error){.kind = ErrKindNone};
 }
 
+typedef enum {
+  Choke,
+  Unchoke,
+  Interested,
+  Uninterested,
+  Bitfield,
+  Have,
+  Request,
+  Piece,
+  Cancel,
+  // TODO: v2 adds more.
+} TorrentMsgKind;
+
 typedef struct TorrentNetworkCtx TorrentNetworkCtx;
 
 // How much of a peer's message is taken in at a time. Part of the slot rather
@@ -1348,8 +1361,8 @@ torrent_client_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
   client_ctx->network_ctx = network_ctx;
   client_ctx->completion.ctx = client_ctx;
 
-  const Slice_u8 dst = slice_u8_make(client_ctx->recv_buf,
-                                     sizeof(client_ctx->recv_buf));
+  const Slice_u8 dst =
+      slice_u8_make(client_ctx->recv_buf, sizeof(client_ctx->recv_buf));
   const Error err = io->read(io, &client_ctx->completion, client_ctx->socket,
                              dst, torrent_client_on_read);
   if (ErrKindNone != err.kind) {
@@ -1448,4 +1461,39 @@ torrent_validate_info_dict(BencodeValue info_dict) {
   }
 
   return (Error){.kind = ErrKindNone};
+}
+
+__attribute__((warn_unused_result)) static bool
+torrent_check_handshake(Slice_u8 data, Slice_u8 info_hash_expected,
+                        Slice_u8 *peer_id) {
+  assert(20 == info_hash_expected.len);
+  assert(peer_id);
+
+  const usize handshake_header_len = 19 + 8 + 20 + 20;
+
+  if (handshake_header_len != data.len) {
+    return false;
+  }
+
+  const Slice_u8 handshake_header_expected =
+      slice_u8_from_cstr("\x13"
+                         "BitTorrent protocol");
+  if (!slice_u8_starts_with(data, handshake_header_expected)) {
+    return false;
+  }
+  slice_u8_advance(&data, handshake_header_expected.len);
+
+  // 8 reserved bytes.
+  slice_u8_advance(&data, 8);
+
+  const Slice_u8 info_hash_actual = slice_u8_take(data, 20);
+  if (!slice_u8_eq(info_hash_expected, info_hash_actual)) {
+    return false;
+  }
+  slice_u8_advance(&data, 20);
+
+  *peer_id = slice_u8_take(data, 20);
+  assert(20 == peer_id->len);
+
+  return true;
 }
