@@ -67,29 +67,6 @@ typedef struct {
   usize in_flight;
 } IoDarwin;
 
-// Can this operation answer `ErrKindAgain`, and so be worth waiting on? An
-// operation on a file answers or fails, and kqueue has nothing to say about it.
-__attribute__((warn_unused_result)) static bool
-darwin_action_can_wait(IoActionKind kind) {
-  switch (kind) {
-  case IoActionKindRead:
-  case IoActionKindWrite:
-  case IoActionKindAccept:
-  case IoActionKindConnect:
-  case IoActionKindSendTo:
-    return true;
-
-  case IoActionKindNone:
-  case IoActionKindOpen:
-  case IoActionKindClose:
-  case IoActionKindFileSize:
-  case IoActionKindRemoveFile:
-    return false;
-  }
-
-  assert(0 && "unreachable");
-  return false;
-}
 
 // Append one change. The only way anything reaches the kernel, so it is also
 // the one place the count of what is in flight goes up.
@@ -147,7 +124,7 @@ darwin_arm(IoDarwin *io_darwin, IoCompletion *completion, i32 fd) {
   assert(io_darwin);
   assert(completion);
   assert(fd >= 0);
-  assert(darwin_action_can_wait(completion->action.kind));
+  assert(unix_io_action_can_wait(completion->action.kind));
 
   i16 filter = 0;
   switch (completion->action.kind) {
@@ -193,83 +170,6 @@ darwin_event_fd(const struct kevent *event) {
   return (i32)event->ident;
 }
 
-// Try the operation once. Whatever it answers is the answer, `ErrKindAgain`
-// included: it is the caller above that turns that one into a wait.
-__attribute__((warn_unused_result)) static Error
-darwin_perform(IoCompletion *completion, i32 fd, usize *dst_res) {
-  assert(completion);
-  assert(dst_res);
-
-  Error err = {.kind = ErrKindNone};
-  usize res = 0;
-
-  switch (completion->action.kind) {
-  // The one operation with no descriptor to act on: it produces one, which is
-  // what it reports.
-  case IoActionKindOpen: {
-    assert(-1 == fd);
-    i32 opened = -1;
-    err = unix_open(completion->action.v.open.path,
-                    completion->action.v.open.options, &opened);
-    if (ErrKindNone == err.kind) {
-      assert(opened >= 0);
-      res = (usize)(u32)opened;
-    }
-  } break;
-
-  case IoActionKindClose:
-    err = unix_close(fd);
-    break;
-
-  case IoActionKindRead:
-    err = unix_read(fd, completion->action.v.read.data, &res);
-    break;
-
-  case IoActionKindWrite:
-    err = unix_write(fd, completion->action.v.write.data, &res);
-    break;
-
-  // `fd` is the listener; what it reports is the connection.
-  case IoActionKindAccept: {
-    i32 accepted = -1;
-    err = unix_accept(fd, &accepted, &completion->action.v.accept.addr);
-    if (ErrKindNone == err.kind) {
-      assert(accepted >= 0);
-      res = (usize)(u32)accepted;
-    }
-  } break;
-
-  case IoActionKindConnect:
-    err = unix_connect(fd, completion->action.v.connect.addr);
-    break;
-
-  case IoActionKindSendTo:
-    err =
-        unix_udp_send_to_ipv4(fd, completion->action.v.send_to.addr,
-                              completion->action.v.send_to.data, &res);
-    break;
-
-  case IoActionKindFileSize:
-    err = unix_file_size(fd, &res);
-    break;
-
-  // Works on a name, so it has no descriptor either.
-  case IoActionKindRemoveFile:
-    assert(-1 == fd);
-    err = unix_remove_file(completion->action.v.remove_file.path);
-    break;
-
-  // A completion reported without an action is this code having got a slot
-  // wrong, not anything the operating system could have said.
-  case IoActionKindNone:
-    assert(0 && "unreachable");
-    break;
-  }
-
-  *dst_res = res;
-
-  return err;
-}
 
 // One report from the kernel: try the operation, and either run its callback or
 // ask to be told when to try again. The only place a callback is ever called
@@ -283,10 +183,10 @@ static void darwin_advance(IoDarwin *io_darwin, IoCompletion *completion,
   assert(completion->cb);
 
   usize res = 0;
-  Error err = darwin_perform(completion, fd, &res);
+  Error err = unix_io_perform(completion, fd, &res);
 
   if (ErrKindAgain == err.kind &&
-      darwin_action_can_wait(completion->action.kind)) {
+      unix_io_action_can_wait(completion->action.kind)) {
     const Error err_arm = darwin_arm(io_darwin, completion, fd);
     if (ErrKindNone == err_arm.kind) {
       return;
@@ -507,7 +407,7 @@ darwin_remove_file(IO *io, IoCompletion *completion, Slice_u8 path,
 }
 
 __attribute__((warn_unused_result)) static Error
-io_platform_make(Arena *arena, const Env *env, IO **dst) {
+darwin_io_kqueue_make(Arena *arena, const Env *env, IO **dst) {
   assert(arena);
   assert(env);
   assert(dst);
@@ -544,4 +444,27 @@ io_platform_make(Arena *arena, const Env *env, IO **dst) {
   *dst = &io->io;
 
   return (Error){.kind = ErrKindNone};
+}
+
+// Darwin has the one backend, so the choice is between asking for it and asking
+// for it by name. A Linux backend named here would be a lie, and a caller that
+// asked for one gets told so rather than silently getting kqueue.
+__attribute__((warn_unused_result)) static Error
+io_platform_make(Arena *arena, const Env *env, IoBackend backend, IO **dst) {
+  assert(arena);
+  assert(env);
+  assert(dst);
+
+  switch (backend) {
+  case IoBackendDefault:
+  case IoBackendKqueue:
+    return darwin_io_kqueue_make(arena, env, dst);
+
+  case IoBackendEpoll:
+  case IoBackendIoUring:
+    return (Error){.kind = ErrKindUnsupported};
+  }
+
+  assert(0 && "unreachable");
+  return (Error){.kind = ErrKindUnsupported};
 }

@@ -15,6 +15,10 @@
 #define PLATFORM_DARWIN
 #endif
 
+#if defined(__linux__)
+#define PLATFORM_LINUX
+#endif
+
 #if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
 #define PLATFORM_UNIX 1
 #elif defined(_WIN32)
@@ -58,6 +62,10 @@ typedef enum {
   // No route to the destination. On macOS this is also how a denied Local
   // Network privacy grant surfaces, so it is not always a routing problem.
   ErrKindHostUnreachable,
+  // The thing asked for is not something this build can do: an `IO` backend the
+  // platform does not have, say. Not a failure at runtime so much as a question
+  // that has no answer here.
+  ErrKindUnsupported,
 } ErrorKind;
 
 typedef struct {
@@ -94,6 +102,8 @@ error_kind_to_cstr(ErrorKind kind) {
     return "too many open files";
   case ErrKindHostUnreachable:
     return "host unreachable";
+  case ErrKindUnsupported:
+    return "unsupported";
   }
 
   assert(0 && "unreachable");
@@ -689,8 +699,45 @@ struct IO {
                        IoCallback cb);
 };
 
+// Which multiplexer an `IO` is built on. A platform may have more than one, and
+// they are not interchangeable in what they cost or in what they can do, only in
+// what they promise: whichever one a caller picks, the `IO` above it behaves the
+// same.
+typedef enum {
+  // Whatever the platform's own answer is. The only thing a caller with no
+  // reason to prefer one should ask for.
+  IoBackendDefault,
+  // Darwin.
+  IoBackendKqueue,
+  // Linux. `IoBackendEpoll` is readiness, like kqueue: it says a descriptor is
+  // ready and this process makes the syscall. `IoBackendIoUring` is not -- the
+  // kernel makes the syscall -- so it is a different implementation and not a
+  // different `#ifdef` inside the same one.
+  IoBackendEpoll,
+  IoBackendIoUring,
+} IoBackend;
+
+__attribute__((warn_unused_result)) static const char *
+io_backend_to_cstr(IoBackend backend) {
+  switch (backend) {
+  case IoBackendDefault:
+    return "default";
+  case IoBackendKqueue:
+    return "kqueue";
+  case IoBackendEpoll:
+    return "epoll";
+  case IoBackendIoUring:
+    return "io_uring";
+  }
+
+  assert(0 && "unreachable");
+  return "?";
+}
+
 // On success `*dst` is the implementation, allocated out of `arena` and holding
-// on to `env`, so both have to outlive it.
+// on to `env`, so both have to outlive it. A `backend` this platform was not
+// built with is `ErrKindUnsupported`, which is the whole of what a caller has to
+// handle to ask for one.
 //
 // Allocated, and not a value handed back the way an `Env` is, because an `IO`
 // is an object and not just a vtable: the Darwin one owns a kqueue and the list
@@ -702,7 +749,7 @@ struct IO {
 // pointer to a `static` would not do here, because two of these must not share
 // a kqueue.
 __attribute__((warn_unused_result)) static Error
-io_platform_make(Arena *arena, const Env *env, IO **dst);
+io_platform_make(Arena *arena, const Env *env, IoBackend backend, IO **dst);
 
 // ---------- IO: waiting for one thing ----------
 

@@ -4,6 +4,10 @@
 #include "darwin.c"
 #endif
 
+#ifdef PLATFORM_LINUX
+#include "linux.c"
+#endif
+
 #ifdef PLATFORM_WIN32
 #include "win32.c"
 #endif
@@ -27,9 +31,30 @@ int main(i32 argc, char *argv[]) {
   Arena scratch = {0};
   assert(ErrKindNone == arena_valloc(env, 1 * MiB, &scratch).kind);
 
+  // `FILE_SEND_IO_BACKEND` names one, for comparing them on a platform that has
+  // more than one; unset asks the platform for whichever it prefers, which is
+  // what anything but a measurement should be doing.
+  IoBackend backend = IoBackendDefault;
+  {
+    const char *const requested = getenv("FILE_SEND_IO_BACKEND");
+    if (requested) {
+      if (0 == strcmp(requested, "kqueue")) {
+        backend = IoBackendKqueue;
+      } else if (0 == strcmp(requested, "epoll")) {
+        backend = IoBackendEpoll;
+      } else if (0 == strcmp(requested, "io_uring")) {
+        backend = IoBackendIoUring;
+      } else {
+        fprintf(stderr, "unknown IO backend: %s\n", requested);
+        return 1;
+      }
+    }
+  }
+
   IO *io = NULL;
-  Error err = io_platform_make(&arena, env, &io);
+  Error err = io_platform_make(&arena, env, backend, &io);
   if (ErrKindNone != err.kind) {
+    fprintf(stderr, "IO backend: %s\n", io_backend_to_cstr(backend));
     error_print("failed to create the IO implementation for the platform", err);
     return 1;
   }

@@ -4490,7 +4490,9 @@ __attribute__((warn_unused_result)) static IO *test_io_real(Arena *arena) {
   assert(arena);
 
   IO *io = NULL;
-  assert(ErrKindNone == io_platform_make(arena, env_platform_make(), &io).kind);
+  assert(ErrKindNone ==
+         io_platform_make(arena, env_platform_make(), IoBackendDefault, &io)
+             .kind);
   assert(io);
 
   return io;
@@ -4817,7 +4819,43 @@ static void test_error_kind_to_cstr(void) {
       ErrKindConnReset,
       ErrKindTooManyFiles,
       ErrKindHostUnreachable,
+      ErrKindUnsupported,
   };
+
+  const IoBackend backends[] = {IoBackendDefault, IoBackendKqueue,
+                                IoBackendEpoll, IoBackendIoUring};
+  for (usize i = 0; i < sizeof(backends) / sizeof(backends[0]); i++) {
+    const char *const got = io_backend_to_cstr(backends[i]);
+    assert(got);
+    assert(strlen(got) > 0);
+
+    for (usize j = 0; j < i; j++) {
+      assert(0 != strcmp(got, io_backend_to_cstr(backends[j])));
+    }
+  }
+
+  // Exactly one backend is the platform's, and every other one is refused
+  // rather than quietly standing in for it. Which one is which is the
+  // platform's business, so this only counts.
+  {
+    Arena arena = test_arena(256 * KiB);
+    usize supported = 0;
+    const IoBackend named[] = {IoBackendKqueue, IoBackendEpoll,
+                               IoBackendIoUring};
+
+    for (usize i = 0; i < sizeof(named) / sizeof(named[0]); i++) {
+      IO *io = NULL;
+      const Error err =
+          io_platform_make(&arena, env_platform_make(), named[i], &io);
+      if (ErrKindNone == err.kind) {
+        assert(io);
+        supported += 1;
+      } else {
+        assert(ErrKindUnsupported == err.kind);
+      }
+    }
+    assert(1 == supported);
+  }
 
   // `slice_u8_from_cstr` only ever runs on these in anger, so it rides along
   // here rather than earning a test of its own.
