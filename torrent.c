@@ -45,12 +45,12 @@ bencode_parse_num(Slice_u8 *input, BencodeValue *res) {
 
   Slice_u8 remaining = *input;
 
-  if (ErrKindNone != slice_u8_consume(&remaining, 'i').kind) {
+  if (ErrKindNone != slice_u8_expect_u8(&remaining, 'i').kind) {
     return (Error){.kind = ErrKindInvalidData};
   }
 
   const bool negative_sign =
-      ErrKindNone == slice_u8_consume(&remaining, '-').kind;
+      ErrKindNone == slice_u8_expect_u8(&remaining, '-').kind;
 
   // Also rejects `ie` and `i-e`: a number needs at least one digit. A run of
   // digits too wide for a `usize` comes back as `ErrRange`, which is passed
@@ -76,7 +76,7 @@ bencode_parse_num(Slice_u8 *input, BencodeValue *res) {
     }
   }
 
-  if (ErrKindNone != slice_u8_consume(&remaining, 'e').kind) {
+  if (ErrKindNone != slice_u8_expect_u8(&remaining, 'e').kind) {
     return (Error){.kind = ErrKindInvalidData};
   }
 
@@ -107,7 +107,7 @@ bencode_parse_string(Slice_u8 *input, BencodeValue *res) {
     }
   }
 
-  if (ErrKindNone != slice_u8_consume(&remaining, ':').kind) {
+  if (ErrKindNone != slice_u8_expect_u8(&remaining, ':').kind) {
     return (Error){.kind = ErrKindInvalidData};
   }
 
@@ -1234,7 +1234,7 @@ struct TorrentNetworkCtx {
 };
 
 __attribute__((warn_unused_result)) static Error
-torrent_parse_peer_message(Slice_u8 *data, TorrentPeerMessage *dst_msg,
+torrent_peer_parse_message(Slice_u8 *data, TorrentPeerMessage *dst_msg,
                            bool *present) {
   assert(data);
   assert(data->data);
@@ -1252,7 +1252,49 @@ torrent_parse_peer_message(Slice_u8 *data, TorrentPeerMessage *dst_msg,
     return (Error){.kind = ErrKindNone};
   }
 
-  return (Error){.kind = ErrKindNone};
+  msg_size = ntohl(msg_size);
+
+  u8 msg_tag = 0;
+  if (!slice_u8_consume_u8(data, &msg_tag)) {
+    return (Error){.kind = ErrKindInvalidData};
+  }
+
+  memcpy(dst_msg, 0, sizeof(*dst_msg));
+
+  switch (msg_tag) {
+  case TorrentMessageKindChoke:
+  case TorrentMessageKindUnchoke:
+  case TorrentMessageKindInterested:
+  case TorrentMessageKindUninterested:
+    dst_msg->kind = msg_tag;
+    return (Error){.kind = ErrKindNone};
+
+  case TorrentMessageKindHave:
+    if (!slice_u8_consume_u32(data, &dst_msg->v.have)) {
+      return (Error){.kind = ErrKindInvalidData};
+    }
+
+    return (Error){.kind = ErrKindNone};
+
+  case TorrentMessageKindRequest:
+  case TorrentMessageKindCancel:
+    if (!slice_u8_consume_u32(data, &dst_msg->v.idx_begin_len.idx)) {
+      return (Error){.kind = ErrKindInvalidData};
+    }
+    if (!slice_u8_consume_u32(data, &dst_msg->v.idx_begin_len.begin)) {
+      return (Error){.kind = ErrKindInvalidData};
+    }
+    if (!slice_u8_consume_u32(data, &dst_msg->v.idx_begin_len.len)) {
+      return (Error){.kind = ErrKindInvalidData};
+    }
+
+    return (Error){.kind = ErrKindNone};
+
+    // TODO: v2 messages;
+
+  default:
+    return (Error){.kind = ErrKindInvalidData};
+  }
 }
 
 __attribute__((warn_unused_result)) static TorrentPeer *
@@ -1495,7 +1537,18 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
     // instead of waiting for a read it may not need.
     __attribute__((fallthrough));
   case TorrentPeerStateHandshaked: {
-    // TODO
+    Slice_u8 recv = slice_u8_make(peer->recv_buf, peer->recv_len);
+    TorrentPeerMessage msg = {0};
+    bool present = false;
+    Error err = torrent_peer_parse_message(&recv, &msg, &present);
+
+    if (ErrKindNone != err.kind) {
+      torrent_peer_close(peer);
+      return;
+    }
+
+    __builtin_dump_struct(&msg, &printf);
+
     torrent_peer_close(peer);
     return;
   } break;
