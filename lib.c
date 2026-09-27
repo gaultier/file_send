@@ -262,6 +262,21 @@ slice_u8_eq_cstr(Slice_u8 s, const char *cstr) {
   return 0 == memcmp(s.data, cstr, s.len);
 }
 
+__attribute__((warn_unused_result)) static Error
+slice_u8_alloc(Arena *arena, Slice_u8 *dst, usize len) {
+  assert(arena);
+  assert(dst);
+
+  dst->data = arena_alloc(arena, __alignof__(u8), sizeof(u8), len);
+  if (!dst->data) {
+    return (Error){.kind = ErrKindOOM};
+  }
+
+  dst->len = len;
+
+  return (Error){.kind = ErrKindNone};
+}
+
 // Peek at the first byte of `slice`, leaving it in place.
 // Returns `ErrInvalidData`, and does not touch `*res`, if there is no first
 // byte.
@@ -547,36 +562,36 @@ struct IoCompletion {
 struct IO {
   const Env *env;
 
-  Error (*socket)(const IO *io, SocketDomain domain, SocketType type, i32 *fd);
-  Error (*listen)(const IO *io, i32 fd, i32 backlog);
-  Error (*open)(const IO *io, Slice_u8 path, FileOpenOptions options, i32 *fd);
-  Error (*tcp_bind_ipv4)(const IO *io, i32 listen_socket, Ipv4Addr addr);
-  Error (*accept)(const IO *io, i32 listen_socket, i32 *dst_accept_socket,
+  Error (*run_for_ns)(IO *io, usize ns);
+  Error (*socket)(IO *io, SocketDomain domain, SocketType type, i32 *fd);
+  Error (*listen)(IO *io, i32 fd, i32 backlog);
+  Error (*open)(IO *io, Slice_u8 path, FileOpenOptions options, i32 *fd);
+  Error (*tcp_bind_ipv4)(IO *io, i32 listen_socket, Ipv4Addr addr);
+  Error (*accept)(IO *io, i32 listen_socket, i32 *dst_accept_socket,
                   Ipv4Addr *dst_accept_addr);
-  Error (*thread_create)(const IO *io, ThreadCallback cb, void *data);
-  Error (*close)(const IO *io, i32 fd);
-  Error (*enable_socket_reuse)(const IO *io, i32 fd);
-  Error (*udp_multicast_open_ipv4)(const IO *io, u32 ipv4, i32 *dst_fd);
-  Error (*udp_send_to_ipv4)(const IO *io, i32 fd, Ipv4Addr addr, Slice_u8 msg,
+  Error (*thread_create)(IO *io, ThreadCallback cb, void *data);
+  Error (*close)(IO *io, i32 fd);
+  Error (*enable_socket_reuse)(IO *io, i32 fd);
+  Error (*udp_multicast_open_ipv4)(IO *io, u32 ipv4, i32 *dst_fd);
+  Error (*udp_send_to_ipv4)(IO *io, i32 fd, Ipv4Addr addr, Slice_u8 msg,
                             usize *dst_sent);
   Error (*read)(IO *io, IoCompletion *completion, i32 fd, Slice_u8 data,
                 IoCallback cb);
-  Error (*write)(const IO *io, i32 fd, Slice_u8 data, usize *dst_written);
-  Error (*file_size)(const IO *io, i32 fd, usize *dst_size);
-  Error (*map_file)(const IO *io, Slice_u8 path, FileOpenOptions opts,
-                    Slice_u8 *dst);
-  Error (*write_all_to_file)(const IO *io, Slice_u8 path, Slice_u8 data);
-  Error (*remove_file)(const IO *io, Slice_u8 path);
+  Error (*write)(IO *io, i32 fd, Slice_u8 data, usize *dst_written);
+  Error (*file_size)(IO *io, i32 fd, usize *dst_size);
+  Error (*map_file)(IO *io, Slice_u8 path, FileOpenOptions opts, Slice_u8 *dst);
+  Error (*write_all_to_file)(IO *io, Slice_u8 path, Slice_u8 data);
+  Error (*remove_file)(IO *io, Slice_u8 path);
 
-  Error (*stdout_silence)(const IO *io, i32 *dst_saved);
-  Error (*stdout_restore)(const IO *io, i32 saved);
+  Error (*stdout_silence)(IO *io, i32 *dst_saved);
+  Error (*stdout_restore)(IO *io, i32 saved);
 };
 
-typedef Error (*AcceptCallback)(const IO *io, void *cb_ctx,
-                                Ipv4Addr accept_addr, i32 accept_socket);
+typedef Error (*AcceptCallback)(IO *io, void *cb_ctx, Ipv4Addr accept_addr,
+                                i32 accept_socket);
 
 __attribute__((warn_unused_result)) static Error
-io_listen_and_serve_tcp_ipv4(const IO *io, void *cb_ctx, Ipv4Addr listen_addr,
+io_listen_and_serve_tcp_ipv4(IO *io, void *cb_ctx, Ipv4Addr listen_addr,
                              AcceptCallback on_accept) {
   assert(io);
   assert(on_accept);
@@ -588,7 +603,6 @@ io_listen_and_serve_tcp_ipv4(const IO *io, void *cb_ctx, Ipv4Addr listen_addr,
     if (ErrKindNone != err_socket.kind) {
       return err_socket;
     }
-    puts("opened socket");
   }
   {
     const Error err_reuse = io->enable_socket_reuse(io, listen_socket);
@@ -607,7 +621,6 @@ io_listen_and_serve_tcp_ipv4(const IO *io, void *cb_ctx, Ipv4Addr listen_addr,
       (void)io->close(io, listen_socket);
       return err_bind;
     }
-    puts("socket bound");
   }
 
   {
@@ -616,7 +629,6 @@ io_listen_and_serve_tcp_ipv4(const IO *io, void *cb_ctx, Ipv4Addr listen_addr,
       (void)io->close(io, listen_socket);
       return err_listen;
     }
-    puts("socket listening");
   }
 
   for (;;) {

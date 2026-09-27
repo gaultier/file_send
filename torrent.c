@@ -1145,7 +1145,7 @@ typedef struct {
   // The caller's, passed through `io_listen_and_serve_tcp_ipv4`. The vtable's
   // own context lives in `io->ctx`.
   void *cb_ctx;
-  const IO *io;
+  IO *io;
   TorrentNetworkCtx *network_ctx;
   i32 socket;
   Ipv4Addr addr;
@@ -1246,28 +1246,50 @@ static void torrent_client_ctx_pool_release(TorrentClientHandleCtxPool *pool,
   assert(0 != (prev & ~mask));
 }
 
+static void on_read(IoCompletion *completion, Error err, usize res) {
+  assert(completion);
+
+  printf("on_read: err=%d res=%zu\n", err.kind, res);
+
+  if (ErrKindNone != err.kind) {
+    return;
+  }
+
+  assert(completion->ctx);
+  Slice_u8 *data = completion->ctx;
+  assert(data);
+  assert(data->data);
+  assert(res <= data->len);
+
+  fwrite(data->data, sizeof(u8), res, stdout);
+}
+
 static void *torrent_client_handle(void *vctx) {
   assert(vctx);
 
   TorrentClientHandleCtx *const client_ctx = vctx;
   assert(client_ctx->io);
 
+  IO *const io = client_ctx->io;
+
   const u32 ip = client_ctx->addr.ip;
   printf("accepted: %u.%u.%u.%u:%hu\n", ip >> 24 & 0xff, ip >> 16 & 0xff,
          ip >> 8 & 0xff, ip >> 0 & 0xff, client_ctx->addr.port);
 
-  // usize read_count = 0;
-  // u8 buf[4096] = {0};
-  // Slice_u8 slice_read = slice_u8_make(buf, sizeof(buf));
-  //
-  // Error err = client_ctx->io->read(client_ctx->io, client_ctx->socket,
-  //                                  slice_read, &read_count);
-  // if (ErrKindNone != err.kind) {
-  //   goto end;
-  // }
-  //
-  // const Slice_u8 slice_read_actual = slice_u8_take(slice_read, read_count);
-  // printf("read: %.*s\n", (i32)slice_read_actual.len, slice_read_actual.data);
+  // --- FIXME ---
+  Arena arena = {0};
+  assert(ErrKindNone == arena_valloc(io->env, 1 * KiB, &arena).kind);
+  Slice_u8 dst = {0};
+  Error err = slice_u8_alloc(&arena, &dst, 128);
+  assert(ErrKindNone == err.kind);
+
+  IoCompletion completion = {.ctx = &dst};
+  err = io->read(io, &completion, client_ctx->socket, dst, on_read);
+  assert(ErrKindNone == err.kind);
+
+  err = io->run_for_ns(io, 1);
+  assert(ErrKindNone == err.kind);
+  // --- FIXME ---
 
   // end:
   (void)client_ctx->io->close(client_ctx->io, client_ctx->socket);
@@ -1281,7 +1303,7 @@ static void *torrent_client_handle(void *vctx) {
 }
 
 __attribute__((warn_unused_result)) static Error
-torrent_client_on_accept(const IO *io, void *vctx, Ipv4Addr accept_addr,
+torrent_client_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
                          i32 accept_socket) {
   assert(io);
   assert(vctx);

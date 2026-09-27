@@ -133,7 +133,7 @@ unix_vprotect_none(const Env *env, void *ptr, usize size) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_socket(const IO *io, SocketDomain domain, SocketType type, i32 *fd) {
+unix_socket(IO *io, SocketDomain domain, SocketType type, i32 *fd) {
   (void)io;
 
   assert(fd);
@@ -170,8 +170,8 @@ unix_socket(const IO *io, SocketDomain domain, SocketType type, i32 *fd) {
   return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static Error
-unix_listen(const IO *io, i32 fd, i32 backlog) {
+__attribute__((warn_unused_result)) static Error unix_listen(IO *io, i32 fd,
+                                                             i32 backlog) {
   (void)io;
 
   const i32 ret = listen(fd, backlog);
@@ -184,7 +184,7 @@ unix_listen(const IO *io, i32 fd, i32 backlog) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_open(const IO *io, Slice_u8 path, FileOpenOptions options, i32 *fd) {
+unix_open(IO *io, Slice_u8 path, FileOpenOptions options, i32 *fd) {
   (void)io;
 
   assert(fd);
@@ -236,7 +236,7 @@ unix_open(const IO *io, Slice_u8 path, FileOpenOptions options, i32 *fd) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_tcp_bind_ipv4(const IO *io, i32 listen_socket, Ipv4Addr addr) {
+unix_tcp_bind_ipv4(IO *io, i32 listen_socket, Ipv4Addr addr) {
 
   (void)io;
 
@@ -260,7 +260,7 @@ unix_tcp_bind_ipv4(const IO *io, i32 listen_socket, Ipv4Addr addr) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_accept(const IO *io, i32 listen_socket, i32 *dst_accept_socket,
+unix_accept(IO *io, i32 listen_socket, i32 *dst_accept_socket,
             Ipv4Addr *dst_accept_addr) {
 
   (void)io;
@@ -289,7 +289,7 @@ unix_accept(const IO *io, i32 listen_socket, i32 *dst_accept_socket,
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_thread_create(const IO *io, ThreadCallback cb, void *data) {
+unix_thread_create(IO *io, ThreadCallback cb, void *data) {
   (void)io;
 
   assert(cb);
@@ -318,8 +318,7 @@ unix_thread_create(const IO *io, ThreadCallback cb, void *data) {
   return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static Error unix_close(const IO *io,
-                                                            i32 fd) {
+__attribute__((warn_unused_result)) static Error unix_close(IO *io, i32 fd) {
   (void)io;
 
   const i32 ret = close(fd);
@@ -332,7 +331,7 @@ __attribute__((warn_unused_result)) static Error unix_close(const IO *io,
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_enable_socket_reuse(const IO *io, i32 fd) {
+unix_enable_socket_reuse(IO *io, i32 fd) {
   (void)io;
 
   int val = 1;
@@ -367,7 +366,7 @@ unix_read(IO *io, i32 fd, Slice_u8 data, usize *dst_read) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_write(const IO *io, i32 fd, Slice_u8 data, usize *dst_written) {
+unix_write(IO *io, i32 fd, Slice_u8 data, usize *dst_written) {
   (void)io;
 
   assert(dst_written);
@@ -387,7 +386,7 @@ unix_write(const IO *io, i32 fd, Slice_u8 data, usize *dst_written) {
   return (Error){.kind = ErrKindNone};
 }
 __attribute__((warn_unused_result)) static Error
-unix_udp_multicast_open_ipv4(const IO *io, u32 ipv4, i32 *dst_fd) {
+unix_udp_multicast_open_ipv4(IO *io, u32 ipv4, i32 *dst_fd) {
   (void)io;
 
   assert(dst_fd);
@@ -418,7 +417,7 @@ unix_udp_multicast_open_ipv4(const IO *io, u32 ipv4, i32 *dst_fd) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_udp_send_to_ipv4(const IO *io, i32 fd, Ipv4Addr addr, Slice_u8 msg,
+unix_udp_send_to_ipv4(IO *io, i32 fd, Ipv4Addr addr, Slice_u8 msg,
                       usize *dst_sent) {
   (void)io;
   assert(dst_sent);
@@ -445,7 +444,7 @@ unix_udp_send_to_ipv4(const IO *io, i32 fd, Ipv4Addr addr, Slice_u8 msg,
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_file_size(const IO *io, i32 fd, usize *dst_size) {
+unix_file_size(IO *io, i32 fd, usize *dst_size) {
   (void)io;
   assert(dst_size);
 
@@ -462,7 +461,7 @@ unix_file_size(const IO *io, i32 fd, usize *dst_size) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_remove_file(const IO *io, Slice_u8 path) {
+unix_remove_file(IO *io, Slice_u8 path) {
   (void)io;
 
   // Same bound and the same reason as `unix_open`: the name has to reach the
@@ -499,7 +498,7 @@ unix_get_process_id(const Env *env) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_stdout_silence(const IO *io, i32 *dst_saved) {
+unix_stdout_silence(IO *io, i32 *dst_saved) {
   (void)io;
   assert(dst_saved);
 
@@ -535,7 +534,7 @@ unix_stdout_silence(const IO *io, i32 *dst_saved) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_stdout_restore(const IO *io, i32 saved) {
+unix_stdout_restore(IO *io, i32 saved) {
   (void)io;
 
   // Whatever the silenced stretch wrote went to `/dev/null` and is of no
@@ -561,8 +560,7 @@ unix_stdout_restore(const IO *io, i32 saved) {
 // of entirely different primitives, and so the primitives can be faked
 // underneath them in a test.
 __attribute__((warn_unused_result)) static Error
-unix_map_file(const IO *io, Slice_u8 path, FileOpenOptions opts,
-              Slice_u8 *dst) {
+unix_map_file(IO *io, Slice_u8 path, FileOpenOptions opts, Slice_u8 *dst) {
   (void)io;
   assert(dst);
 
@@ -608,7 +606,7 @@ unix_map_file(const IO *io, Slice_u8 path, FileOpenOptions opts,
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_write_all_to_file(const IO *io, Slice_u8 path, Slice_u8 data) {
+unix_write_all_to_file(IO *io, Slice_u8 path, Slice_u8 data) {
   (void)io;
 
   // TODO: Should we still 'touch' the file?

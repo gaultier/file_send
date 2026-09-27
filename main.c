@@ -161,7 +161,7 @@ int main(i32 argc, char *argv[]) {
       }
     }
 
-    const usize peer_port = 12346;
+    const usize peer_port = 12345;
 
     Slice_u8 udp_msg = {0};
     err = torrent_make_udp_broadcast_message(
