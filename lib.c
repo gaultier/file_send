@@ -262,21 +262,6 @@ slice_u8_eq_cstr(Slice_u8 s, const char *cstr) {
   return 0 == memcmp(s.data, cstr, s.len);
 }
 
-__attribute__((warn_unused_result)) static Error
-slice_u8_alloc(Arena *arena, Slice_u8 *dst, usize len) {
-  assert(arena);
-  assert(dst);
-
-  dst->data = arena_alloc(arena, __alignof__(u8), sizeof(u8), len);
-  if (!dst->data) {
-    return (Error){.kind = ErrKindOOM};
-  }
-
-  dst->len = len;
-
-  return (Error){.kind = ErrKindNone};
-}
-
 // Peek at the first byte of `slice`, leaving it in place.
 // Returns `ErrInvalidData`, and does not touch `*res`, if there is no first
 // byte.
@@ -494,23 +479,6 @@ path_last_component(Slice_u8 path, u8 separator) {
 
 // ---------- IO ----------
 
-typedef struct Env Env;
-struct Env {
-  usize (*get_page_size)(const Env *env);
-  Error (*valloc)(const Env *io, usize bytes_count, u8 **res);
-  Error (*vprotect_none)(const Env *env, void *ptr, usize size);
-  usize (*get_process_id)(const Env *env);
-};
-
-__attribute__((warn_unused_result)) static Env env_platform_make(void);
-
-// Named before the struct body so its own slots, and the platform wrappers
-// that fill them, can take the vtable they belong to: a slot that composes
-// other slots calls them through `io`, which is what lets one platform
-// implement an operation out of its own primitives without the vtable having
-// to agree on what those primitives are.
-typedef struct IO IO;
-
 typedef enum {
   SocketDomainIpv4,
   // TODO: More.
@@ -532,133 +500,777 @@ typedef struct {
 
 typedef void *(*ThreadCallback)(void *data);
 
+typedef struct Env Env;
+
+// Everything the program needs from the operating system that never waits on
+// anything outside this process. No bytes cross a socket or a disk here, so
+// there is nothing for an event loop to wait for and the call is the whole
+// operation; `IO` is for the rest.
+//
+// Every descriptor this hands out is non-blocking. That is not an option but a
+// requirement of `IO`: a readiness loop is only correct if the syscall it
+// retries can answer `ErrKindAgain` instead of parking the one thread that
+// runs the loop.
+struct Env {
+  usize (*get_page_size)(const Env *env);
+  Error (*valloc)(const Env *env, usize bytes_count, u8 **res);
+  Error (*vprotect_none)(const Env *env, void *ptr, usize size);
+  usize (*get_process_id)(const Env *env);
+
+  Error (*socket)(const Env *env, SocketDomain domain, SocketType type,
+                  i32 *fd);
+  Error (*listen)(const Env *env, i32 fd, i32 backlog);
+  Error (*tcp_bind_ipv4)(const Env *env, i32 listen_socket, Ipv4Addr addr);
+  Error (*enable_socket_reuse)(const Env *env, i32 fd);
+  Error (*udp_multicast_open_ipv4)(const Env *env, u32 ipv4, i32 *dst_fd);
+
+  // Hang up on a descriptor nobody is waiting on. `IO` has a `close` too, and
+  // the difference is who wants the answer: `IO`'s is a step in a chain of
+  // callbacks, and the step after it needs to know the descriptor is gone. This
+  // one is for a connection that is being refused, where there is no chain, no
+  // completion to keep and nothing to do with the answer -- and it is here
+  // rather than there because `close` on a non-blocking descriptor does not
+  // wait for anything, so submitting it would buy nothing.
+  //
+  // The distinction is not cosmetic: a refusal with nowhere to keep a
+  // completion would have to share one, and two refusals in the same turn of
+  // the loop would then overwrite a close that had not happened yet.
+  Error (*close_socket)(const Env *env, i32 fd);
+
+  // Map `size` bytes of `fd`. The kernel only records the mapping; the reads
+  // it stands for happen later, on a page fault, where no loop can see them.
+  // That makes this memory management and not an operation to submit.
+  Error (*map_fd)(const Env *env, i32 fd, usize size, FileOpenOptions opts,
+                  Slice_u8 *dst);
+
+  // Nothing in the program proper calls this any more: one thread runs one
+  // `IO` loop, and a second thread driving the same loop would be a race. It
+  // stays because spawning a thread is still a thing the platform does
+  // differently, and something outside the loop may yet need one.
+  Error (*thread_create)(const Env *env, ThreadCallback cb, void *data);
+
+  // Swallow this process's own standard output until the matching restore,
+  // which is handed back whatever `stdout_silence` produced. Only the test
+  // harness calls these, to keep a chatty run quiet; the program proper never
+  // redirects itself. They are slots and not three lines of `dup` in the
+  // harness because what it takes to do this is exactly the kind of thing
+  // that differs per platform.
+  Error (*stdout_silence)(const Env *env, i32 *dst_saved);
+  Error (*stdout_restore)(const Env *env, i32 saved);
+
+  // The implementation's own state, reached by every slot above as
+  // `env->ctx`. The real platform is stateless and leaves it null; a test's
+  // fake is what it is for.
+  void *ctx;
+};
+
+// One per process: an `IO` holds on to the `Env` it was made with, so a
+// caller cannot be handed something it has to keep alive itself.
+__attribute__((warn_unused_result)) static const Env *env_platform_make(void);
+
+// Named before the struct body so a composite built out of these slots can
+// take the vtable it belongs to.
+typedef struct IO IO;
+
 typedef enum {
+  // A completion that was never submitted. Named so that the zeroed slot a
+  // pool hands out is a recognisable "no operation" rather than a read.
+  IoActionKindNone,
+  IoActionKindOpen,
+  IoActionKindClose,
   IoActionKindRead,
   IoActionKindWrite,
   IoActionKindAccept,
   IoActionKindConnect,
   IoActionKindSendTo,
+  IoActionKindFileSize,
+  IoActionKindRemoveFile,
 } IoActionKind;
 
+// What an operation was asked to do, kept with the operation because the
+// answer arrives long after the call that asked for it has returned. A slot
+// fills this in from its arguments, which is what lets the caller's arguments
+// be temporaries.
 typedef struct {
   IoActionKind kind;
   union {
-    Slice_u8 data; // Read, write.
+    struct {
+      Slice_u8 path;
+      FileOpenOptions options;
+    } open;
+    struct {
+      Slice_u8 data;
+    } read;
+    struct {
+      Slice_u8 data;
+    } write;
+    struct {
+      // Written on success: who connected.
+      Ipv4Addr addr;
+    } accept;
+    struct {
+      Ipv4Addr addr;
+    } connect;
+    struct {
+      Ipv4Addr addr;
+      Slice_u8 data;
+    } send_to;
+    struct {
+      Slice_u8 path;
+    } remove_file;
   } v;
 } IoAction;
 
 typedef struct IoCompletion IoCompletion;
 
+// How an operation answers. `res` is a byte count for a read, a write or a
+// send, a descriptor for an `open` or an `accept`, a size for a `file_size`,
+// and is unused by a `close` and a `remove_file`.
+//
+// The callback runs on the thread that called `run_for_ns`, with the
+// completion no longer in the implementation's hands: submitting the next
+// operation on the same completion from inside it is the ordinary way to
+// chain, and what the state machines below do.
 typedef void (*IoCallback)(IoCompletion *completion, Error err, usize res);
 
 struct IoCompletion {
-  // Intrusive linked list.
-  IoCompletion *next;
+  // The submitter's, and never the implementation's: the two have different
+  // lifetimes and owners. A slot leaves it alone, so it can be set once when
+  // the completion is created and left for every operation after that.
   void *ctx;
+  // There is no descriptor here. A descriptor is an argument of the operation,
+  // and an implementation is already holding the operation for the caller, so
+  // it keeps the descriptor wherever it keeps the rest of its bookkeeping
+  // rather than making every completion eight bytes wider.
   IoCallback cb;
   IoAction action;
 };
 
+// Every slot here submits an operation and returns at once. An `Error` from a
+// slot means the operation was never submitted and its callback will never
+// run -- the only reason for one is that the implementation has no room left
+// to take the operation, which is backpressure and not a failure of the
+// operation. Anything the operation itself has to report reaches the callback.
+//
+// The completion belongs to the implementation from the moment it is submitted
+// until its callback runs, so it has to outlive that and must not be touched,
+// moved or reused in between. A completion carries no list pointers because
+// nothing here keeps a list of its own: the operating system is asked to hold
+// the submitted operations, and it is handed the completion's address to hand
+// back.
 struct IO {
   const Env *env;
 
+  // Try whatever was submitted, then wait up to `ns` for the operations that
+  // were not ready, running the callback of each one that becomes ready.
+  //
+  // A callback may submit more work. That work is picked up by a later call
+  // and not by this one, so a callback that resubmits cannot spin one tick
+  // forever, and no callback ever runs nested inside another.
   Error (*run_for_ns)(IO *io, usize ns);
-  Error (*socket)(IO *io, SocketDomain domain, SocketType type, i32 *fd);
-  Error (*listen)(IO *io, i32 fd, i32 backlog);
-  Error (*open)(IO *io, Slice_u8 path, FileOpenOptions options, i32 *fd);
-  Error (*tcp_bind_ipv4)(IO *io, i32 listen_socket, Ipv4Addr addr);
-  Error (*accept)(IO *io, i32 listen_socket, i32 *dst_accept_socket,
-                  Ipv4Addr *dst_accept_addr);
-  Error (*thread_create)(IO *io, ThreadCallback cb, void *data);
-  Error (*close)(IO *io, i32 fd);
-  Error (*enable_socket_reuse)(IO *io, i32 fd);
-  Error (*udp_multicast_open_ipv4)(IO *io, u32 ipv4, i32 *dst_fd);
-  Error (*udp_send_to_ipv4)(IO *io, i32 fd, Ipv4Addr addr, Slice_u8 msg,
-                            usize *dst_sent);
+
+  Error (*open)(IO *io, IoCompletion *completion, Slice_u8 path,
+                FileOpenOptions options, IoCallback cb);
+  Error (*close)(IO *io, IoCompletion *completion, i32 fd, IoCallback cb);
   Error (*read)(IO *io, IoCompletion *completion, i32 fd, Slice_u8 data,
                 IoCallback cb);
-  Error (*write)(IO *io, i32 fd, Slice_u8 data, usize *dst_written);
-  Error (*file_size)(IO *io, i32 fd, usize *dst_size);
-  Error (*map_file)(IO *io, Slice_u8 path, FileOpenOptions opts, Slice_u8 *dst);
-  Error (*write_all_to_file)(IO *io, Slice_u8 path, Slice_u8 data);
-  Error (*remove_file)(IO *io, Slice_u8 path);
-
-  Error (*stdout_silence)(IO *io, i32 *dst_saved);
-  Error (*stdout_restore)(IO *io, i32 saved);
+  Error (*write)(IO *io, IoCompletion *completion, i32 fd, Slice_u8 data,
+                 IoCallback cb);
+  // On success the callback's `res` is the accepted socket, and the peer is in
+  // `completion->action.v.accept.addr`.
+  Error (*accept)(IO *io, IoCompletion *completion, i32 listen_socket,
+                  IoCallback cb);
+  Error (*connect)(IO *io, IoCompletion *completion, i32 fd, Ipv4Addr addr,
+                   IoCallback cb);
+  Error (*send_to)(IO *io, IoCompletion *completion, i32 fd, Ipv4Addr addr,
+                   Slice_u8 data, IoCallback cb);
+  Error (*file_size)(IO *io, IoCompletion *completion, i32 fd, IoCallback cb);
+  Error (*remove_file)(IO *io, IoCompletion *completion, Slice_u8 path,
+                       IoCallback cb);
 };
 
+// On success `*dst` is the implementation, allocated out of `arena` and holding
+// on to `env`, so both have to outlive it.
+//
+// Allocated, and not a value handed back the way an `Env` is, because an `IO`
+// is an object and not just a vtable: the Darwin one owns a kqueue and the list
+// of changes waiting to go to it. Its size is a perfectly ordinary compile-time
+// constant -- but a per-platform one, and naming the platform's type is exactly
+// what a caller holding an `IO *` must not do. So whoever knows the size does
+// the allocating, out of an arena the caller owns, which also leaves the caller
+// free to make more than one: `env_platform_make`'s trick of returning a
+// pointer to a `static` would not do here, because two of these must not share
+// a kqueue.
+__attribute__((warn_unused_result)) static Error
+io_platform_make(Arena *arena, const Env *env, IO **dst);
+
+// ---------- IO: waiting for one thing ----------
+
+// Turn the loop until `*done`. The server proper never waits like this: it has
+// other connections to get on with, and its own loop is the one below in
+// `main`. The startup path has nothing to do until the file it was pointed at
+// is mapped, and a test checking what one syscall reports has nothing to do
+// either.
+__attribute__((warn_unused_result)) static Error io_run_until(IO *io,
+                                                             const bool *done,
+                                                             usize tick_ns) {
+  assert(io);
+  assert(done);
+  assert(tick_ns > 0);
+
+  while (!*done) {
+    const Error err = io->run_for_ns(io, tick_ns);
+    if (ErrKindNone != err.kind) {
+      return err;
+    }
+  }
+
+  return (Error){.kind = ErrKindNone};
+}
+
+// A tenth of a second: long enough that a wait for a peer is not a hundred
+// syscalls a second, short enough that a caller turning the loop by hand is
+// not left staring at it.
+#define IO_TICK_NS (100 * 1000 * 1000)
+
+// One operation, waited out. The completion, what it answered, and the flag
+// that says it has, in one place, because a caller that waits for a single
+// operation needs all three and nothing else.
+typedef struct {
+  IoCompletion completion;
+  Error err;
+  usize res;
+  bool done;
+} IoOnce;
+
+static void io_once_on_done(IoCompletion *completion, Error err, usize res) {
+  assert(completion);
+
+  IoOnce *const once = completion->ctx;
+  assert(once);
+  assert(!once->done);
+
+  once->err = err;
+  once->res = res;
+  once->done = true;
+}
+
+static void io_once_init(IoOnce *once) {
+  assert(once);
+
+  *once = (IoOnce){0};
+  once->completion.ctx = once;
+}
+
+// Wait for the operation submitted on `once`, and report what it answered
+// rather than what the waiting itself did: a caller that cannot turn the loop
+// has bigger trouble than the operation, and gets that error instead.
+__attribute__((warn_unused_result)) static Error io_once_wait(IO *io,
+                                                             IoOnce *once) {
+  assert(io);
+  assert(once);
+
+  const Error err = io_run_until(io, &once->done, IO_TICK_NS);
+  if (ErrKindNone != err.kind) {
+    return err;
+  }
+
+  return once->err;
+}
+
+// ---------- IO: mapping a whole file ----------
+
+// `map_file` and `write_all_to_file` are the program's operations and not the
+// platform's: one call here is several to the operating system. They are state
+// machines over the slots rather than slots of their own, which is also what
+// makes them the same code on every platform, and what lets a test fake the
+// primitives underneath them without faking a filesystem.
+//
+// Each step hands the next one the same completion, which the context owns.
+typedef struct {
+  IO *io;
+  IoCompletion completion;
+  FileOpenOptions opts;
+  Slice_u8 *dst;
+  i32 fd;
+  // The first failure of the sequence, reported once `done` is set. A later
+  // step never overwrites it: the cleanup runs whatever happened, and its own
+  // trouble is not what the caller asked about.
+  Error err;
+  bool done;
+} IoMapFile;
+
+static void io_map_file_on_close(IoCompletion *completion, Error err,
+                                 usize res) {
+  assert(completion);
+  (void)res;
+
+  IoMapFile *const ctx = completion->ctx;
+  assert(ctx);
+
+  if (ErrKindNone == ctx->err.kind) {
+    ctx->err = err;
+  }
+  ctx->done = true;
+}
+
+// Hand the descriptor back, then finish. Reached from every exit after the
+// file is open, the failing ones included: the mapping holds its own
+// reference to the file, so the descriptor has done its job either way.
+static void io_map_file_close(IoMapFile *ctx) {
+  assert(ctx);
+  assert(ctx->io);
+  assert(ctx->fd >= 0);
+
+  const Error err = ctx->io->close(ctx->io, &ctx->completion, ctx->fd,
+                                   io_map_file_on_close);
+  if (ErrKindNone != err.kind) {
+    // The close was never submitted, so nothing else is going to finish this.
+    // The descriptor is leaked, which is the lesser of the two problems.
+    if (ErrKindNone == ctx->err.kind) {
+      ctx->err = err;
+    }
+    ctx->done = true;
+  }
+}
+
+static void io_map_file_on_file_size(IoCompletion *completion, Error err,
+                                     usize res) {
+  assert(completion);
+
+  IoMapFile *const ctx = completion->ctx;
+  assert(ctx);
+  assert(ctx->io);
+
+  if (ErrKindNone != err.kind) {
+    ctx->err = err;
+    io_map_file_close(ctx);
+    return;
+  }
+
+  const Env *const env = ctx->io->env;
+  assert(env);
+
+  ctx->err = env->map_fd(env, ctx->fd, res, ctx->opts, ctx->dst);
+  io_map_file_close(ctx);
+}
+
+static void io_map_file_on_open(IoCompletion *completion, Error err,
+                                usize res) {
+  assert(completion);
+
+  IoMapFile *const ctx = completion->ctx;
+  assert(ctx);
+  assert(ctx->io);
+
+  if (ErrKindNone != err.kind) {
+    // There is no descriptor, so there is nothing to hand back.
+    ctx->err = err;
+    ctx->done = true;
+    return;
+  }
+
+  ctx->fd = (i32)res;
+  assert(ctx->fd >= 0);
+
+  const Error err_size = ctx->io->file_size(ctx->io, &ctx->completion, ctx->fd,
+                                            io_map_file_on_file_size);
+  if (ErrKindNone != err_size.kind) {
+    ctx->err = err_size;
+    io_map_file_close(ctx);
+  }
+}
+
+// Map the whole of `path`. `*ctx` has to outlive the operation; `*dst` is only
+// written on success, and `ctx->err` is the answer once `ctx->done`.
+__attribute__((warn_unused_result)) static Error
+io_map_file(IO *io, IoMapFile *ctx, Slice_u8 path, FileOpenOptions opts,
+            Slice_u8 *dst) {
+  assert(io);
+  assert(ctx);
+  assert(dst);
+
+  *ctx = (IoMapFile){.io = io, .opts = opts, .dst = dst, .fd = -1};
+  ctx->completion.ctx = ctx;
+
+  // Opened read only whatever the mapping is for: the mapping is private, so
+  // a write to it never reaches the file and the descriptor does not need the
+  // right to make one.
+  return io->open(io, &ctx->completion, path, FileOpenOptionsReadOnly,
+                  io_map_file_on_open);
+}
+
+// ---------- IO: writing a whole file ----------
+
+typedef struct {
+  IO *io;
+  IoCompletion completion;
+  // What is left to write. A short write is ordinary, so this shrinks a
+  // callback at a time rather than in one go.
+  Slice_u8 remaining;
+  i32 fd;
+  Error err;
+  bool done;
+} IoWriteAllToFile;
+
+static void io_write_all_to_file_on_close(IoCompletion *completion, Error err,
+                                          usize res) {
+  assert(completion);
+  (void)res;
+
+  IoWriteAllToFile *const ctx = completion->ctx;
+  assert(ctx);
+
+  if (ErrKindNone == ctx->err.kind) {
+    ctx->err = err;
+  }
+  ctx->done = true;
+}
+
+static void io_write_all_to_file_close(IoWriteAllToFile *ctx) {
+  assert(ctx);
+  assert(ctx->io);
+  assert(ctx->fd >= 0);
+
+  const Error err = ctx->io->close(ctx->io, &ctx->completion, ctx->fd,
+                                   io_write_all_to_file_on_close);
+  if (ErrKindNone != err.kind) {
+    if (ErrKindNone == ctx->err.kind) {
+      ctx->err = err;
+    }
+    ctx->done = true;
+  }
+}
+
+static void io_write_all_to_file_on_write(IoCompletion *completion, Error err,
+                                          usize res);
+
+// Submit the next slice of the write, or hand the descriptor back if there is
+// none left.
+static void io_write_all_to_file_step(IoWriteAllToFile *ctx) {
+  assert(ctx);
+  assert(ctx->io);
+
+  if (0 == ctx->remaining.len) {
+    io_write_all_to_file_close(ctx);
+    return;
+  }
+
+  const Error err =
+      ctx->io->write(ctx->io, &ctx->completion, ctx->fd, ctx->remaining,
+                     io_write_all_to_file_on_write);
+  if (ErrKindNone != err.kind) {
+    ctx->err = err;
+    io_write_all_to_file_close(ctx);
+  }
+}
+
+static void io_write_all_to_file_on_write(IoCompletion *completion, Error err,
+                                          usize res) {
+  assert(completion);
+
+  IoWriteAllToFile *const ctx = completion->ctx;
+  assert(ctx);
+
+  // A signal before any progress is not a failure: reissue the same slice.
+  if (ErrKindInterrupted == err.kind) {
+    io_write_all_to_file_step(ctx);
+    return;
+  }
+
+  if (ErrKindNone != err.kind) {
+    ctx->err = err;
+    io_write_all_to_file_close(ctx);
+    return;
+  }
+
+  // A short write is ordinary; a write of nothing would go round for ever.
+  if (0 == res) {
+    ctx->err = (Error){.kind = ErrKindConnReset};
+    io_write_all_to_file_close(ctx);
+    return;
+  }
+
+  assert(res <= ctx->remaining.len);
+  slice_u8_advance(&ctx->remaining, res);
+
+  io_write_all_to_file_step(ctx);
+}
+
+static void io_write_all_to_file_on_open(IoCompletion *completion, Error err,
+                                         usize res) {
+  assert(completion);
+
+  IoWriteAllToFile *const ctx = completion->ctx;
+  assert(ctx);
+
+  if (ErrKindNone != err.kind) {
+    ctx->err = err;
+    ctx->done = true;
+    return;
+  }
+
+  ctx->fd = (i32)res;
+  assert(ctx->fd >= 0);
+
+  io_write_all_to_file_step(ctx);
+}
+
+// Replace the contents of `path` with `data`. `*ctx` has to outlive the
+// operation, and `ctx->err` is the answer once `ctx->done`.
+__attribute__((warn_unused_result)) static Error
+io_write_all_to_file(IO *io, IoWriteAllToFile *ctx, Slice_u8 path,
+                     Slice_u8 data) {
+  assert(io);
+  assert(ctx);
+
+  *ctx = (IoWriteAllToFile){.io = io, .remaining = data, .fd = -1};
+  ctx->completion.ctx = ctx;
+
+  // TODO: Should we still 'touch' the file?
+  if (!data.data || 0 == data.len) {
+    ctx->done = true;
+    return (Error){.kind = ErrKindNone};
+  }
+
+  return io->open(io, &ctx->completion, path,
+                  FileOpenOptionsWriteOnly | FileOpenOptionsCreate |
+                      FileOpenOptionsTruncate,
+                  io_write_all_to_file_on_open);
+}
+
+// ---------- IO: the file composites, waited out ----------
+
+// The startup path reads the torrent it was pointed at and writes the one it
+// produced, and has nothing to do until each is finished. These turn the loop
+// on its behalf so that it reads as the sequence it is; nothing that serves a
+// peer may use them.
+__attribute__((warn_unused_result)) static Error
+io_map_file_blocking(IO *io, Slice_u8 path, FileOpenOptions opts,
+                     Slice_u8 *dst) {
+  assert(io);
+  assert(dst);
+
+  IoMapFile ctx = {0};
+  const Error err_submit = io_map_file(io, &ctx, path, opts, dst);
+  if (ErrKindNone != err_submit.kind) {
+    return err_submit;
+  }
+
+  const Error err_run = io_run_until(io, &ctx.done, IO_TICK_NS);
+  if (ErrKindNone != err_run.kind) {
+    return err_run;
+  }
+
+  return ctx.err;
+}
+
+__attribute__((warn_unused_result)) static Error
+io_write_all_to_file_blocking(IO *io, Slice_u8 path, Slice_u8 data) {
+  assert(io);
+
+  IoWriteAllToFile ctx = {0};
+  const Error err_submit = io_write_all_to_file(io, &ctx, path, data);
+  if (ErrKindNone != err_submit.kind) {
+    return err_submit;
+  }
+
+  const Error err_run = io_run_until(io, &ctx.done, IO_TICK_NS);
+  if (ErrKindNone != err_run.kind) {
+    return err_run;
+  }
+
+  return ctx.err;
+}
+
+// ---------- IO: serving TCP ----------
+
+// `accept_socket` belongs to the callback from the moment it is handed over,
+// including hanging up on it when the callback itself fails.
 typedef Error (*AcceptCallback)(IO *io, void *cb_ctx, Ipv4Addr accept_addr,
                                 i32 accept_socket);
 
+// A listener and the one accept it always has in flight. Set up synchronously,
+// because every step of the setup is an `Env` call that answers on the spot;
+// from the first accept on it is callbacks, and `err` and `done` are how the
+// end of it is reported.
+typedef struct {
+  IO *io;
+  IoCompletion completion;
+  void *cb_ctx;
+  AcceptCallback on_accept;
+  i32 listen_socket;
+  // Why the listener is not running. Set before `done` ever is, so a caller
+  // that turns the loop until `done` always has the reason waiting for it.
+  Error err;
+  // Nothing of this listener's is in flight any more: it either never started
+  // or it has stopped and hung up on its own socket. Not "idle" -- a running
+  // listener always has an accept outstanding and never sets this.
+  bool done;
+} IoServer;
+
+static void io_server_on_accept(IoCompletion *completion, Error err,
+                                usize res);
+
+// Wait for the next connection. The listener holds exactly one accept at a
+// time: a second would be a second completion, and one connection arriving at
+// a time is all a single thread can do anything with.
+static void io_server_arm(IoServer *server);
+
+static void io_server_on_close(IoCompletion *completion, Error err,
+                               usize res) {
+  assert(completion);
+  (void)err;
+  (void)res;
+
+  IoServer *const server = completion->ctx;
+  assert(server);
+
+  // Whatever hanging up on the listener reported is of no interest: the
+  // listener is already gone, and `server->err` is why.
+  server->done = true;
+}
+
+// Take the listener down, remembering why. The first reason wins: a later
+// failure is a consequence of this one.
+static void io_server_shutdown(IoServer *server, Error err) {
+  assert(server);
+  assert(server->io);
+  assert(server->listen_socket >= 0);
+
+  if (ErrKindNone == server->err.kind) {
+    server->err = err;
+  }
+
+  const Error err_close =
+      server->io->close(server->io, &server->completion, server->listen_socket,
+                        io_server_on_close);
+  if (ErrKindNone != err_close.kind) {
+    server->done = true;
+  }
+}
+
+static void io_server_arm(IoServer *server) {
+  assert(server);
+  assert(server->io);
+
+  const Error err = server->io->accept(server->io, &server->completion,
+                                       server->listen_socket,
+                                       io_server_on_accept);
+  if (ErrKindNone != err.kind) {
+    io_server_shutdown(server, err);
+  }
+}
+
+static void io_server_on_accept(IoCompletion *completion, Error err,
+                                usize res) {
+  assert(completion);
+
+  IoServer *const server = completion->ctx;
+  assert(server);
+  assert(server->io);
+  assert(server->on_accept);
+
+  // The peer is allowed to vanish between the handshake and the `accept`.
+  // That is one dead connection, not a dead server.
+  if (ErrKindConnReset == err.kind) {
+    io_server_arm(server);
+    return;
+  }
+
+  if (ErrKindNone != err.kind) {
+    // TODO: `ErrKindTooManyFiles` is transient and deserves a backoff instead
+    // of tearing the listener down, which needs a timer in `IO`.
+    io_server_shutdown(server, err);
+    return;
+  }
+
+  const i32 accept_socket = (i32)res;
+  assert(accept_socket >= 0);
+
+  const Error err_on_accept =
+      server->on_accept(server->io, server->cb_ctx,
+                        completion->action.v.accept.addr, accept_socket);
+  if (ErrKindNone != err_on_accept.kind) {
+    error_print("failed to handle connection", err_on_accept);
+  }
+
+  // The callback owns that connection now, whether it managed anything with
+  // it or not, so the listener goes straight back to waiting.
+  io_server_arm(server);
+}
+
+// Bind and start listening, and put the first accept in flight. A non-`None`
+// answer means the listener never came up and `on_accept` will never be
+// called; the listener then closes itself, so a caller that wants the
+// descriptor actually gone turns the loop until `server->done` as usual.
+//
+// Once this succeeds the listener runs until it cannot: turn the loop, and
+// read `server->err` when `server->done`.
 __attribute__((warn_unused_result)) static Error
-io_listen_and_serve_tcp_ipv4(IO *io, void *cb_ctx, Ipv4Addr listen_addr,
-                             AcceptCallback on_accept) {
+io_listen_and_serve_tcp_ipv4(IO *io, IoServer *server, void *cb_ctx,
+                             Ipv4Addr listen_addr, AcceptCallback on_accept) {
   assert(io);
+  assert(server);
   assert(on_accept);
+  assert(io->env);
 
-  i32 listen_socket = 0;
-  {
-    const Error err_socket =
-        io->socket(io, SocketDomainIpv4, SocketTypeTcp, &listen_socket);
-    if (ErrKindNone != err_socket.kind) {
-      return err_socket;
-    }
-  }
-  {
-    const Error err_reuse = io->enable_socket_reuse(io, listen_socket);
+  const Env *const env = io->env;
 
-    if (ErrKindNone != err_reuse.kind) {
-      (void)io->close(io, listen_socket);
-      return err_reuse;
-    }
-  }
+  *server = (IoServer){.io = io,
+                       .cb_ctx = cb_ctx,
+                       .on_accept = on_accept,
+                       .listen_socket = -1};
+  server->completion.ctx = server;
 
   {
-    // A port left behind by a previous run is an ordinary answer, not a bug
-    // in this process, so it travels back as an `Error`.
-    const Error err_bind = io->tcp_bind_ipv4(io, listen_socket, listen_addr);
-    if (ErrKindNone != err_bind.kind) {
-      (void)io->close(io, listen_socket);
-      return err_bind;
+    const Error err =
+        env->socket(env, SocketDomainIpv4, SocketTypeTcp, &server->listen_socket);
+    if (ErrKindNone != err.kind) {
+      // No socket, so nothing to hand back and nothing to wait for.
+      server->err = err;
+      server->done = true;
+      return err;
+    }
+  }
+  assert(server->listen_socket >= 0);
+
+  {
+    const Error err = env->enable_socket_reuse(env, server->listen_socket);
+    if (ErrKindNone != err.kind) {
+      io_server_shutdown(server, err);
+      return err;
     }
   }
 
   {
-    const Error err_listen = io->listen(io, listen_socket, 1024);
-    if (ErrKindNone != err_listen.kind) {
-      (void)io->close(io, listen_socket);
-      return err_listen;
+    // A port left behind by a previous run is an ordinary answer, not a bug in
+    // this process, so it travels back as an `Error`.
+    const Error err = env->tcp_bind_ipv4(env, server->listen_socket, listen_addr);
+    if (ErrKindNone != err.kind) {
+      io_server_shutdown(server, err);
+      return err;
     }
   }
 
-  for (;;) {
-    i32 accept_socket = 0;
-    Ipv4Addr accept_addr = {0};
-
-    const Error err_accept =
-        io->accept(io, listen_socket, &accept_socket, &accept_addr);
-
-    // The peer is allowed to vanish between the handshake and the `accept`.
-    // That is one dead connection, not a dead server.
-    if (ErrKindConnReset == err_accept.kind) {
-      continue;
-    }
-
-    if (ErrKindNone != err_accept.kind) {
-      // TODO: `ErrTooManyFiles` is transient and deserves a backoff instead
-      // of tearing the listener down, which needs a timer in `IO`.
-      (void)io->close(io, listen_socket);
-      return err_accept;
-    }
-
-    // `accept_socket` belongs to the callback from here on, including
-    // closing it when the callback itself fails.
-    const Error err_on_accept =
-        on_accept(io, cb_ctx, accept_addr, accept_socket);
-    if (ErrKindNone != err_on_accept.kind) {
-      error_print("failed to handle connection", err_on_accept);
+  {
+    const Error err = env->listen(env, server->listen_socket, 1024);
+    if (ErrKindNone != err.kind) {
+      io_server_shutdown(server, err);
+      return err;
     }
   }
+
+  io_server_arm(server);
+
+  // Arming is the last thing that can fail before the loop takes over, and it
+  // fails by taking the listener down, so it is reported like every step
+  // before it rather than only through `server->err`.
+  if (ErrKindNone != server->err.kind) {
+    return server->err;
+  }
+
+  return (Error){.kind = ErrKindNone};
 }
 
 // ---------- Misc ----------

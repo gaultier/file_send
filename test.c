@@ -19,9 +19,9 @@
 // struct. Poison it so such a read shows up as an obviously bogus value
 // instead.
 __attribute__((warn_unused_result)) static Arena test_arena(usize bytes_count) {
-  const IO io = io_platform_make();
+  const Env *const env = env_platform_make();
   Arena arena = {0};
-  assert(ErrKindNone == arena_valloc(&io, bytes_count, &arena).kind);
+  assert(ErrKindNone == arena_valloc(env, bytes_count, &arena).kind);
   assert(arena.start);
   assert(arena.end);
   assert((usize)arena.end - (usize)arena.start >= bytes_count);
@@ -318,15 +318,20 @@ static void test_unix_error_from_errno(void) {
 }
 #endif // PLATFORM_UNIX
 
-// A fake `IO` for the arena. It records what `arena_valloc` asked the OS for,
+// ---------- The fake `Env` ----------
+//
+// An `Env` is a vtable and nothing else -- the real one is stateless -- so a
+// fake is a value on the test's own stack with `ctx` pointing at whatever it
+// needs to remember. Anything it does not fake is delegated to `real` rather
+// than reimplemented, so the code under test still gets memory it can write to
+// and descriptors it can use.
+
+// A fake `Env` for the arena. It records what `arena_valloc` asked the OS for,
 // answers with a page size the host does not have, and can make the mapping
 // fail on demand: the real `mmap` only fails for sizes so large that the
 // request says nothing about *which* error comes back.
-//
-// Anything it does not fake is delegated to `real` rather than reimplemented,
-// so the arena still hands back memory that can be written to.
 typedef struct {
-  IO real;
+  const Env *real;
   usize page_size;
 
   // When set, `valloc` fails with this instead of mapping.
@@ -338,19 +343,19 @@ typedef struct {
   usize protect_calls;
   void *protect_ptr;
   usize protect_size;
-} TestIoCtx;
+} TestAllocCtx;
 
 __attribute__((warn_unused_result)) static usize
-test_io_get_page_size(const IO *io) {
-  TestIoCtx *const c = io->ctx;
+test_alloc_get_page_size(const Env *env) {
+  TestAllocCtx *const c = env->ctx;
   assert(c);
 
   return c->page_size;
 }
 
 __attribute__((warn_unused_result)) static Error
-test_io_valloc(const IO *io, usize bytes_count, u8 **res) {
-  TestIoCtx *const c = io->ctx;
+test_alloc_valloc(const Env *env, usize bytes_count, u8 **res) {
+  TestAllocCtx *const c = env->ctx;
   assert(c);
 
   c->alloc_calls += 1;
@@ -360,31 +365,33 @@ test_io_valloc(const IO *io, usize bytes_count, u8 **res) {
     return (Error){.kind = c->alloc_fails_with};
   }
 
-  return c->real.valloc(&c->real, bytes_count, res);
+  return c->real->valloc(c->real, bytes_count, res);
 }
 
 __attribute__((warn_unused_result)) static Error
-test_io_vprotect_none(const IO *io, void *ptr, usize size) {
-  TestIoCtx *const c = io->ctx;
+test_alloc_vprotect_none(const Env *env, void *ptr, usize size) {
+  TestAllocCtx *const c = env->ctx;
   assert(c);
 
   c->protect_calls += 1;
   c->protect_ptr = ptr;
   c->protect_size = size;
 
-  return c->real.vprotect_none(&c->real, ptr, size);
+  return c->real->vprotect_none(c->real, ptr, size);
 }
 
-// Only the slots `arena_valloc` reaches for; the rest stay null so that a
-// call to any of them crashes rather than silently doing something real.
-__attribute__((warn_unused_result)) static IO
-test_io_platform_make(TestIoCtx *ctx) {
+// Only the slots `arena_valloc` reaches for; the rest stay null so that a call
+// to any of them crashes rather than silently doing something real.
+__attribute__((warn_unused_result)) static Env
+test_env_alloc_make(TestAllocCtx *ctx) {
   assert(ctx);
 
-  return (IO){
-      .get_page_size = test_io_get_page_size,
-      .valloc = test_io_valloc,
-      .vprotect_none = test_io_vprotect_none,
+  ctx->real = env_platform_make();
+
+  return (Env){
+      .get_page_size = test_alloc_get_page_size,
+      .valloc = test_alloc_valloc,
+      .vprotect_none = test_alloc_vprotect_none,
       .ctx = ctx,
   };
 }
@@ -397,11 +404,11 @@ static void test_arena_valloc_mocked(void) {
 
   // A single byte still costs a whole page, plus a whole page of guard.
   {
-    TestIoCtx ctx = {.real = io_platform_make(), .page_size = page_size};
-    const IO io = test_io_platform_make(&ctx);
+    TestAllocCtx ctx = {.page_size = page_size};
+    const Env env = test_env_alloc_make(&ctx);
     Arena arena = {0};
 
-    assert(ErrKindNone == arena_valloc(&io, 1, &arena).kind);
+    assert(ErrKindNone == arena_valloc(&env, 1, &arena).kind);
 
     assert(1 == ctx.alloc_calls);
     assert(2 * page_size == ctx.alloc_bytes_count);
@@ -419,35 +426,34 @@ static void test_arena_valloc_mocked(void) {
 
   // One byte past a page rounds up to two, so three pages are mapped.
   {
-    TestIoCtx ctx = {.real = io_platform_make(), .page_size = page_size};
-    const IO io = test_io_platform_make(&ctx);
+    TestAllocCtx ctx = {.page_size = page_size};
+    const Env env = test_env_alloc_make(&ctx);
     Arena arena = {0};
 
-    assert(ErrKindNone == arena_valloc(&io, page_size + 1, &arena).kind);
+    assert(ErrKindNone == arena_valloc(&env, page_size + 1, &arena).kind);
     assert(3 * page_size == ctx.alloc_bytes_count);
     assert((void *)arena.end == ctx.protect_ptr);
   }
 
   // An exact multiple is not rounded up past itself.
   {
-    TestIoCtx ctx = {.real = io_platform_make(), .page_size = page_size};
-    const IO io = test_io_platform_make(&ctx);
+    TestAllocCtx ctx = {.page_size = page_size};
+    const Env env = test_env_alloc_make(&ctx);
     Arena arena = {0};
 
-    assert(ErrKindNone == arena_valloc(&io, 2 * page_size, &arena).kind);
+    assert(ErrKindNone == arena_valloc(&env, 2 * page_size, &arena).kind);
     assert(3 * page_size == ctx.alloc_bytes_count);
   }
 
   // A failed mapping is reported, not asserted, and leaves the caller's arena
   // untouched. Nothing is protected either: there is no mapping to protect.
   {
-    TestIoCtx ctx = {.real = io_platform_make(),
-                     .page_size = page_size,
-                     .alloc_fails_with = ErrKindOOM};
-    const IO io = test_io_platform_make(&ctx);
+    TestAllocCtx ctx = {.page_size = page_size,
+                       .alloc_fails_with = ErrKindOOM};
+    const Env env = test_env_alloc_make(&ctx);
     Arena arena = {.start = (u8 *)0xAA, .end = (u8 *)0xBB};
 
-    assert(ErrKindOOM == arena_valloc(&io, 1, &arena).kind);
+    assert(ErrKindOOM == arena_valloc(&env, 1, &arena).kind);
     assert(1 == ctx.alloc_calls);
     assert(0 == ctx.protect_calls);
     assert((u8 *)0xAA == arena.start);
@@ -458,13 +464,12 @@ static void test_arena_valloc_mocked(void) {
   // real `mmap` can only be provoked into `ENOMEM`, so this is the only way
   // to check that the error travels verbatim.
   {
-    TestIoCtx ctx = {.real = io_platform_make(),
-                     .page_size = page_size,
-                     .alloc_fails_with = ErrOSKindPermission};
-    const IO io = test_io_platform_make(&ctx);
+    TestAllocCtx ctx = {.page_size = page_size,
+                       .alloc_fails_with = ErrOSKindPermission};
+    const Env env = test_env_alloc_make(&ctx);
     Arena arena = {0};
 
-    assert(ErrOSKindPermission == arena_valloc(&io, 1, &arena).kind);
+    assert(ErrOSKindPermission == arena_valloc(&env, 1, &arena).kind);
     assert(NULL == arena.start);
   }
 }
@@ -477,62 +482,295 @@ static void test_arena_valloc_mocked(void) {
 // want quiet are exactly the ones running against a mock, and redirecting this
 // process's output is the harness's own business either way.
 __attribute__((warn_unused_result)) static i32 test_stdout_silence(void) {
-  const IO io = io_platform_make();
+  const Env *const env = env_platform_make();
 
   i32 saved = -1;
-  assert(ErrKindNone == io.stdout_silence(&io, &saved).kind);
+  assert(ErrKindNone == env->stdout_silence(env, &saved).kind);
 
   return saved;
 }
 
 static void test_stdout_restore(i32 saved) {
-  const IO io = io_platform_make();
+  const Env *const env = env_platform_make();
 
-  assert(ErrKindNone == io.stdout_restore(&io, saved).kind);
+  assert(ErrKindNone == env->stdout_restore(env, saved).kind);
 }
 
-// A scripted `IO` for the TCP server. Every slot it fakes can be made to fail,
-// and `accept` is told in advance how many connections to hand over before it
-// stops: `io_listen_and_serve_tcp_ipv4` loops forever otherwise, so without
-// this there is no way to call it from a test at all.
+// ---------- The fake `IO` ----------
+//
+// A scripted `IO`, shared by every test that drives one. It keeps the same
+// discipline as the real implementation -- an operation is submitted, and its
+// callback runs from inside `run_for_ns` -- because what is under test is a
+// chain of callbacks, and a fake that answered on the spot would exercise none
+// of the chaining and would recurse as deep as the chain is long.
+//
+// What it does not keep is a kernel: where the real implementation hands the
+// submitted operations to kqueue and gets them back, this holds them in an
+// array of its own.
+
+typedef struct TestIo TestIo;
+
+// How a script answers one operation.
+typedef enum {
+  // `*dst_err` and `*dst_res` are the answer, and the callback runs with them.
+  TestIoPerformDone,
+  // The operation is never answered, the way a peer that has gone quiet never
+  // answers: the completion is dropped and its callback never runs. The only
+  // way for a test to hold a connection open, which is what filling the client
+  // pool needs.
+  TestIoPerformParked,
+} TestIoPerformResult;
+
+typedef TestIoPerformResult (*TestIoPerform)(TestIo *test_io,
+                                            IoCompletion *completion, i32 fd,
+                                            Error *dst_err, usize *dst_res);
+
+// Enough for every slot of the client pool to have an operation in flight, plus
+// the listener's own.
+#define TEST_IO_IN_FLIGHT_MAX (TORRENT_CLIENTS_MAX + 16)
+
+struct TestIo {
+  // Must be first: a `TestIo *` is an `IO *`, the same arrangement the real
+  // implementation uses to find itself from a slot.
+  IO io;
+
+  TestIoPerform perform;
+  // The script's own state, whatever it is.
+  void *script;
+
+  // When set, submitting an operation of this kind fails rather than being
+  // taken. Every caller of a slot has a branch for that -- the callback will
+  // never run, so whatever it would have cleaned up has to be cleaned up on the
+  // spot -- and this is the only way to reach it.
+  IoActionKind submit_fails_for;
+  ErrorKind submit_fails_with;
+
+  // Submitted, not yet answered, each with the descriptor it was submitted
+  // against: a completion does not carry one, so whoever is holding the
+  // operation has to, and here that is this.
+  IoCompletion *submitted[TEST_IO_IN_FLIGHT_MAX];
+  i32 submitted_fd[TEST_IO_IN_FLIGHT_MAX];
+  usize submitted_len;
+  // What the turn in progress is working through. A second pair of arrays and
+  // not an index into the first, because a callback may submit while it runs
+  // and that has to go somewhere that is not being iterated.
+  IoCompletion *running[TEST_IO_IN_FLIGHT_MAX];
+  i32 running_fd[TEST_IO_IN_FLIGHT_MAX];
+};
+
+__attribute__((warn_unused_result)) static Error
+test_io_submit(IO *io, IoCompletion *completion, i32 fd, IoCallback cb) {
+  assert(io);
+  assert(completion);
+  assert(cb);
+
+  TestIo *const test_io = (TestIo *)io;
+  assert(test_io->perform);
+
+  if (IoActionKindNone != test_io->submit_fails_for &&
+      completion->action.kind == test_io->submit_fails_for) {
+    return (Error){.kind = test_io->submit_fails_with};
+  }
+
+  if (test_io->submitted_len >= TEST_IO_IN_FLIGHT_MAX) {
+    // The same backpressure the real implementation reports when it has no
+    // room left to take an operation.
+    return (Error){.kind = ErrKindAgain};
+  }
+
+  completion->cb = cb;
+  test_io->submitted[test_io->submitted_len] = completion;
+  test_io->submitted_fd[test_io->submitted_len] = fd;
+  test_io->submitted_len += 1;
+
+  return (Error){.kind = ErrKindNone};
+}
+
+__attribute__((warn_unused_result)) static Error test_io_run_for_ns(IO *io,
+                                                                   usize ns) {
+  assert(io);
+  (void)ns;
+
+  TestIo *const test_io = (TestIo *)io;
+  assert(test_io->perform);
+
+  // What was submitted before this turn began, for the same reason the real
+  // implementation works off what the kernel had already taken: a callback may
+  // submit more, and that waits for the next turn.
+  const usize running_len = test_io->submitted_len;
+  memcpy(test_io->running, test_io->submitted,
+         running_len * sizeof(test_io->running[0]));
+  memcpy(test_io->running_fd, test_io->submitted_fd,
+         running_len * sizeof(test_io->running_fd[0]));
+  test_io->submitted_len = 0;
+
+  for (usize i = 0; i < running_len; i++) {
+    IoCompletion *const completion = test_io->running[i];
+    assert(completion);
+    assert(completion->cb);
+
+    Error err = {.kind = ErrKindNone};
+    usize res = 0;
+    if (TestIoPerformParked == test_io->perform(test_io, completion,
+                                                test_io->running_fd[i], &err,
+                                                &res)) {
+      continue;
+    }
+
+    completion->cb(completion, err, res);
+  }
+
+  return (Error){.kind = ErrKindNone};
+}
+
+// The slots, which do between them exactly what the real ones do: record what
+// was asked for, and ask for a turn of the loop.
+
+__attribute__((warn_unused_result)) static Error
+test_io_open(IO *io, IoCompletion *completion, Slice_u8 path,
+             FileOpenOptions options, IoCallback cb) {
+  assert(completion);
+
+  completion->action = (IoAction){.kind = IoActionKindOpen,
+                                  .v.open = {.path = path, .options = options}};
+
+  return test_io_submit(io, completion, -1, cb);
+}
+
+__attribute__((warn_unused_result)) static Error
+test_io_close(IO *io, IoCompletion *completion, i32 fd, IoCallback cb) {
+  assert(completion);
+
+  completion->action = (IoAction){.kind = IoActionKindClose};
+
+  return test_io_submit(io, completion, fd, cb);
+}
+
+__attribute__((warn_unused_result)) static Error
+test_io_read(IO *io, IoCompletion *completion, i32 fd, Slice_u8 data,
+             IoCallback cb) {
+  assert(completion);
+  assert(data.data);
+  assert(data.len > 0);
+
+  completion->action = (IoAction){.kind = IoActionKindRead, .v.read.data = data};
+
+  return test_io_submit(io, completion, fd, cb);
+}
+
+__attribute__((warn_unused_result)) static Error
+test_io_write(IO *io, IoCompletion *completion, i32 fd, Slice_u8 data,
+              IoCallback cb) {
+  assert(completion);
+  assert(data.data);
+  assert(data.len > 0);
+
+  completion->action =
+      (IoAction){.kind = IoActionKindWrite, .v.write.data = data};
+
+  return test_io_submit(io, completion, fd, cb);
+}
+
+__attribute__((warn_unused_result)) static Error
+test_io_accept(IO *io, IoCompletion *completion, i32 listen_socket,
+               IoCallback cb) {
+  assert(completion);
+
+  completion->action = (IoAction){.kind = IoActionKindAccept};
+
+  return test_io_submit(io, completion, listen_socket, cb);
+}
+
+__attribute__((warn_unused_result)) static Error
+test_io_file_size(IO *io, IoCompletion *completion, i32 fd, IoCallback cb) {
+  assert(completion);
+
+  completion->action = (IoAction){.kind = IoActionKindFileSize};
+
+  return test_io_submit(io, completion, fd, cb);
+}
+
+// `*test_io` has to outlive every operation submitted to it, and `env` has to
+// outlive `*test_io`: a composite reaches the platform's `mmap` through
+// `io->env`, and the fakes reach the real syscalls the same way the real
+// implementation does.
+static void test_io_make(TestIo *test_io, const Env *env,
+                         TestIoPerform perform, void *script) {
+  assert(test_io);
+  assert(env);
+  assert(perform);
+
+  memset(test_io, 0, sizeof(*test_io));
+  test_io->perform = perform;
+  test_io->script = script;
+  test_io->io = (IO){
+      .env = env,
+      .run_for_ns = test_io_run_for_ns,
+      .open = test_io_open,
+      .close = test_io_close,
+      .read = test_io_read,
+      .write = test_io_write,
+      .accept = test_io_accept,
+      .file_size = test_io_file_size,
+      // `connect`, `send_to` and `remove_file` stay null: no test drives one,
+      // and a null slot crashes rather than quietly doing something real.
+  };
+}
+
+// ---------- The TCP server ----------
+
+// The script behind the listener tests. It is split the way the code under test
+// is: setting a listener up is `Env` -- a socket, a socket option, a bind, a
+// listen, none of which waits for anything -- and everything from the first
+// accept on is `IO`.
+//
+// `accept` is told in advance how many connections to hand over before it stops:
+// the listener goes back for another one for as long as it is answered, so
+// without an end there is no way to call it from a test at all.
 typedef struct {
-  // Failure injection, one per slot. `ErrKindNone` means "succeed".
+  // Failure injection, one per thing that can fail. `ErrKindNone` succeeds.
   ErrorKind socket_fails_with;
   ErrorKind reuse_fails_with;
   ErrorKind bind_fails_with;
   ErrorKind listen_fails_with;
-  ErrorKind thread_create_fails_with;
   ErrorKind read_fails_with;
 
-  // `accept` succeeds this many times, then reports `accept_ends_with` to
-  // unwind the loop. The call at `conn_reset_at` (1-based, 0 for never)
-  // reports a reset instead, which the server is meant to shrug off.
+  // `accept` succeeds this many times, then reports `accept_ends_with` to bring
+  // the listener down. The call at `conn_reset_at` (1-based, 0 for never)
+  // reports a reset instead, which the listener is meant to shrug off.
   usize accept_success_max;
   usize conn_reset_at;
   ErrorKind accept_ends_with;
   usize accept_handed_over;
 
-  // Run the handler on this thread instead of spawning one, so it is covered
-  // without the test having to join anything.
-  bool run_thread_inline;
+  // Leave every read unanswered, the way a peer that connects and then says
+  // nothing does. The only way to hold connections open, and so the only way to
+  // fill the client pool.
+  bool read_parks;
 
   usize socket_calls;
   usize reuse_calls;
   usize bind_calls;
   usize listen_calls;
   usize accept_calls;
-  usize close_calls;
-  usize thread_create_calls;
   usize read_calls;
+  // `IO`'s close, which is a step in a chain: the listener's own, and each
+  // connection's.
+  usize close_calls;
+  // `Env`'s, which is the hang-up on a connection that was refused.
+  usize close_socket_calls;
 
   Ipv4Addr bound_addr;
   i32 backlog;
 } TestServerCtx;
 
+// A recognisable descriptor: a real one would never be this.
+#define TEST_SERVER_LISTEN_FD 4242
+
 __attribute__((warn_unused_result)) static Error
-test_server_socket(const IO *io, SocketDomain domain, SocketType type,
+test_server_socket(const Env *env, SocketDomain domain, SocketType type,
                    i32 *fd) {
-  TestServerCtx *const c = io->ctx;
+  TestServerCtx *const c = env->ctx;
   assert(c);
   assert(fd);
   assert(SocketDomainIpv4 == domain);
@@ -543,26 +781,25 @@ test_server_socket(const IO *io, SocketDomain domain, SocketType type,
     return (Error){.kind = c->socket_fails_with};
   }
 
-  // A recognisable descriptor: a real one would never be this.
-  *fd = 4242;
+  *fd = TEST_SERVER_LISTEN_FD;
   return (Error){.kind = ErrKindNone};
 }
 
 __attribute__((warn_unused_result)) static Error
-test_server_enable_socket_reuse(const IO *io, i32 fd) {
-  TestServerCtx *const c = io->ctx;
+test_server_enable_socket_reuse(const Env *env, i32 fd) {
+  TestServerCtx *const c = env->ctx;
   assert(c);
-  assert(4242 == fd);
+  assert(TEST_SERVER_LISTEN_FD == fd);
 
   c->reuse_calls += 1;
   return (Error){.kind = c->reuse_fails_with};
 }
 
 __attribute__((warn_unused_result)) static Error
-test_server_tcp_bind_ipv4(const IO *io, i32 fd, Ipv4Addr addr) {
-  TestServerCtx *const c = io->ctx;
+test_server_tcp_bind_ipv4(const Env *env, i32 fd, Ipv4Addr addr) {
+  TestServerCtx *const c = env->ctx;
   assert(c);
-  assert(4242 == fd);
+  assert(TEST_SERVER_LISTEN_FD == fd);
 
   c->bind_calls += 1;
   c->bound_addr = addr;
@@ -570,10 +807,10 @@ test_server_tcp_bind_ipv4(const IO *io, i32 fd, Ipv4Addr addr) {
 }
 
 __attribute__((warn_unused_result)) static Error
-test_server_listen(const IO *io, i32 fd, i32 backlog) {
-  TestServerCtx *const c = io->ctx;
+test_server_listen(const Env *env, i32 fd, i32 backlog) {
+  TestServerCtx *const c = env->ctx;
   assert(c);
-  assert(4242 == fd);
+  assert(TEST_SERVER_LISTEN_FD == fd);
 
   c->listen_calls += 1;
   c->backlog = backlog;
@@ -581,99 +818,137 @@ test_server_listen(const IO *io, i32 fd, i32 backlog) {
 }
 
 __attribute__((warn_unused_result)) static Error
-test_server_accept(const IO *io, i32 listen_socket, i32 *dst_accept_socket,
-                   Ipv4Addr *dst_accept_addr) {
-  TestServerCtx *const c = io->ctx;
-  assert(c);
-  assert(4242 == listen_socket);
-  assert(dst_accept_socket);
-  assert(dst_accept_addr);
-
-  c->accept_calls += 1;
-
-  if (c->accept_calls == c->conn_reset_at) {
-    return (Error){.kind = ErrKindConnReset};
-  }
-
-  // A reset hands over nothing, so it does not count against the budget.
-  if (c->accept_handed_over >= c->accept_success_max) {
-    return (Error){.kind = c->accept_ends_with};
-  }
-  c->accept_handed_over += 1;
-
-  *dst_accept_socket = (i32)(5000 + c->accept_calls);
-  *dst_accept_addr = (Ipv4Addr){.ip = 0x7f000001, .port = 4000};
-  return (Error){.kind = ErrKindNone};
-}
-
-__attribute__((warn_unused_result)) static Error test_server_close(const IO *io,
-                                                                   i32 fd) {
-  TestServerCtx *const c = io->ctx;
+test_server_close_socket(const Env *env, i32 fd) {
+  TestServerCtx *const c = env->ctx;
   assert(c);
   assert(fd > 0);
 
-  c->close_calls += 1;
+  c->close_socket_calls += 1;
   return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static Error
-test_server_thread_create(const IO *io, ThreadCallback cb, void *data) {
-  TestServerCtx *const c = io->ctx;
-  assert(c);
-  assert(cb);
-  assert(data);
-
-  c->thread_create_calls += 1;
-  if (ErrKindNone != c->thread_create_fails_with) {
-    return (Error){.kind = c->thread_create_fails_with};
-  }
-
-  if (c->run_thread_inline) {
-    (void)cb(data);
-  }
-  return (Error){.kind = ErrKindNone};
-}
-
-__attribute__((warn_unused_result)) static Error
-test_server_read(const IO *io, i32 fd, Slice_u8 data, usize *dst_read) {
-  TestServerCtx *const c = io->ctx;
-  assert(c);
-  assert(fd > 0);
-  assert(dst_read);
-
-  c->read_calls += 1;
-  if (ErrKindNone != c->read_fails_with) {
-    return (Error){.kind = c->read_fails_with};
-  }
-
-  const u8 msg[] = "hello";
-  assert(data.len >= sizeof(msg) - 1);
-  memcpy(data.data, msg, sizeof(msg) - 1);
-  *dst_read = sizeof(msg) - 1;
-
-  return (Error){.kind = ErrKindNone};
-}
-
-__attribute__((warn_unused_result)) static IO
-test_io_server_make(TestServerCtx *ctx) {
+__attribute__((warn_unused_result)) static Env
+test_env_server_make(TestServerCtx *ctx) {
   assert(ctx);
 
-  return (IO){
+  return (Env){
       .socket = test_server_socket,
       .enable_socket_reuse = test_server_enable_socket_reuse,
       .tcp_bind_ipv4 = test_server_tcp_bind_ipv4,
       .listen = test_server_listen,
-      .accept = test_server_accept,
-      .close = test_server_close,
-      .thread_create = test_server_thread_create,
-      .read = test_server_read,
+      .close_socket = test_server_close_socket,
       .ctx = ctx,
   };
 }
 
-// Setting up the listener: each step's failure stops the sequence and travels
-// back verbatim, and every failure that happens after the socket exists hands
-// the descriptor back.
+static TestIoPerformResult test_server_perform(TestIo *test_io,
+                                               IoCompletion *completion, i32 fd,
+                                               Error *dst_err, usize *dst_res) {
+  TestServerCtx *const c = test_io->script;
+  assert(c);
+  assert(completion);
+
+  switch (completion->action.kind) {
+  case IoActionKindAccept: {
+    assert(TEST_SERVER_LISTEN_FD == fd);
+    c->accept_calls += 1;
+
+    if (c->accept_calls == c->conn_reset_at) {
+      *dst_err = (Error){.kind = ErrKindConnReset};
+      return TestIoPerformDone;
+    }
+
+    // A reset hands over nothing, so it does not count against the budget.
+    if (c->accept_handed_over >= c->accept_success_max) {
+      *dst_err = (Error){.kind = c->accept_ends_with};
+      return TestIoPerformDone;
+    }
+    c->accept_handed_over += 1;
+
+    completion->action.v.accept.addr =
+        (Ipv4Addr){.ip = 0x7f000001, .port = 4000};
+    *dst_res = 5000 + c->accept_calls;
+    return TestIoPerformDone;
+  }
+
+  case IoActionKindRead: {
+    assert(fd > 0);
+    c->read_calls += 1;
+
+    if (c->read_parks) {
+      return TestIoPerformParked;
+    }
+    if (ErrKindNone != c->read_fails_with) {
+      *dst_err = (Error){.kind = c->read_fails_with};
+      return TestIoPerformDone;
+    }
+
+    const u8 msg[] = "hello";
+    const Slice_u8 data = completion->action.v.read.data;
+    assert(data.len >= sizeof(msg) - 1);
+    memcpy(data.data, msg, sizeof(msg) - 1);
+    *dst_res = sizeof(msg) - 1;
+    return TestIoPerformDone;
+  }
+
+  case IoActionKindClose:
+    assert(fd > 0);
+    c->close_calls += 1;
+    return TestIoPerformDone;
+
+  case IoActionKindNone:
+  case IoActionKindOpen:
+  case IoActionKindWrite:
+  case IoActionKindConnect:
+  case IoActionKindSendTo:
+  case IoActionKindFileSize:
+  case IoActionKindRemoveFile:
+    break;
+  }
+
+  assert(0 && "the server drives none of these");
+  return TestIoPerformDone;
+}
+
+// Run the listener to a standstill and report what stopped it. Every one of
+// these tests is the same shape: set the listener up, turn the loop until there
+// is nothing left in flight, and look at what was recorded.
+__attribute__((warn_unused_result)) static Error
+test_server_run(TestIo *test_io, TestServerCtx *ctx, const Env *env,
+                IoServer *server, TorrentNetworkCtx *network_ctx,
+                Ipv4Addr addr) {
+  assert(test_io);
+  assert(ctx);
+  assert(server);
+  assert(network_ctx);
+
+  test_io_make(test_io, env, test_server_perform, ctx);
+
+  const i32 saved = test_stdout_silence();
+
+  const Error err_listen = io_listen_and_serve_tcp_ipv4(
+      &test_io->io, server, network_ctx, addr, torrent_client_on_accept);
+
+  // Whether the setup failed or the listener ran and stopped, the loop is
+  // turned until nothing is outstanding: a listener that came down still has a
+  // hang-up of its own to finish.
+  const Error err_run = io_run_until(&test_io->io, &server->done, 1);
+  assert(ErrKindNone == err_run.kind);
+
+  test_stdout_restore(saved);
+
+  // The setup reports through the return value and through `server->err`
+  // alike, so a test can read either; they agree.
+  if (ErrKindNone != err_listen.kind) {
+    assert(err_listen.kind == server->err.kind);
+  }
+
+  return server->err;
+}
+
+// Setting the listener up: each step's failure stops the sequence and travels
+// back verbatim, and every failure after the socket exists hands the descriptor
+// back.
 static void test_io_listen_and_serve_setup_failures(void) {
   const Ipv4Addr addr = {.ip = 0x7f000001, .port = 12345};
 
@@ -706,13 +981,13 @@ static void test_io_listen_and_serve_setup_failures(void) {
         .listen_fails_with = cases[i].listen,
         .accept_ends_with = ErrKindInvalidData,
     };
-    const IO io = test_io_server_make(&ctx);
+    const Env env = test_env_server_make(&ctx);
+    TestIo test_io = {0};
+    IoServer server = {0};
     TorrentNetworkCtx network_ctx = {0};
 
-    const i32 saved = test_stdout_silence();
-    const Error err = io_listen_and_serve_tcp_ipv4(&io, &network_ctx, addr,
-                                                   torrent_client_on_accept);
-    test_stdout_restore(saved);
+    const Error err =
+        test_server_run(&test_io, &ctx, &env, &server, &network_ctx, addr);
 
     assert(cases[i].expected == err.kind);
     assert(cases[i].expected_closes == ctx.close_calls);
@@ -723,15 +998,14 @@ static void test_io_listen_and_serve_setup_failures(void) {
   // The listener is bound to what it was asked for, with a backlog.
   {
     TestServerCtx ctx = {.accept_ends_with = ErrKindInvalidData};
-    const IO io = test_io_server_make(&ctx);
+    const Env env = test_env_server_make(&ctx);
+    TestIo test_io = {0};
+    IoServer server = {0};
     TorrentNetworkCtx network_ctx = {0};
 
-    const i32 saved = test_stdout_silence();
     assert(ErrKindInvalidData ==
-           io_listen_and_serve_tcp_ipv4(&io, &network_ctx, addr,
-                                        torrent_client_on_accept)
+           test_server_run(&test_io, &ctx, &env, &server, &network_ctx, addr)
                .kind);
-    test_stdout_restore(saved);
 
     assert(addr.ip == ctx.bound_addr.ip);
     assert(addr.port == ctx.bound_addr.port);
@@ -741,51 +1015,32 @@ static void test_io_listen_and_serve_setup_failures(void) {
   }
 }
 
-// The accept loop and the handler behind it.
+// The accept loop and the chain of callbacks behind it.
 static void test_io_listen_and_serve_accept(void) {
   const Ipv4Addr addr = {.ip = 0x7f000001, .port = 12345};
 
   // A peer that vanishes between the handshake and the `accept` is one dead
-  // connection, not a dead server: the loop goes back around. Nothing but a
-  // fake can produce that at a chosen moment.
+  // connection, not a dead server: the listener goes back for another. Nothing
+  // but a fake can produce that at a chosen moment.
   {
     TestServerCtx ctx = {.accept_success_max = 2,
                          .conn_reset_at = 1,
                          .accept_ends_with = ErrKindInvalidData};
-    const IO io = test_io_server_make(&ctx);
+    const Env env = test_env_server_make(&ctx);
+    TestIo test_io = {0};
+    IoServer server = {0};
     TorrentNetworkCtx network_ctx = {0};
 
-    const i32 saved = test_stdout_silence();
     assert(ErrKindInvalidData ==
-           io_listen_and_serve_tcp_ipv4(&io, &network_ctx, addr,
-                                        torrent_client_on_accept)
+           test_server_run(&test_io, &ctx, &env, &server, &network_ctx, addr)
                .kind);
-    test_stdout_restore(saved);
 
-    // The reset was shrugged off, so both connections still arrived.
-    assert(2 == ctx.thread_create_calls);
+    // The reset was shrugged off, so both connections still arrived and both
+    // were read.
+    assert(2 == ctx.read_calls);
     assert(4 == ctx.accept_calls);
-  }
-
-  // A handler that cannot be started releases its slot and hangs up, rather
-  // than leaking either.
-  {
-    TestServerCtx ctx = {.accept_success_max = 3,
-                         .thread_create_fails_with = ErrKindOOM,
-                         .accept_ends_with = ErrKindInvalidData};
-    const IO io = test_io_server_make(&ctx);
-    TorrentNetworkCtx network_ctx = {0};
-
-    const i32 saved = test_stdout_silence();
-    assert(ErrKindInvalidData ==
-           io_listen_and_serve_tcp_ipv4(&io, &network_ctx, addr,
-                                        torrent_client_on_accept)
-               .kind);
-    test_stdout_restore(saved);
-
-    assert(3 == ctx.thread_create_calls);
-    // One per accepted connection, plus the listener itself.
-    assert(4 == ctx.close_calls);
+    // One per connection, plus the listener itself.
+    assert(3 == ctx.close_calls);
 
     // Every slot was handed back, so the pool is as empty as it started.
     for (usize i = 0; i < POOL_SLOT_GROUPS; i++) {
@@ -793,21 +1048,55 @@ static void test_io_listen_and_serve_accept(void) {
     }
   }
 
-  // Running the handler inline covers it without a second thread: it reads
-  // once and hangs up.
+  // A connection whose read cannot even be submitted releases its slot and
+  // hangs up, rather than leaking either. The callback never runs in that
+  // case, so this is the one path that has to clean up on the spot.
   {
-    TestServerCtx ctx = {.accept_success_max = 1,
-                         .run_thread_inline = true,
+    TestServerCtx ctx = {.accept_success_max = 3,
                          .accept_ends_with = ErrKindInvalidData};
-    const IO io = test_io_server_make(&ctx);
+    const Env env = test_env_server_make(&ctx);
+    TestIo test_io = {0};
+    IoServer server = {0};
     TorrentNetworkCtx network_ctx = {0};
 
+    test_io_make(&test_io, &env, test_server_perform, &ctx);
+    test_io.submit_fails_for = IoActionKindRead;
+    test_io.submit_fails_with = ErrKindOOM;
+
     const i32 saved = test_stdout_silence();
-    assert(ErrKindInvalidData ==
-           io_listen_and_serve_tcp_ipv4(&io, &network_ctx, addr,
-                                        torrent_client_on_accept)
-               .kind);
+    const Error err_listen =
+        io_listen_and_serve_tcp_ipv4(&test_io.io, &server, &network_ctx, addr,
+                                     torrent_client_on_accept);
+    assert(ErrKindNone == err_listen.kind);
+    assert(ErrKindNone == io_run_until(&test_io.io, &server.done, 1).kind);
     test_stdout_restore(saved);
+
+    assert(ErrKindInvalidData == server.err.kind);
+    // Nothing was ever read, and every connection was still hung up on, plus
+    // the listener.
+    assert(0 == ctx.read_calls);
+    assert(3 == ctx.accept_handed_over);
+    assert(4 == ctx.close_calls);
+
+    for (usize i = 0; i < POOL_SLOT_GROUPS; i++) {
+      assert(0 == network_ctx.pool.occupied[i]);
+    }
+  }
+
+  // The ordinary connection: it is read once and hung up on, and the slot goes
+  // back. No thread, and nothing to join -- the read and the close are two more
+  // turns of the same loop the accept came from.
+  {
+    TestServerCtx ctx = {.accept_success_max = 1,
+                         .accept_ends_with = ErrKindInvalidData};
+    const Env env = test_env_server_make(&ctx);
+    TestIo test_io = {0};
+    IoServer server = {0};
+    TorrentNetworkCtx network_ctx = {0};
+
+    assert(ErrKindInvalidData ==
+           test_server_run(&test_io, &ctx, &env, &server, &network_ctx, addr)
+               .kind);
 
     assert(1 == ctx.read_calls);
     assert(2 == ctx.close_calls);
@@ -819,18 +1108,16 @@ static void test_io_listen_and_serve_accept(void) {
   // A read that fails still hangs up and still frees the slot.
   {
     TestServerCtx ctx = {.accept_success_max = 1,
-                         .run_thread_inline = true,
                          .read_fails_with = ErrKindConnReset,
                          .accept_ends_with = ErrKindInvalidData};
-    const IO io = test_io_server_make(&ctx);
+    const Env env = test_env_server_make(&ctx);
+    TestIo test_io = {0};
+    IoServer server = {0};
     TorrentNetworkCtx network_ctx = {0};
 
-    const i32 saved = test_stdout_silence();
     assert(ErrKindInvalidData ==
-           io_listen_and_serve_tcp_ipv4(&io, &network_ctx, addr,
-                                        torrent_client_on_accept)
+           test_server_run(&test_io, &ctx, &env, &server, &network_ctx, addr)
                .kind);
-    test_stdout_restore(saved);
 
     assert(1 == ctx.read_calls);
     assert(2 == ctx.close_calls);
@@ -840,52 +1127,56 @@ static void test_io_listen_and_serve_accept(void) {
   }
 }
 
-// Backpressure: one more connection than the pool holds. Reaching this with
-// real sockets would mean opening `TORRENT_CLIENTS_MAX` of them.
+// Backpressure: one more connection than the pool holds, all of them held open
+// by a read that never answers. Reaching this with real sockets would mean
+// opening `TORRENT_CLIENTS_MAX` of them.
 static void test_torrent_client_pool_exhaustion(void) {
   const Ipv4Addr addr = {.ip = 0x7f000001, .port = 12345};
 
-  // The pool is a megabyte or so of slots: too much for the stack.
+  // The pool is a megabyte or so of slots, and the fake `IO` has room for an
+  // operation per slot: too much for the stack, either of them.
   static TorrentNetworkCtx network_ctx;
+  static TestIo test_io;
   memset(&network_ctx, 0, sizeof(network_ctx));
 
   TestServerCtx ctx = {.accept_success_max = TORRENT_CLIENTS_MAX + 1,
+                       .read_parks = true,
                        .accept_ends_with = ErrKindInvalidData};
-  const IO io = test_io_server_make(&ctx);
+  const Env env = test_env_server_make(&ctx);
+  IoServer server = {0};
 
-  const i32 saved = test_stdout_silence();
   assert(ErrKindInvalidData ==
-         io_listen_and_serve_tcp_ipv4(&io, &network_ctx, addr,
-                                      torrent_client_on_accept)
+         test_server_run(&test_io, &ctx, &env, &server, &network_ctx, addr)
              .kind);
-  test_stdout_restore(saved);
 
   // Nothing ever finishes, so the pool fills and the last connection is
   // refused rather than overrunning the slots.
-  // `TORRENT_CLIENTS_MAX + 1` connections were handed over, one more than
-  // the pool holds, plus the call that ends the loop.
+  // `TORRENT_CLIENTS_MAX + 1` connections were handed over, one more than the
+  // pool holds, plus the call that ends the loop.
   assert(TORRENT_CLIENTS_MAX + 2 == ctx.accept_calls);
   assert(TORRENT_CLIENTS_MAX + 1 == ctx.accept_handed_over);
-  // The last one never reached `thread_create`: the pool refused it first.
-  assert(TORRENT_CLIENTS_MAX == ctx.thread_create_calls);
+  // Every connection the pool took was read from; the refused one never was.
+  assert(TORRENT_CLIENTS_MAX == ctx.read_calls);
 
-  // Every group is full.
+  // Every group is full: nothing was handed back, because no read answered.
   for (usize i = 0; i < POOL_SLOT_GROUPS; i++) {
     assert(~(PoolSlotGroup)0 == network_ctx.pool.occupied[i]);
   }
 
-  // The refused connection was hung up on, and so was the listener.
-  assert(2 == ctx.close_calls);
+  // The refused connection was hung up on through `Env`, there being no slot
+  // to keep a completion in; the listener went through `IO` as always.
+  assert(1 == ctx.close_socket_calls);
+  assert(1 == ctx.close_calls);
 }
 
 static void test_arena_valloc(void) {
-  const IO io = io_platform_make();
+  const Env *const env = env_platform_make();
 
   // A request the kernel cannot satisfy. `mmap` reports `MAP_FAILED`, not
   // NULL, so this also pins down that conversion, and that the `ENOMEM` it
   // sets comes back as `ErrOOM` rather than a bare failure.
   Arena arena = {0};
-  assert(ErrKindOOM == arena_valloc(&io, (usize)1 << 62, &arena).kind);
+  assert(ErrKindOOM == arena_valloc(env, (usize)1 << 62, &arena).kind);
 
   // A failed call leaves the caller's arena alone.
   assert(NULL == arena.start);
@@ -2348,10 +2639,10 @@ test_merkle_data(Arena *arena) {
 // power of two number of blocks, and block counts needing one or several
 // padding leaves.
 static void test_torrent_merkle_vectors(void) {
-  const IO io = io_platform_make();
+  const Env *const env = env_platform_make();
   Arena data_arena = {0};
   assert(ErrKindNone ==
-         arena_valloc(&io, TEST_MERKLE_MAX_LEN + 4 * KiB, &data_arena).kind);
+         arena_valloc(env, TEST_MERKLE_MAX_LEN + 4 * KiB, &data_arena).kind);
   assert(data_arena.start);
   const Slice_u8 data = test_merkle_data(&data_arena);
 
@@ -2414,10 +2705,10 @@ static void test_torrent_merkle_vectors(void) {
 // info dictionary. Checked against an independently built tree rather than
 // against the implementation's own intermediate state.
 static void test_torrent_merkle_piece_layer(void) {
-  const IO io = io_platform_make();
+  const Env *const env = env_platform_make();
   Arena data_arena = {0};
   assert(ErrKindNone ==
-         arena_valloc(&io, TEST_MERKLE_MAX_LEN + 4 * KiB, &data_arena).kind);
+         arena_valloc(env, TEST_MERKLE_MAX_LEN + 4 * KiB, &data_arena).kind);
   assert(data_arena.start);
   const Slice_u8 data = test_merkle_data(&data_arena);
 
@@ -2508,9 +2799,9 @@ static void test_torrent_merkle_piece_layer(void) {
 // is zeroed. Everything above it is hashed normally, so a node covering
 // nothing but padding is emphatically not zero.
 static void test_torrent_merkle_padding(void) {
-  const IO io = io_platform_make();
+  const Env *const env = env_platform_make();
   Arena data_arena = {0};
-  assert(ErrKindNone == arena_valloc(&io, 64 * KiB, &data_arena).kind);
+  assert(ErrKindNone == arena_valloc(env, 64 * KiB, &data_arena).kind);
   assert(data_arena.start);
 
   // Three blocks, so the tree pads to four leaves and the last leaf covers no
@@ -2609,9 +2900,9 @@ static void test_torrent_merkle_empty(void) {
 // The one failure path: an arena too small for the tree is reported, not
 // asserted, and leaves nothing half built behind.
 static void test_torrent_merkle_oom(void) {
-  const IO io = io_platform_make();
+  const Env *const env = env_platform_make();
   Arena data_arena = {0};
-  assert(ErrKindNone == arena_valloc(&io, 64 * KiB, &data_arena).kind);
+  assert(ErrKindNone == arena_valloc(env, 64 * KiB, &data_arena).kind);
   assert(data_arena.start);
 
   // Two blocks, so at one block per piece the layer needs two hashes.
@@ -4189,25 +4480,75 @@ static void test_sha256_neon_lengths(void) {
 #endif
 }
 
-// Removing a scratch file the harness itself made. It goes to the real
-// platform for the same reason `test_stdout_silence` does: the file is on the
-// real filesystem whatever `io` the test under it happens to be driving.
-__attribute__((warn_unused_result)) static Error
-test_remove_file(Slice_u8 path) {
-  const IO io = io_platform_make();
+// The real platform `IO`. Unlike an `Env`, it is an object and not just a
+// vtable -- it has a kqueue and a changelist -- so it is allocated, out of an
+// arena the test owns, and it holds on to the `Env` that `env_platform_make`
+// keeps for the process.
+//
+// `*arena` has to outlive the returned `IO`.
+__attribute__((warn_unused_result)) static IO *test_io_real(Arena *arena) {
+  assert(arena);
 
-  return io.remove_file(&io, path);
+  IO *io = NULL;
+  assert(ErrKindNone == io_platform_make(arena, env_platform_make(), &io).kind);
+  assert(io);
+
+  return io;
+}
+
+// Removing a scratch file the harness itself made. It goes to the real platform
+// for the same reason `test_stdout_silence` does: the file is on the real
+// filesystem whatever `io` the test under it happens to be driving.
+__attribute__((warn_unused_result)) static Error
+test_remove_file(IO *io, Slice_u8 path) {
+  assert(io);
+
+  IoOnce once = {0};
+  io_once_init(&once);
+
+  const Error err =
+      io->remove_file(io, &once.completion, path, io_once_on_done);
+  if (ErrKindNone != err.kind) {
+    return err;
+  }
+
+  return io_once_wait(io, &once);
+}
+
+// One `open`, waited out, for the tests that are checking what `open` reports
+// rather than doing anything with the descriptor. The descriptor is handed back
+// through `*dst_fd` when there is one, and left alone when there is not.
+__attribute__((warn_unused_result)) static Error
+test_open(IO *io, Slice_u8 path, FileOpenOptions opts, i32 *dst_fd) {
+  assert(io);
+  assert(dst_fd);
+
+  IoOnce once = {0};
+  io_once_init(&once);
+
+  const Error err_submit =
+      io->open(io, &once.completion, path, opts, io_once_on_done);
+  if (ErrKindNone != err_submit.kind) {
+    return err_submit;
+  }
+
+  const Error err = io_once_wait(io, &once);
+  if (ErrKindNone == err.kind) {
+    *dst_fd = (i32)once.res;
+  }
+
+  return err;
 }
 
 // A path under `TMPDIR` unique to this process, so a test run does not
 // collide with a stale file or with another run.
 __attribute__((warn_unused_result)) static Slice_u8
 test_tmp_path(char *buf, usize buf_len, const char *name) {
-  const IO io = io_platform_make();
+  const Env *const env = env_platform_make();
 
   const char *const dir = getenv("TMPDIR");
   const i32 n = snprintf(buf, buf_len, "%s/file_send_test_%zu_%s",
-                         dir ? dir : "/tmp", io.get_process_id(&io), name);
+                         dir ? dir : "/tmp", env->get_process_id(env), name);
   assert(n > 0);
   assert((usize)n < buf_len);
 
@@ -4217,15 +4558,19 @@ test_tmp_path(char *buf, usize buf_len, const char *name) {
 // The failure paths of `open`, which are the ones a caller actually has to
 // handle: they are reached through the vtable like any other caller would.
 static void test_io_open_errors(void) {
-  const IO io = io_platform_make();
+  // Room for the platform `IO`, whose changelist is the bulk of it.
+  Arena arena = test_arena(256 * KiB);
+  IO *const io = test_io_real(&arena);
   i32 fd = -1;
 
-  // An empty path is rejected before the syscall.
-  assert(
-      ErrKindInvalidData ==
-      io.open(&io, slice_u8_make(NULL, 0), FileOpenOptionsReadOnly, &fd).kind);
+  // An empty path is rejected before the syscall -- but not before the
+  // operation is submitted: the check is in the syscall wrapper the loop runs,
+  // so it reports through the callback like everything else.
   assert(ErrKindInvalidData ==
-         io.open(&io, test_slice(""), FileOpenOptionsReadOnly, &fd).kind);
+         test_open(io, slice_u8_make(NULL, 0), FileOpenOptionsReadOnly, &fd)
+             .kind);
+  assert(ErrKindInvalidData ==
+         test_open(io, test_slice(""), FileOpenOptionsReadOnly, &fd).kind);
 
   // So is one too long for the fixed buffer, and the limit rides along in
   // `data` rather than an `errno` that was never set.
@@ -4234,7 +4579,7 @@ static void test_io_open_errors(void) {
     memset(long_path, 'a', sizeof(long_path) - 1);
     const Slice_u8 path = slice_u8_make((u8 *)long_path, sizeof(long_path) - 1);
 
-    const Error err = io.open(&io, path, FileOpenOptionsReadOnly, &fd);
+    const Error err = test_open(io, path, FileOpenOptionsReadOnly, &fd);
     assert(ErrKindRange == err.kind);
     assert(4095 == err.data);
   }
@@ -4243,9 +4588,9 @@ static void test_io_open_errors(void) {
   {
     char buf[256] = {0};
     const Slice_u8 path = test_tmp_path(buf, sizeof(buf), "does_not_exist");
-    (void)test_remove_file(path);
+    (void)test_remove_file(io, path);
 
-    const Error err = io.open(&io, path, FileOpenOptionsReadOnly, &fd);
+    const Error err = test_open(io, path, FileOpenOptionsReadOnly, &fd);
     // `ENOENT` has no kind of its own yet, so it lands in the catch-all;
     // `data` is what tells it apart.
     assert(ErrKindInvalidData == err.kind);
@@ -4257,22 +4602,24 @@ static void test_io_open_errors(void) {
 // are checked as one: against a real file, because a fake filesystem would
 // only be testing itself.
 static void test_io_file_round_trip(void) {
-  const IO io = io_platform_make();
+  // Room for the platform `IO`, whose changelist is the bulk of it.
+  Arena arena = test_arena(256 * KiB);
+  IO *const io = test_io_real(&arena);
 
   char buf[256] = {0};
   const Slice_u8 path = test_tmp_path(buf, sizeof(buf), "round_trip");
-  (void)test_remove_file(path);
+  (void)test_remove_file(io, path);
 
   // Bencode is binary, so a NUL in the middle must survive.
   const u8 payload[] = {'d', '3', ':', 'a', 'b', 'c', 0x00, 'e'};
   const Slice_u8 data = slice_u8_make((u8 *)payload, sizeof(payload));
 
-  assert(ErrKindNone == io.write_all_to_file(&io, path, data).kind);
+  assert(ErrKindNone == io_write_all_to_file_blocking(io, path, data).kind);
 
   {
     Slice_u8 got = {0};
     assert(ErrKindNone ==
-           io.map_file(&io, path, FileOpenOptionsReadOnly, &got).kind);
+           io_map_file_blocking(io, path, FileOpenOptionsReadOnly, &got).kind);
     assert(data.len == got.len);
     assert(0 == memcmp(data.data, got.data, data.len));
   }
@@ -4282,34 +4629,36 @@ static void test_io_file_round_trip(void) {
   {
     const u8 shorter[] = {'i', '1', 'e'};
     const Slice_u8 data_shorter = slice_u8_make((u8 *)shorter, sizeof(shorter));
-    assert(ErrKindNone == io.write_all_to_file(&io, path, data_shorter).kind);
+    assert(ErrKindNone ==
+           io_write_all_to_file_blocking(io, path, data_shorter).kind);
 
     Slice_u8 got = {0};
     assert(ErrKindNone ==
-           io.map_file(&io, path, FileOpenOptionsReadOnly, &got).kind);
+           io_map_file_blocking(io, path, FileOpenOptionsReadOnly, &got).kind);
     assert(sizeof(shorter) == got.len);
     assert(0 == memcmp(shorter, got.data, sizeof(shorter)));
   }
 
-  // Writing nothing is a no-op, not a truncation: the file is left as it was.
+  // Writing nothing is a no-op, not a truncation: the file is left as it was,
+  // and nothing is ever submitted.
   {
     assert(ErrKindNone ==
-           io.write_all_to_file(&io, path, slice_u8_make(NULL, 0)).kind);
+           io_write_all_to_file_blocking(io, path, slice_u8_make(NULL, 0)).kind);
 
     Slice_u8 got = {0};
     assert(ErrKindNone ==
-           io.map_file(&io, path, FileOpenOptionsReadOnly, &got).kind);
+           io_map_file_blocking(io, path, FileOpenOptionsReadOnly, &got).kind);
     assert(3 == got.len);
   }
 
-  assert(ErrKindNone == test_remove_file(path).kind);
+  assert(ErrKindNone == test_remove_file(io, path).kind);
 
   // Mapping what is no longer there fails rather than handing back an empty
   // slice.
   {
     Slice_u8 got = {0};
     assert(ErrKindNone !=
-           io.map_file(&io, path, FileOpenOptionsReadOnly, &got).kind);
+           io_map_file_blocking(io, path, FileOpenOptionsReadOnly, &got).kind);
   }
 
   // An empty file has nothing to map: `mmap` rejects a zero length, and that
@@ -4318,30 +4667,39 @@ static void test_io_file_round_trip(void) {
     char empty_buf[256] = {0};
     const Slice_u8 empty_path =
         test_tmp_path(empty_buf, sizeof(empty_buf), "empty");
-    (void)test_remove_file(empty_path);
+    (void)test_remove_file(io, empty_path);
 
     i32 fd = -1;
-    assert(ErrKindNone ==
-           io.open(&io, empty_path,
-                   FileOpenOptionsWriteOnly | FileOpenOptionsCreate, &fd)
-               .kind);
-    assert(ErrKindNone == io.close(&io, fd).kind);
+    assert(ErrKindNone == test_open(io, empty_path,
+                                    FileOpenOptionsWriteOnly |
+                                        FileOpenOptionsCreate,
+                                    &fd)
+                              .kind);
+    assert(fd >= 0);
+    {
+      IoOnce once = {0};
+      io_once_init(&once);
+      assert(ErrKindNone ==
+             io->close(io, &once.completion, fd, io_once_on_done).kind);
+      assert(ErrKindNone == io_once_wait(io, &once).kind);
+    }
 
     Slice_u8 got = {0};
     assert(ErrKindNone !=
-           io.map_file(&io, empty_path, FileOpenOptionsReadOnly, &got).kind);
+           io_map_file_blocking(io, empty_path, FileOpenOptionsReadOnly, &got)
+               .kind);
     assert(slice_u8_is_empty(got));
 
-    assert(ErrKindNone == test_remove_file(empty_path).kind);
+    assert(ErrKindNone == test_remove_file(io, empty_path).kind);
   }
 
   // A directory opens but cannot be mapped, which walks the `mmap` failure
   // path with the descriptor already in hand.
   {
     Slice_u8 got = {0};
-    assert(ErrKindNone !=
-           io.map_file(&io, test_slice("/tmp"), FileOpenOptionsReadOnly, &got)
-               .kind);
+    assert(ErrKindNone != io_map_file_blocking(io, test_slice("/tmp"),
+                                               FileOpenOptionsReadOnly, &got)
+                              .kind);
   }
 
   // A path `open` rejects without setting `errno` still comes back as the
@@ -4354,12 +4712,13 @@ static void test_io_file_round_trip(void) {
 
     Slice_u8 got = {0};
     assert(ErrKindRange ==
-           io.map_file(&io, too_long, FileOpenOptionsReadOnly, &got).kind);
+           io_map_file_blocking(io, too_long, FileOpenOptionsReadOnly, &got)
+               .kind);
 
     const u8 byte = 'x';
-    assert(ErrKindRange ==
-           io.write_all_to_file(&io, too_long, slice_u8_make((u8 *)&byte, 1))
-               .kind);
+    assert(ErrKindRange == io_write_all_to_file_blocking(
+                               io, too_long, slice_u8_make((u8 *)&byte, 1))
+                               .kind);
   }
 }
 
@@ -4480,21 +4839,42 @@ static void test_error_kind_to_cstr(void) {
 // that was never open is a cheaper way to make the OS say no than faking it,
 // and it exercises the real `errno` mapping rather than a fake's idea of it.
 static void test_io_syscall_failures(void) {
-  const IO io = io_platform_make();
+  // Room for the platform `IO`, whose changelist is the bulk of it.
+  Arena arena = test_arena(256 * KiB);
+  IO *const io = test_io_real(&arena);
+  const Env *const env = env_platform_make();
 
-  // `fstat` on a descriptor that was never open.
+  // `fstat` on a descriptor that was never open. The operation is submitted and
+  // fails when the loop runs it, which is the only way a caller ever sees this.
   {
-    usize size = 0xAA;
-    const Error err = io.file_size(&io, -1, &size);
+    IoOnce once = {0};
+    io_once_init(&once);
+    once.res = 0xAA;
+
+    assert(ErrKindNone ==
+           io->file_size(io, &once.completion, -1, io_once_on_done).kind);
+    const Error err = io_once_wait(io, &once);
     assert(ErrKindNone != err.kind);
     assert(EBADF == (i32)err.data);
-    // Nothing is written when there is nothing to report.
-    assert(0xAA == size);
+    // Nothing is reported when there is nothing to report.
+    assert(0 == once.res);
   }
 
   // `close` of the same.
   {
-    const Error err = io.close(&io, -1);
+    IoOnce once = {0};
+    io_once_init(&once);
+
+    assert(ErrKindNone ==
+           io->close(io, &once.completion, -1, io_once_on_done).kind);
+    const Error err = io_once_wait(io, &once);
+    assert(ErrKindNone != err.kind);
+    assert(EBADF == (i32)err.data);
+  }
+
+  // `Env`'s hang-up reports the same thing, having nowhere to report it later.
+  {
+    const Error err = env->close_socket(env, -1);
     assert(ErrKindNone != err.kind);
     assert(EBADF == (i32)err.data);
   }
@@ -4502,7 +4882,7 @@ static void test_io_syscall_failures(void) {
   // `mprotect` wants a page aligned address, so an odd one is rejected
   // without having to find an unmapped page first.
   {
-    const Error err = io.vprotect_none(&io, (void *)1, 4096);
+    const Error err = env->vprotect_none(env, (void *)1, 4096);
     assert(ErrKindNone != err.kind);
   }
 
@@ -4518,16 +4898,16 @@ static void test_io_syscall_failures(void) {
     const u8 payload[] = {'a', 'b', 'c'};
 
     assert(ErrKindNone ==
-           io.write_all_to_file(&io, path,
-                                slice_u8_make((u8 *)payload, sizeof(payload)))
+           io_write_all_to_file_blocking(
+               io, path, slice_u8_make((u8 *)payload, sizeof(payload)))
                .kind);
 
     Slice_u8 got = {0};
     assert(ErrKindNone ==
-           io.map_file(&io, path, FileOpenOptionsWriteOnly, &got).kind);
+           io_map_file_blocking(io, path, FileOpenOptionsWriteOnly, &got).kind);
     assert(sizeof(payload) == got.len);
 
-    assert(ErrKindNone == test_remove_file(path).kind);
+    assert(ErrKindNone == test_remove_file(io, path).kind);
   }
 }
 
@@ -4602,23 +4982,24 @@ static void test_torrent_make_dicts_oom(void) {
   assert(metainfo_oks > 0);
 }
 
-// A partial override: the real `map_file` and `write_all_to_file` run against
-// faked primitives. That is the whole reason a slot is handed the vtable --
-// the composites are the program's operations, the primitives underneath them
-// are the platform's, and only the second kind is worth faking.
-//
-// Anything not faked is delegated to `real`, so `open` still yields a
-// descriptor the rest of the code can use. A fake never invents one: it
-// either fails or hands back a genuine one.
-typedef struct {
-  IO real;
+// ---------- The file composites ----------
 
+// The real `io_map_file` and `io_write_all_to_file` run against faked
+// primitives. That is the whole reason the composites are state machines over
+// the slots -- the composites are the program's operations, the primitives
+// underneath them are the platform's, and only the second kind is worth faking.
+//
+// Anything not faked goes to the real syscall, so `open` still yields a
+// descriptor the rest of the code can use. A fake never invents one: it either
+// fails or hands back a genuine one. The composites reach `mmap` through
+// `io->env`, which is the real one throughout.
+typedef struct {
   ErrorKind open_fails_with;
   ErrorKind file_size_fails_with;
   ErrorKind write_fails_with;
 
-  // Report at most this many bytes per `write`, so the loop has to go around
-  // more than once. Zero means "as many as asked".
+  // Report at most this many bytes per `write`, so the state machine has to go
+  // around more than once. Zero means "as many as asked".
   usize write_chunk;
   // The call at this index (1-based, 0 for never) is interrupted, or reports
   // that it wrote nothing.
@@ -4631,88 +5012,92 @@ typedef struct {
   usize file_size_calls;
 } TestFileCtx;
 
-__attribute__((warn_unused_result)) static Error
-test_file_open(const IO *io, Slice_u8 path, FileOpenOptions opts, i32 *fd) {
-  TestFileCtx *const c = io->ctx;
+static TestIoPerformResult test_file_perform(TestIo *test_io,
+                                             IoCompletion *completion, i32 fd,
+                                             Error *dst_err, usize *dst_res) {
+  TestFileCtx *const c = test_io->script;
   assert(c);
+  assert(completion);
 
-  c->open_calls += 1;
-  if (ErrKindNone != c->open_fails_with) {
-    return (Error){.kind = c->open_fails_with};
+  switch (completion->action.kind) {
+  case IoActionKindOpen: {
+    c->open_calls += 1;
+    if (ErrKindNone != c->open_fails_with) {
+      *dst_err = (Error){.kind = c->open_fails_with};
+      return TestIoPerformDone;
+    }
+
+    // `open` produces a descriptor rather than acting on one.
+    assert(-1 == fd);
+    i32 opened = -1;
+    *dst_err = unix_open(completion->action.v.open.path,
+                         completion->action.v.open.options, &opened);
+    if (ErrKindNone == dst_err->kind) {
+      assert(opened >= 0);
+      *dst_res = (usize)(u32)opened;
+    }
+    return TestIoPerformDone;
   }
 
-  return c->real.open(&c->real, path, opts, fd);
-}
+  case IoActionKindClose:
+    c->close_calls += 1;
+    *dst_err = unix_close(fd);
+    return TestIoPerformDone;
 
-__attribute__((warn_unused_result)) static Error test_file_close(const IO *io,
-                                                                 i32 fd) {
-  TestFileCtx *const c = io->ctx;
-  assert(c);
+  case IoActionKindFileSize:
+    c->file_size_calls += 1;
+    if (ErrKindNone != c->file_size_fails_with) {
+      *dst_err = (Error){.kind = c->file_size_fails_with};
+      return TestIoPerformDone;
+    }
+    *dst_err = unix_file_size(fd, dst_res);
+    return TestIoPerformDone;
 
-  c->close_calls += 1;
-  return c->real.close(&c->real, fd);
-}
+  case IoActionKindWrite: {
+    c->write_calls += 1;
 
-__attribute__((warn_unused_result)) static Error
-test_file_file_size(const IO *io, i32 fd, usize *dst_size) {
-  TestFileCtx *const c = io->ctx;
-  assert(c);
+    if (c->write_calls == c->write_interrupted_at) {
+      *dst_err = (Error){.kind = ErrKindInterrupted};
+      return TestIoPerformDone;
+    }
+    if (ErrKindNone != c->write_fails_with) {
+      *dst_err = (Error){.kind = c->write_fails_with};
+      return TestIoPerformDone;
+    }
+    if (c->write_calls == c->write_zero_at) {
+      *dst_res = 0;
+      return TestIoPerformDone;
+    }
 
-  c->file_size_calls += 1;
-  if (ErrKindNone != c->file_size_fails_with) {
-    return (Error){.kind = c->file_size_fails_with};
+    const Slice_u8 data = completion->action.v.write.data;
+    const usize chunk = (0 != c->write_chunk && c->write_chunk < data.len)
+                            ? c->write_chunk
+                            : data.len;
+    *dst_err = unix_write(fd, slice_u8_take(data, chunk), dst_res);
+    return TestIoPerformDone;
   }
 
-  return c->real.file_size(&c->real, fd, dst_size);
-}
-
-__attribute__((warn_unused_result)) static Error
-test_file_write(const IO *io, i32 fd, Slice_u8 data, usize *dst_written) {
-  TestFileCtx *const c = io->ctx;
-  assert(c);
-  assert(dst_written);
-
-  c->write_calls += 1;
-
-  if (c->write_calls == c->write_interrupted_at) {
-    return (Error){.kind = ErrKindInterrupted};
-  }
-  if (ErrKindNone != c->write_fails_with) {
-    return (Error){.kind = c->write_fails_with};
-  }
-  if (c->write_calls == c->write_zero_at) {
-    *dst_written = 0;
-    return (Error){.kind = ErrKindNone};
+  case IoActionKindNone:
+  case IoActionKindRead:
+  case IoActionKindAccept:
+  case IoActionKindConnect:
+  case IoActionKindSendTo:
+  case IoActionKindRemoveFile:
+    break;
   }
 
-  const usize chunk = (0 != c->write_chunk && c->write_chunk < data.len)
-                          ? c->write_chunk
-                          : data.len;
-  return c->real.write(&c->real, fd, slice_u8_take(data, chunk), dst_written);
+  assert(0 && "the file composites drive none of these");
+  return TestIoPerformDone;
 }
 
-__attribute__((warn_unused_result)) static IO
-test_io_file_make(TestFileCtx *ctx) {
-  assert(ctx);
-
-  return (IO){
-      // The operations under test, real: the platform's own, so this checks
-      // whichever composites the build actually has.
-      .map_file = ctx->real.map_file,
-      .write_all_to_file = ctx->real.write_all_to_file,
-      // The primitives beneath them, faked.
-      .open = test_file_open,
-      .close = test_file_close,
-      .file_size = test_file_file_size,
-      .write = test_file_write,
-      .ctx = ctx,
-  };
-}
-
-// The error paths inside the composites, which no real file can produce: a
+// The error paths inside the composites, which no real file can produce: an
 // `open` that fails after the path was fine, an `fstat` that fails on a
 // descriptor that just opened, a short write, an interrupted one.
 static void test_io_composites_mocked(void) {
+  Arena arena = test_arena(256 * KiB);
+  IO *const real = test_io_real(&arena);
+  const Env *const env = env_platform_make();
+
   char buf[256] = {0};
   const Slice_u8 path = test_tmp_path(buf, sizeof(buf), "composites");
   const u8 payload[] = {'d', '3', ':', 'a', 'b', 'c', 0x00, 'e'};
@@ -4720,13 +5105,14 @@ static void test_io_composites_mocked(void) {
 
   // A failed `open` stops `map_file` before anything else is tried.
   {
-    TestFileCtx ctx = {.real = io_platform_make(),
-                       .open_fails_with = ErrKindTooManyFiles};
-    const IO io = test_io_file_make(&ctx);
+    TestFileCtx ctx = {.open_fails_with = ErrKindTooManyFiles};
+    TestIo test_io = {0};
+    test_io_make(&test_io, env, test_file_perform, &ctx);
     Slice_u8 got = {0};
 
     assert(ErrKindTooManyFiles ==
-           io.map_file(&io, path, FileOpenOptionsReadOnly, &got).kind);
+           io_map_file_blocking(&test_io.io, path, FileOpenOptionsReadOnly, &got)
+               .kind);
     assert(1 == ctx.open_calls);
     assert(0 == ctx.file_size_calls);
     // Nothing was opened, so nothing is closed.
@@ -4736,21 +5122,24 @@ static void test_io_composites_mocked(void) {
 
   // The same for `write_all_to_file`.
   {
-    TestFileCtx ctx = {.real = io_platform_make(),
-                       .open_fails_with = ErrOSKindPermission};
-    const IO io = test_io_file_make(&ctx);
+    TestFileCtx ctx = {.open_fails_with = ErrOSKindPermission};
+    TestIo test_io = {0};
+    test_io_make(&test_io, env, test_file_perform, &ctx);
 
-    assert(ErrOSKindPermission == io.write_all_to_file(&io, path, data).kind);
+    assert(ErrOSKindPermission ==
+           io_write_all_to_file_blocking(&test_io.io, path, data).kind);
     assert(0 == ctx.write_calls);
     assert(0 == ctx.close_calls);
   }
 
   // Write the file for real, so there is something to map.
   {
-    TestFileCtx ctx = {.real = io_platform_make()};
-    const IO io = test_io_file_make(&ctx);
+    TestFileCtx ctx = {0};
+    TestIo test_io = {0};
+    test_io_make(&test_io, env, test_file_perform, &ctx);
 
-    assert(ErrKindNone == io.write_all_to_file(&io, path, data).kind);
+    assert(ErrKindNone ==
+           io_write_all_to_file_blocking(&test_io.io, path, data).kind);
     assert(1 == ctx.write_calls);
     assert(1 == ctx.close_calls);
   }
@@ -4758,62 +5147,65 @@ static void test_io_composites_mocked(void) {
   // A failed `fstat` on a descriptor that just opened: unreachable with a
   // real file, and it is the path that has to hand the descriptor back.
   {
-    TestFileCtx ctx = {.real = io_platform_make(),
-                       .file_size_fails_with = ErrKindRange};
-    const IO io = test_io_file_make(&ctx);
+    TestFileCtx ctx = {.file_size_fails_with = ErrKindRange};
+    TestIo test_io = {0};
+    test_io_make(&test_io, env, test_file_perform, &ctx);
     Slice_u8 got = {0};
 
     assert(ErrKindRange ==
-           io.map_file(&io, path, FileOpenOptionsReadOnly, &got).kind);
+           io_map_file_blocking(&test_io.io, path, FileOpenOptionsReadOnly, &got)
+               .kind);
     assert(1 == ctx.file_size_calls);
     assert(1 == ctx.close_calls);
     assert(slice_u8_is_empty(got));
   }
 
-  // A short write keeps its place and goes around again until everything has
-  // landed. One byte at a time is the extreme case of it.
+  // A short write keeps its place and submits the rest, again and again until
+  // everything has landed. One byte at a time is the extreme case of it.
   {
-    TestFileCtx ctx = {.real = io_platform_make(), .write_chunk = 1};
-    const IO io = test_io_file_make(&ctx);
+    TestFileCtx ctx = {.write_chunk = 1};
+    TestIo test_io = {0};
+    test_io_make(&test_io, env, test_file_perform, &ctx);
 
-    assert(ErrKindNone == io.write_all_to_file(&io, path, data).kind);
+    assert(ErrKindNone ==
+           io_write_all_to_file_blocking(&test_io.io, path, data).kind);
     assert(sizeof(payload) == ctx.write_calls);
 
-    const IO real = io_platform_make();
     Slice_u8 got = {0};
     assert(ErrKindNone ==
-           real.map_file(&real, path, FileOpenOptionsReadOnly, &got).kind);
+           io_map_file_blocking(real, path, FileOpenOptionsReadOnly, &got).kind);
     assert(data.len == got.len);
     assert(0 == memcmp(data.data, got.data, data.len));
   }
 
-  // A signal before any progress is not a failure: the call is reissued and
-  // the same bytes go out.
+  // A signal before any progress is not a failure: the same slice is submitted
+  // again and the same bytes go out.
   {
-    TestFileCtx ctx = {.real = io_platform_make(),
-                       .write_chunk = 2,
-                       .write_interrupted_at = 2};
-    const IO io = test_io_file_make(&ctx);
+    TestFileCtx ctx = {.write_chunk = 2, .write_interrupted_at = 2};
+    TestIo test_io = {0};
+    test_io_make(&test_io, env, test_file_perform, &ctx);
 
-    assert(ErrKindNone == io.write_all_to_file(&io, path, data).kind);
+    assert(ErrKindNone ==
+           io_write_all_to_file_blocking(&test_io.io, path, data).kind);
     // Four chunks of two, plus the interrupted call that carried nothing.
     assert(5 == ctx.write_calls);
 
-    const IO real = io_platform_make();
     Slice_u8 got = {0};
     assert(ErrKindNone ==
-           real.map_file(&real, path, FileOpenOptionsReadOnly, &got).kind);
+           io_map_file_blocking(real, path, FileOpenOptionsReadOnly, &got).kind);
     assert(data.len == got.len);
     assert(0 == memcmp(data.data, got.data, data.len));
   }
 
-  // A write that reports no progress and no error would spin forever, so it
-  // is treated as the peer hanging up.
+  // A write that reports no progress and no error would go around forever, so
+  // it is treated as the peer hanging up.
   {
-    TestFileCtx ctx = {.real = io_platform_make(), .write_zero_at = 1};
-    const IO io = test_io_file_make(&ctx);
+    TestFileCtx ctx = {.write_zero_at = 1};
+    TestIo test_io = {0};
+    test_io_make(&test_io, env, test_file_perform, &ctx);
 
-    assert(ErrKindConnReset == io.write_all_to_file(&io, path, data).kind);
+    assert(ErrKindConnReset ==
+           io_write_all_to_file_blocking(&test_io.io, path, data).kind);
     assert(1 == ctx.write_calls);
     // The descriptor is handed back even on the way out.
     assert(1 == ctx.close_calls);
@@ -4821,15 +5213,37 @@ static void test_io_composites_mocked(void) {
 
   // A failed write reports, and still closes.
   {
-    TestFileCtx ctx = {.real = io_platform_make(),
-                       .write_fails_with = ErrKindConnReset};
-    const IO io = test_io_file_make(&ctx);
+    TestFileCtx ctx = {.write_fails_with = ErrKindConnReset};
+    TestIo test_io = {0};
+    test_io_make(&test_io, env, test_file_perform, &ctx);
 
-    assert(ErrKindConnReset == io.write_all_to_file(&io, path, data).kind);
+    assert(ErrKindConnReset ==
+           io_write_all_to_file_blocking(&test_io.io, path, data).kind);
     assert(1 == ctx.close_calls);
   }
 
-  assert(ErrKindNone == test_remove_file(path).kind);
+  // The composites also have a path where a step is never submitted at all,
+  // which is the one place they have to clean up without a callback.
+  {
+    TestFileCtx ctx = {0};
+    TestIo test_io = {0};
+    test_io_make(&test_io, env, test_file_perform, &ctx);
+    test_io.submit_fails_for = IoActionKindFileSize;
+    test_io.submit_fails_with = ErrKindAgain;
+    Slice_u8 got = {0};
+
+    assert(ErrKindAgain ==
+           io_map_file_blocking(&test_io.io, path, FileOpenOptionsReadOnly, &got)
+               .kind);
+    // The file was opened, so it is handed back even though nothing asked how
+    // big it was.
+    assert(1 == ctx.open_calls);
+    assert(0 == ctx.file_size_calls);
+    assert(1 == ctx.close_calls);
+    assert(slice_u8_is_empty(got));
+  }
+
+  assert(ErrKindNone == test_remove_file(real, path).kind);
 }
 
 static void test(const char *filter) {

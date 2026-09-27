@@ -10,10 +10,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-// `strerror_r` and not `strerror`: a thread is spawned per client, and
-// `strerror` hands back a buffer shared by the whole process. This is the XSI
-// spelling, the one `_POSIX_C_SOURCE` selects, which answers with 0 or an
-// error number rather than with a `char *`.
+// `strerror_r` and not `strerror`: `strerror` hands back a buffer shared by
+// the whole process, which is one caller's to hold on to and no other's. This
+// is the XSI spelling, the one `_POSIX_C_SOURCE` selects, which answers with 0
+// or an error number rather than with a `char *`.
 __attribute__((warn_unused_result)) static bool
 platform_error_describe(u64 os_error, char *dst, usize dst_len) {
   assert(dst);
@@ -132,9 +132,27 @@ unix_vprotect_none(const Env *env, void *ptr, usize size) {
   return (Error){.kind = ErrKindNone};
 }
 
+// Every descriptor that reaches `IO` is non-blocking. That is not a tuning
+// choice: `IO` waits for readiness and then retries the syscall, which only
+// works if the retry can answer `EAGAIN`. One blocking descriptor would park
+// the single thread that runs the loop on the first peer to go quiet, and with
+// it every other connection.
+__attribute__((warn_unused_result)) static Error unix_set_nonblocking(i32 fd) {
+  const i32 flags = fcntl(fd, F_GETFL, 0);
+  if (-1 == flags) {
+    return unix_error_from_errno(errno);
+  }
+
+  if (-1 == fcntl(fd, F_SETFL, flags | O_NONBLOCK)) {
+    return unix_error_from_errno(errno);
+  }
+
+  return (Error){.kind = ErrKindNone};
+}
+
 __attribute__((warn_unused_result)) static Error
-unix_socket(IO *io, SocketDomain domain, SocketType type, i32 *fd) {
-  (void)io;
+unix_socket(const Env *env, SocketDomain domain, SocketType type, i32 *fd) {
+  (void)env;
 
   assert(fd);
 
@@ -165,14 +183,21 @@ unix_socket(IO *io, SocketDomain domain, SocketType type, i32 *fd) {
     return unix_error_from_errno(errno);
   }
 
+  {
+    const Error err = unix_set_nonblocking(ret);
+    if (ErrKindNone != err.kind) {
+      (void)close(ret);
+      return err;
+    }
+  }
+
   *fd = ret;
 
   return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static Error unix_listen(IO *io, i32 fd,
-                                                             i32 backlog) {
-  (void)io;
+__attribute__((warn_unused_result)) static Error unix_listen(const Env *env, i32 fd, i32 backlog) {
+  (void)env;
 
   const i32 ret = listen(fd, backlog);
 
@@ -184,9 +209,7 @@ __attribute__((warn_unused_result)) static Error unix_listen(IO *io, i32 fd,
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_open(IO *io, Slice_u8 path, FileOpenOptions options, i32 *fd) {
-  (void)io;
-
+unix_open(Slice_u8 path, FileOpenOptions options, i32 *fd) {
   assert(fd);
 
   i32 unix_options = 0;
@@ -236,9 +259,9 @@ unix_open(IO *io, Slice_u8 path, FileOpenOptions options, i32 *fd) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_tcp_bind_ipv4(IO *io, i32 listen_socket, Ipv4Addr addr) {
+unix_tcp_bind_ipv4(const Env *env, i32 listen_socket, Ipv4Addr addr) {
 
-  (void)io;
+  (void)env;
 
   struct sockaddr_in sock_addr_in = {
       .sin_family = AF_INET,
@@ -260,10 +283,7 @@ unix_tcp_bind_ipv4(IO *io, i32 listen_socket, Ipv4Addr addr) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_accept(IO *io, i32 listen_socket, i32 *dst_accept_socket,
-            Ipv4Addr *dst_accept_addr) {
-
-  (void)io;
+unix_accept(i32 listen_socket, i32 *dst_accept_socket, Ipv4Addr *dst_accept_addr) {
 
   assert(dst_accept_socket);
   assert(dst_accept_addr);
@@ -281,6 +301,14 @@ unix_accept(IO *io, i32 listen_socket, i32 *dst_accept_socket,
     return unix_error_from_errno(errno);
   }
 
+  {
+    const Error err = unix_set_nonblocking(ret);
+    if (ErrKindNone != err.kind) {
+      (void)close(ret);
+      return err;
+    }
+  }
+
   *dst_accept_socket = ret;
   dst_accept_addr->port = ntohs(sock_addr_in.sin_port);
   dst_accept_addr->ip = ntohl(sock_addr_in.sin_addr.s_addr);
@@ -289,8 +317,8 @@ unix_accept(IO *io, i32 listen_socket, i32 *dst_accept_socket,
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_thread_create(IO *io, ThreadCallback cb, void *data) {
-  (void)io;
+unix_thread_create(const Env *env, ThreadCallback cb, void *data) {
+  (void)env;
 
   assert(cb);
 
@@ -318,9 +346,7 @@ unix_thread_create(IO *io, ThreadCallback cb, void *data) {
   return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static Error unix_close(IO *io, i32 fd) {
-  (void)io;
-
+__attribute__((warn_unused_result)) static Error unix_close(i32 fd) {
   const i32 ret = close(fd);
 
   if (-1 == ret) {
@@ -331,8 +357,19 @@ __attribute__((warn_unused_result)) static Error unix_close(IO *io, i32 fd) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_enable_socket_reuse(IO *io, i32 fd) {
-  (void)io;
+unix_close_socket(const Env *env, i32 fd) {
+  (void)env;
+
+  if (-1 == close(fd)) {
+    return unix_error_from_errno(errno);
+  }
+
+  return (Error){.kind = ErrKindNone};
+}
+
+__attribute__((warn_unused_result)) static Error
+unix_enable_socket_reuse(const Env *env, i32 fd) {
+  (void)env;
 
   int val = 1;
   const int ret = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val));
@@ -345,9 +382,7 @@ unix_enable_socket_reuse(IO *io, i32 fd) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_read(IO *io, i32 fd, Slice_u8 data, usize *dst_read) {
-  (void)io;
-
+unix_read(i32 fd, Slice_u8 data, usize *dst_read) {
   assert(dst_read);
 
   isize ret = 0;
@@ -366,9 +401,7 @@ unix_read(IO *io, i32 fd, Slice_u8 data, usize *dst_read) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_write(IO *io, i32 fd, Slice_u8 data, usize *dst_written) {
-  (void)io;
-
+unix_write(i32 fd, Slice_u8 data, usize *dst_written) {
   assert(dst_written);
 
   isize ret = 0;
@@ -386,8 +419,8 @@ unix_write(IO *io, i32 fd, Slice_u8 data, usize *dst_written) {
   return (Error){.kind = ErrKindNone};
 }
 __attribute__((warn_unused_result)) static Error
-unix_udp_multicast_open_ipv4(IO *io, u32 ipv4, i32 *dst_fd) {
-  (void)io;
+unix_udp_multicast_open_ipv4(const Env *env, u32 ipv4, i32 *dst_fd) {
+  (void)env;
 
   assert(dst_fd);
 
@@ -411,15 +444,59 @@ unix_udp_multicast_open_ipv4(IO *io, u32 ipv4, i32 *dst_fd) {
     return err;
   }
 
+  {
+    const Error err = unix_set_nonblocking(fd);
+    if (ErrKindNone != err.kind) {
+      (void)close(fd);
+      return err;
+    }
+  }
+
   *dst_fd = fd;
 
   return (Error){.kind = ErrKindNone};
 }
 
+// A connect on a non-blocking socket almost never finishes in the call that
+// starts it: it answers `EINPROGRESS`, the loop waits for the socket to become
+// writable, and calls this again. That second call is what reports the outcome
+// -- `EISCONN` for a connection that came up, the real reason otherwise -- so
+// there is no handshake state to keep anywhere.
+__attribute__((warn_unused_result)) static Error unix_connect(i32 fd,
+                                                              Ipv4Addr addr) {
+  const struct sockaddr_in sock_addr_in = {
+      .sin_family = AF_INET,
+      .sin_port = htons(addr.port),
+      .sin_addr.s_addr = htonl(addr.ip),
+  };
+
+  i32 ret = 0;
+  do {
+    ret = connect(fd, (const struct sockaddr *)&sock_addr_in,
+                  sizeof(sock_addr_in));
+  } while (-1 == ret && EINTR == errno);
+
+  if (0 == ret) {
+    return (Error){.kind = ErrKindNone};
+  }
+
+  switch (errno) {
+  // Already up: this was the call after the socket became writable.
+  case EISCONN:
+    return (Error){.kind = ErrKindNone};
+
+  // Still going. Not a failure, and the answer that tells the loop to wait.
+  case EINPROGRESS:
+  case EALREADY:
+    return (Error){.kind = ErrKindAgain, .data = (u64)errno};
+
+  default:
+    return unix_error_from_errno(errno);
+  }
+}
+
 __attribute__((warn_unused_result)) static Error
-unix_udp_send_to_ipv4(IO *io, i32 fd, Ipv4Addr addr, Slice_u8 msg,
-                      usize *dst_sent) {
-  (void)io;
+unix_udp_send_to_ipv4(i32 fd, Ipv4Addr addr, Slice_u8 msg, usize *dst_sent) {
   assert(dst_sent);
 
   const struct sockaddr_in sock_addr_in = {
@@ -444,8 +521,7 @@ unix_udp_send_to_ipv4(IO *io, i32 fd, Ipv4Addr addr, Slice_u8 msg,
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_file_size(IO *io, i32 fd, usize *dst_size) {
-  (void)io;
+unix_file_size(i32 fd, usize *dst_size) {
   assert(dst_size);
 
   struct stat st = {0};
@@ -461,9 +537,7 @@ unix_file_size(IO *io, i32 fd, usize *dst_size) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_remove_file(IO *io, Slice_u8 path) {
-  (void)io;
-
+unix_remove_file(Slice_u8 path) {
   // Same bound and the same reason as `unix_open`: the name has to reach the
   // kernel as a NUL terminated string, and the slice carries no terminator.
   char unix_path[4096] = {0};
@@ -498,8 +572,8 @@ unix_get_process_id(const Env *env) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_stdout_silence(IO *io, i32 *dst_saved) {
-  (void)io;
+unix_stdout_silence(const Env *env, i32 *dst_saved) {
+  (void)env;
   assert(dst_saved);
 
   // Anything already buffered belongs on the real stdout, so it has to go out
@@ -534,8 +608,8 @@ unix_stdout_silence(IO *io, i32 *dst_saved) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_stdout_restore(IO *io, i32 saved) {
-  (void)io;
+unix_stdout_restore(const Env *env, i32 saved) {
+  (void)env;
 
   // Whatever the silenced stretch wrote went to `/dev/null` and is of no
   // interest, but the stream still has to be emptied against the descriptor
@@ -555,29 +629,15 @@ unix_stdout_restore(IO *io, i32 saved) {
   return (Error){.kind = ErrKindNone};
 }
 
-// Composites: one operation to the program, several to Unix. They go
-// through `io` so another platform can implement the same operation out
-// of entirely different primitives, and so the primitives can be faked
-// underneath them in a test.
+// The mapping half of `io_map_file`. What is left of `unix_map_file`: opening
+// the file and asking how big it is are operations the loop submits now, and
+// this is the part it has no business in, because `mmap` only records what a
+// later page fault will do. Nothing waits, so it belongs to `Env`.
 __attribute__((warn_unused_result)) static Error
-unix_map_file(IO *io, Slice_u8 path, FileOpenOptions opts, Slice_u8 *dst) {
-  (void)io;
+unix_map_fd(const Env *env, i32 fd, usize size, FileOpenOptions opts,
+            Slice_u8 *dst) {
+  (void)env;
   assert(dst);
-
-  Error err = {0};
-
-  i32 fd = 0;
-  err = io->open(io, path, FileOpenOptionsReadOnly, &fd);
-  if (ErrKindNone != err.kind) {
-    return err;
-  }
-
-  usize file_size = 0;
-  err = io->file_size(io, fd, &file_size);
-  if (ErrKindNone != err.kind) {
-    (void)io->close(io, fd);
-    return err;
-  }
 
   i32 unix_opts = 0;
   if (opts & FileOpenOptionsReadOnly) {
@@ -586,80 +646,41 @@ unix_map_file(IO *io, Slice_u8 path, FileOpenOptions opts, Slice_u8 *dst) {
     unix_opts = PROT_WRITE;
   }
 
-  void *const data = mmap(NULL, file_size, unix_opts, MAP_PRIVATE, fd, 0);
-  // Read `errno` before `close` gets a chance to overwrite it.
-  const Error err_mmap =
-      ((void *)-1 == data) ? unix_error_from_errno(errno) : (Error){0};
-
-  // The mapping holds its own reference to the file, so the descriptor has
-  // done its job either way.
-  (void)io->close(io, fd);
-
-  if (ErrKindNone != err_mmap.kind) {
-    return err_mmap;
+  void *const data = mmap(NULL, size, unix_opts, MAP_PRIVATE, fd, 0);
+  if ((void *)-1 == data) {
+    return unix_error_from_errno(errno);
   }
 
   dst->data = data;
-  dst->len = file_size;
+  dst->len = size;
 
   return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static Error
-unix_write_all_to_file(IO *io, Slice_u8 path, Slice_u8 data) {
-  (void)io;
-
-  // TODO: Should we still 'touch' the file?
-  if (!data.data || data.len == 0) {
-    return (Error){.kind = ErrKindNone};
-  }
-
-  Error err = {0};
-
-  i32 fd = 0;
-  err = io->open(io, path,
-                 FileOpenOptionsWriteOnly | FileOpenOptionsCreate |
-                     FileOpenOptionsTruncate,
-                 &fd);
-  if (ErrKindNone != err.kind) {
-    return err;
-  }
-
-  Slice_u8 remaining = data;
-
-  for (; remaining.len > 0;) {
-    usize written = 0;
-    err = io->write(io, fd, remaining, &written);
-
-    // A signal before any progress is not a failure: reissue the call.
-    if (ErrKindInterrupted == err.kind) {
-      continue;
-    }
-
-    if (ErrKindNone != err.kind) {
-      goto end;
-    }
-
-    // A short write is ordinary; a write of nothing would loop forever.
-    if (0 == written) {
-      err = (Error){.kind = ErrKindConnReset};
-      goto end;
-    }
-
-    slice_u8_advance(&remaining, written);
-  }
-
-end:
-  (void)io->close(io, fd);
-
-  return err;
-}
-
-__attribute__((warn_unused_result)) static Env env_platform_make(void) {
-  return (Env){
+__attribute__((warn_unused_result)) static const Env *env_platform_make(void) {
+  // A `static` rather than a value handed back: an `IO` holds on to the `Env`
+  // it was made with, and there is one per process to hold on to. The Unix
+  // implementation is stateless, so `ctx` stays null; a test's fake is what it
+  // is for.
+  static const Env env = {
       .get_page_size = unix_get_page_size,
       .valloc = unix_valloc,
       .vprotect_none = unix_vprotect_none,
       .get_process_id = unix_get_process_id,
+
+      .socket = unix_socket,
+      .listen = unix_listen,
+      .tcp_bind_ipv4 = unix_tcp_bind_ipv4,
+      .enable_socket_reuse = unix_enable_socket_reuse,
+      .udp_multicast_open_ipv4 = unix_udp_multicast_open_ipv4,
+      .close_socket = unix_close_socket,
+      .map_fd = unix_map_fd,
+
+      .thread_create = unix_thread_create,
+
+      .stdout_silence = unix_stdout_silence,
+      .stdout_restore = unix_stdout_restore,
   };
+
+  return &env;
 }

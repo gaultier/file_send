@@ -17,18 +17,18 @@
 int main(i32 argc, char *argv[]) {
   assert(argv);
 
-  const Env env = env_platform_make();
+  const Env *const env = env_platform_make();
 
   const char *const cmd = argc >= 2 ? argv[1] : "";
   const usize arena_cap = 32 * MiB;
   Arena arena = {0};
-  assert(ErrKindNone == arena_valloc(&env, arena_cap, &arena).kind);
+  assert(ErrKindNone == arena_valloc(env, arena_cap, &arena).kind);
 
   Arena scratch = {0};
-  assert(ErrKindNone == arena_valloc(&env, 1 * MiB, &scratch).kind);
+  assert(ErrKindNone == arena_valloc(env, 1 * MiB, &scratch).kind);
 
-  IO *io = {0};
-  Error err = io_platform_make(&arena, &env, &io);
+  IO *io = NULL;
+  Error err = io_platform_make(&arena, env, &io);
   if (ErrKindNone != err.kind) {
     error_print("failed to create the IO implementation for the platform", err);
     return 1;
@@ -48,7 +48,7 @@ int main(i32 argc, char *argv[]) {
     const Slice_u8 file_path = {.data = (u8 *)argv[2], .len = strlen(argv[2])};
     Slice_u8 input = {0};
 
-    err = io->map_file(io, file_path, FileOpenOptionsReadOnly, &input);
+    err = io_map_file_blocking(io, file_path, FileOpenOptionsReadOnly, &input);
     if (ErrKindNone != err.kind) {
       error_print("failed to open file", err);
       return 1;
@@ -76,7 +76,8 @@ int main(i32 argc, char *argv[]) {
       return 1;
     }
 
-    err = io->write_all_to_file(io, torrent_file_path, torrent_file_data);
+    err = io_write_all_to_file_blocking(io, torrent_file_path,
+                                        torrent_file_data);
     if (ErrKindNone != err.kind) {
       error_print("failed to write torrent file", err);
       return 1;
@@ -96,7 +97,7 @@ int main(i32 argc, char *argv[]) {
 
     Slice_u8 input = {0};
 
-    err = io->map_file(io, file_path, FileOpenOptionsReadOnly, &input);
+    err = io_map_file_blocking(io, file_path, FileOpenOptionsReadOnly, &input);
     if (ErrKindNone != err.kind) {
       error_print("failed to open file", err);
       return 1;
@@ -154,7 +155,7 @@ int main(i32 argc, char *argv[]) {
 
     i32 udp_socket = 0;
     {
-      Error err_udp = io->udp_multicast_open_ipv4(io, 0, &udp_socket);
+      Error err_udp = env->udp_multicast_open_ipv4(env, 0, &udp_socket);
       if (ErrKindNone != err_udp.kind) {
         error_print("failed to open UDP multicast socket", err_udp);
         return 1;
@@ -175,25 +176,48 @@ int main(i32 argc, char *argv[]) {
     fwrite(udp_msg.data, 1, udp_msg.len, stdout);
     puts("");
 
-    usize sent = 0;
     const Ipv4Addr lsd_addr = {
         .ip = 0xefc0988fUL, // 239.192.152.143
         .port = 6771,       // Broadcast port.
     };
 
-    Error err_sendto =
-        io->udp_send_to_ipv4(io, udp_socket, lsd_addr, udp_msg, &sent);
-    if (ErrKindNone != err_sendto.kind) {
-      error_print("failed to send UDP multicast message", err_sendto);
-      return 1;
+    // One datagram, and nothing to get on with until it is out.
+    {
+      IoOnce once = {0};
+      io_once_init(&once);
+
+      Error err_sendto = io->send_to(io, &once.completion, udp_socket, lsd_addr,
+                                     udp_msg, io_once_on_done);
+      if (ErrKindNone == err_sendto.kind) {
+        err_sendto = io_once_wait(io, &once);
+      }
+      if (ErrKindNone != err_sendto.kind) {
+        error_print("failed to send UDP multicast message", err_sendto);
+        return 1;
+      }
+      assert(once.res <= udp_msg.len);
     }
 
     const Ipv4Addr listen_addr = {.port = peer_port, .ip = 0};
     TorrentNetworkCtx ctx = {0};
-    Error err_listen = io_listen_and_serve_tcp_ipv4(io, &ctx, listen_addr,
-                                                    torrent_client_on_accept);
+    IoServer server = {0};
+    Error err_listen = io_listen_and_serve_tcp_ipv4(
+        io, &server, &ctx, listen_addr, torrent_client_on_accept);
     if (ErrKindNone != err_listen.kind) {
       error_print("failed to listen and serve", err_listen);
+      return 1;
+    }
+
+    // The event loop, and the whole of the program from here: every connection
+    // accepted, every byte read and every hang-up is a callback reached from
+    // this one line. It returns when the listener cannot go on.
+    const Error err_run = io_run_until(io, &server.done, IO_TICK_NS);
+    if (ErrKindNone != err_run.kind) {
+      error_print("the event loop stopped", err_run);
+      return 1;
+    }
+    if (ErrKindNone != server.err.kind) {
+      error_print("the listener stopped", server.err);
       return 1;
     }
 
