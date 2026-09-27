@@ -448,8 +448,7 @@ static void test_arena_valloc_mocked(void) {
   // A failed mapping is reported, not asserted, and leaves the caller's arena
   // untouched. Nothing is protected either: there is no mapping to protect.
   {
-    TestAllocCtx ctx = {.page_size = page_size,
-                       .alloc_fails_with = ErrKindOOM};
+    TestAllocCtx ctx = {.page_size = page_size, .alloc_fails_with = ErrKindOOM};
     const Env env = test_env_alloc_make(&ctx);
     Arena arena = {.start = (u8 *)0xAA, .end = (u8 *)0xBB};
 
@@ -465,7 +464,7 @@ static void test_arena_valloc_mocked(void) {
   // to check that the error travels verbatim.
   {
     TestAllocCtx ctx = {.page_size = page_size,
-                       .alloc_fails_with = ErrOSKindPermission};
+                        .alloc_fails_with = ErrOSKindPermission};
     const Env env = test_env_alloc_make(&ctx);
     Arena arena = {0};
 
@@ -522,12 +521,12 @@ typedef enum {
 } TestIoPerformResult;
 
 typedef TestIoPerformResult (*TestIoPerform)(TestIo *test_io,
-                                            IoCompletion *completion, i32 fd,
-                                            Error *dst_err, usize *dst_res);
+                                             IoCompletion *completion, i32 fd,
+                                             Error *dst_err, usize *dst_res);
 
 // Enough for every slot of the client pool to have an operation in flight, plus
 // the listener's own.
-#define TEST_IO_IN_FLIGHT_MAX (TORRENT_CLIENTS_MAX + 16)
+#define TEST_IO_IN_FLIGHT_MAX (TORRENT_PEERS_MAX + 16)
 
 struct TestIo {
   // Must be first: a `TestIo *` is an `IO *`, the same arrangement the real
@@ -587,7 +586,7 @@ test_io_submit(IO *io, IoCompletion *completion, i32 fd, IoCallback cb) {
 }
 
 __attribute__((warn_unused_result)) static Error test_io_run_for_ns(IO *io,
-                                                                   usize ns) {
+                                                                    usize ns) {
   assert(io);
   (void)ns;
 
@@ -653,7 +652,8 @@ test_io_read(IO *io, IoCompletion *completion, i32 fd, Slice_u8 data,
   assert(data.data);
   assert(data.len > 0);
 
-  completion->action = (IoAction){.kind = IoActionKindRead, .v.read.data = data};
+  completion->action =
+      (IoAction){.kind = IoActionKindRead, .v.read.data = data};
 
   return test_io_submit(io, completion, fd, cb);
 }
@@ -694,8 +694,8 @@ test_io_file_size(IO *io, IoCompletion *completion, i32 fd, IoCallback cb) {
 // outlive `*test_io`: a composite reaches the platform's `mmap` through
 // `io->env`, and the fakes reach the real syscalls the same way the real
 // implementation does.
-static void test_io_make(TestIo *test_io, const Env *env,
-                         TestIoPerform perform, void *script) {
+static void test_io_make(TestIo *test_io, const Env *env, TestIoPerform perform,
+                         void *script) {
   assert(test_io);
   assert(env);
   assert(perform);
@@ -724,9 +724,9 @@ static void test_io_make(TestIo *test_io, const Env *env,
 // listen, none of which waits for anything -- and everything from the first
 // accept on is `IO`.
 //
-// `accept` is told in advance how many connections to hand over before it stops:
-// the listener goes back for another one for as long as it is answered, so
-// without an end there is no way to call it from a test at all.
+// `accept` is told in advance how many connections to hand over before it
+// stops: the listener goes back for another one for as long as it is answered,
+// so without an end there is no way to call it from a test at all.
 typedef struct {
   // Failure injection, one per thing that can fail. `ErrKindNone` succeeds.
   ErrorKind socket_fails_with;
@@ -1086,9 +1086,8 @@ static void test_io_listen_and_serve_accept(void) {
     test_io.submit_fails_with = ErrKindOOM;
 
     const i32 saved = test_stdout_silence();
-    const Error err_listen =
-        io_listen_and_serve_tcp_ipv4(&test_io.io, &server, &network_ctx, addr,
-                                     torrent_client_on_accept);
+    const Error err_listen = io_listen_and_serve_tcp_ipv4(
+        &test_io.io, &server, &network_ctx, addr, torrent_client_on_accept);
     assert(ErrKindNone == err_listen.kind);
     assert(ErrKindNone == io_run_until(&test_io.io, &server.done, 1).kind);
     test_stdout_restore(saved);
@@ -1153,7 +1152,7 @@ static void test_io_listen_and_serve_accept(void) {
 
 // Backpressure: one more connection than the pool holds, all of them held open
 // by a read that never answers. Reaching this with real sockets would mean
-// opening `TORRENT_CLIENTS_MAX` of them.
+// opening `TORRENT_PEERS_MAX` of them.
 static void test_torrent_client_pool_exhaustion(void) {
   const Ipv4Addr addr = {.ip = 0x7f000001, .port = 12345};
 
@@ -1163,24 +1162,24 @@ static void test_torrent_client_pool_exhaustion(void) {
   static TestIo test_io;
   test_network_ctx_init(&network_ctx);
 
-  TestServerCtx ctx = {.accept_success_max = TORRENT_CLIENTS_MAX + 1,
+  TestServerCtx ctx = {.accept_success_max = TORRENT_PEERS_MAX + 1,
                        .read_parks = true,
                        .accept_ends_with = ErrKindInvalidData};
   const Env env = test_env_server_make(&ctx);
   IoServer server = {0};
 
-  assert(ErrKindInvalidData ==
-         test_server_run(&test_io, &ctx, &env, &server, &network_ctx, addr)
-             .kind);
+  assert(
+      ErrKindInvalidData ==
+      test_server_run(&test_io, &ctx, &env, &server, &network_ctx, addr).kind);
 
   // Nothing ever finishes, so the pool fills and the last connection is
   // refused rather than overrunning the slots.
-  // `TORRENT_CLIENTS_MAX + 1` connections were handed over, one more than the
+  // `TORRENT_PEERS_MAX + 1` connections were handed over, one more than the
   // pool holds, plus the call that ends the loop.
-  assert(TORRENT_CLIENTS_MAX + 2 == ctx.accept_calls);
-  assert(TORRENT_CLIENTS_MAX + 1 == ctx.accept_handed_over);
+  assert(TORRENT_PEERS_MAX + 2 == ctx.accept_calls);
+  assert(TORRENT_PEERS_MAX + 1 == ctx.accept_handed_over);
   // Every connection the pool took was read from; the refused one never was.
-  assert(TORRENT_CLIENTS_MAX == ctx.read_calls);
+  assert(TORRENT_PEERS_MAX == ctx.read_calls);
 
   // Every group is full: nothing was handed back, because no read answered.
   for (usize i = 0; i < POOL_SLOT_GROUPS; i++) {
@@ -2068,8 +2067,8 @@ static void test_bencode_parse_binary(void) {
     Arena scratch = test_arena(4 * KiB);
 
     // `d` `2:a\0` `1:x` `2:ab` `1:y` `e`, in order: "a\0" < "ab".
-    const u8 input[] = {'d',  '2', ':', 'a', 0x00, '1', ':', 'x',
-                        '2',  ':', 'a', 'b', '1',  ':', 'y', 'e'};
+    const u8 input[] = {'d', '2', ':', 'a', 0x00, '1', ':', 'x',
+                        '2', ':', 'a', 'b', '1',  ':', 'y', 'e'};
     Slice_u8 data = slice_u8_make((u8 *)input, sizeof(input));
 
     BencodeValue value = {0};
@@ -2082,8 +2081,9 @@ static void test_bencode_parse_binary(void) {
 
   // Dict keys are ordered by raw byte value, so 0x01 comes before 0x80. A
   // signed `char` comparison reads 0x80 as -128 and puts it first, which would
-  // accept the reversed pair and reject this one; `slice_u8_cmp` is checked on its
-  // own, this checks that `bencode_parse` actually routes dict keys through it.
+  // accept the reversed pair and reject this one; `slice_u8_cmp` is checked on
+  // its own, this checks that `bencode_parse` actually routes dict keys through
+  // it.
   {
     const struct {
       u8 first_key;
@@ -2102,14 +2102,15 @@ static void test_bencode_parse_binary(void) {
       Arena arena = test_arena(4 * KiB);
       Arena scratch = test_arena(4 * KiB);
 
-      const u8 input[] = {'d', '1', ':', cases[i].first_key,  '1', ':', 'x',
-                          '1', ':', cases[i].second_key, '1', ':', 'y', 'e'};
+      const u8 input[] = {'d', '1', ':', cases[i].first_key,  '1', ':',
+                          'x', '1', ':', cases[i].second_key, '1', ':',
+                          'y', 'e'};
       Slice_u8 data = slice_u8_make((u8 *)input, sizeof(input));
 
       BencodeValue value = {0};
-      assert((ErrKindNone ==
-              bencode_parse(&data, &arena, scratch, &value).kind) ==
-             cases[i].ok);
+      assert(
+          (ErrKindNone == bencode_parse(&data, &arena, scratch, &value).kind) ==
+          cases[i].ok);
     }
   }
 }
@@ -2145,8 +2146,8 @@ static void test_bencode_parse_dict_keys(void) {
     Slice_u8 data = test_slice(cases[i].input);
 
     BencodeValue value = {0};
-    assert((ErrKindNone == bencode_parse(&data, &arena, scratch, &value).kind) ==
-           cases[i].ok);
+    assert((ErrKindNone ==
+            bencode_parse(&data, &arena, scratch, &value).kind) == cases[i].ok);
 
     if (!cases[i].ok) {
       continue;
@@ -3287,8 +3288,10 @@ static void test_torrent_validate_info_dict(void) {
 
     for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
       BencodeValue items[] = {
-          test_bencode_str(cases[i].k0), test_bencode_int(1),
-          test_bencode_str(cases[i].k1), test_bencode_int(2),
+          test_bencode_str(cases[i].k0),
+          test_bencode_int(1),
+          test_bencode_str(cases[i].k1),
+          test_bencode_int(2),
       };
       const BencodeValue dict =
           test_bencode_dict(items, sizeof(items) / sizeof(items[0]));
@@ -3301,8 +3304,8 @@ static void test_torrent_validate_info_dict(void) {
   // One pair has no ordering to check and is accepted.
   {
     BencodeValue items[] = {test_bencode_str("name"), test_bencode_int(1)};
-    assert(ErrKindNone == torrent_validate_info_dict(test_bencode_dict(items, 2))
-                              .kind);
+    assert(ErrKindNone ==
+           torrent_validate_info_dict(test_bencode_dict(items, 2)).kind);
   }
 
   // An info dict with nothing in it carries none of the keys a torrent needs.
@@ -3323,9 +3326,8 @@ static void test_torrent_validate_info_dict(void) {
   {
     for (usize bad = 0; bad < 3; bad++) {
       BencodeValue items[] = {
-          test_bencode_str("a"), test_bencode_int(1),
-          test_bencode_str("b"), test_bencode_int(2),
-          test_bencode_str("c"), test_bencode_int(3),
+          test_bencode_str("a"), test_bencode_int(1),   test_bencode_str("b"),
+          test_bencode_int(2),   test_bencode_str("c"), test_bencode_int(3),
       };
       // An integer where the key should be.
       items[bad * 2] = test_bencode_int(7);
@@ -3342,13 +3344,12 @@ static void test_torrent_validate_info_dict(void) {
   {
     BencodeValue inner[] = {test_bencode_str("length"), test_bencode_int(1)};
     BencodeValue items[] = {
-        test_bencode_str("file tree"), test_bencode_dict(inner, 2),
-        test_bencode_str("name"),      test_bencode_str("x"),
+        test_bencode_str("file tree"),    test_bencode_dict(inner, 2),
+        test_bencode_str("name"),         test_bencode_str("x"),
         test_bencode_str("piece length"), test_bencode_int(262144),
     };
-    assert(ErrKindNone == torrent_validate_info_dict(
-                              test_bencode_dict(items, 6))
-                              .kind);
+    assert(ErrKindNone ==
+           torrent_validate_info_dict(test_bencode_dict(items, 6)).kind);
   }
 }
 
@@ -3370,12 +3371,10 @@ static void test_torrent_find_info_dict_in_metainfo(void) {
     assert(BencodeKindDict == got->kind);
   }
   {
-    BencodeValue later[] = {test_bencode_str("announce"),
-                            test_bencode_str("http://x"),
-                            test_bencode_str("info"),
-                            info,
-                            test_bencode_str("zzz"),
-                            test_bencode_int(1)};
+    BencodeValue later[] = {
+        test_bencode_str("announce"), test_bencode_str("http://x"),
+        test_bencode_str("info"),     info,
+        test_bencode_str("zzz"),      test_bencode_int(1)};
     assert(&later[3] ==
            torrent_find_info_dict_in_metainfo(test_bencode_dict(later, 6)));
   }
@@ -3411,8 +3410,8 @@ static void test_torrent_find_info_dict_in_metainfo(void) {
     // "info" as a *value* is not a key.
     BencodeValue as_value[] = {test_bencode_str("a"), test_bencode_str("info"),
                                test_bencode_str("b"), info};
-    assert(NULL == torrent_find_info_dict_in_metainfo(
-                       test_bencode_dict(as_value, 4)));
+    assert(NULL ==
+           torrent_find_info_dict_in_metainfo(test_bencode_dict(as_value, 4)));
 
     // A near miss, and an empty metainfo. (Not `near`: `windows.h` still
     // defines that, and `far`, from the 16-bit memory models.)
@@ -3454,9 +3453,8 @@ static void test_sha256_encode_hex_trunc(void) {
       u8 byte;
       const char *expected;
     } cases[] = {
-        {0x00, "00"}, {0x01, "01"}, {0x0f, "0f"}, {0xf0, "f0"},
-        {0x10, "10"}, {0xab, "ab"}, {0x7f, "7f"}, {0x80, "80"},
-        {0xff, "ff"},
+        {0x00, "00"}, {0x01, "01"}, {0x0f, "0f"}, {0xf0, "f0"}, {0x10, "10"},
+        {0xab, "ab"}, {0x7f, "7f"}, {0x80, "80"}, {0xff, "ff"},
     };
 
     for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
@@ -3531,8 +3529,9 @@ static void test_handshake_fill(u8 dst[TEST_HANDSHAKE_LEN], Slice_u8 info_hash,
   assert(20 == info_hash.len);
   assert(20 == peer_id.len);
 
-  memcpy(dst, "\x13"
-              "BitTorrent protocol",
+  memcpy(dst,
+         "\x13"
+         "BitTorrent protocol",
          20);
   memset(dst + 20, 0, 8);
   memcpy(dst + 28, info_hash.data, 20);
@@ -3657,8 +3656,8 @@ static void test_torrent_check_handshake(void) {
   // The empty slice, which has no data pointer at all.
   {
     Slice_u8 peer_id = {0};
-    assert(!torrent_check_handshake(slice_u8_make(NULL, 0), info_hash,
-                                    &peer_id));
+    assert(
+        !torrent_check_handshake(slice_u8_make(NULL, 0), info_hash, &peer_id));
     assert(NULL == peer_id.data);
   }
 
@@ -3736,11 +3735,10 @@ static void test_torrent_make_udp_broadcast_message(void) {
     Arena arena = test_arena(4 * KiB);
 
     Slice_u8 msg = {0};
-    assert(ErrKindNone ==
-           torrent_make_udp_broadcast_message(
-               test_slice("239.192.152.143:6771"), 6881,
-               test_slice(TEST_LSD_INFOHASH), &arena, &msg)
-               .kind);
+    assert(ErrKindNone == torrent_make_udp_broadcast_message(
+                              test_slice("239.192.152.143:6771"), 6881,
+                              test_slice(TEST_LSD_INFOHASH), &arena, &msg)
+                              .kind);
 
     const char *const expected = "BT-SEARCH * HTTP/1.1\r\n"
                                  "Host: 239.192.152.143:6771\r\n"
@@ -3811,17 +3809,18 @@ static void test_torrent_make_udp_broadcast_message(void) {
     const Slice_u8 url = slice_u8_make(long_url, sizeof(long_url));
 
     Slice_u8 msg = {0};
-    assert(ErrKindNone == torrent_make_udp_broadcast_message(
-                              url, 65535, test_slice(TEST_LSD_INFOHASH),
-                              &arena, &msg)
-                              .kind);
+    assert(ErrKindNone ==
+           torrent_make_udp_broadcast_message(
+               url, 65535, test_slice(TEST_LSD_INFOHASH), &arena, &msg)
+               .kind);
 
     assert(test_slice_contains(msg, url));
     // Everything the message holds besides the host name.
-    assert(msg.len == sizeof(long_url) + strlen("BT-SEARCH * HTTP/1.1\r\n"
-                                                "Host: \r\nPort: 65535\r\n"
-                                                "Infohash: " TEST_LSD_INFOHASH
-                                                "\r\ncookie: fixme\r\n\r\n\r\n"));
+    assert(msg.len ==
+           sizeof(long_url) + strlen("BT-SEARCH * HTTP/1.1\r\n"
+                                     "Host: \r\nPort: 65535\r\n"
+                                     "Infohash: " TEST_LSD_INFOHASH
+                                     "\r\ncookie: fixme\r\n\r\n\r\n"));
   }
 
   // An empty host and an empty info hash: `sb_extend_within_cap` takes an empty
@@ -3865,10 +3864,10 @@ static void test_torrent_make_udp_broadcast_message(void) {
     const u8 *const before = arena.start;
 
     Slice_u8 msg = {0};
-    assert(ErrKindNone == torrent_make_udp_broadcast_message(
-                              test_slice("host"), 1, test_slice("aa"), &arena,
-                              &msg)
-                              .kind);
+    assert(ErrKindNone ==
+           torrent_make_udp_broadcast_message(test_slice("host"), 1,
+                                              test_slice("aa"), &arena, &msg)
+               .kind);
 
     assert(msg.data >= before);
     assert(arena.start > before);
@@ -3881,7 +3880,8 @@ static void test_torrent_make_udp_broadcast_message(void) {
 
 // The bytes built so far. Every caller wants this and there is no accessor for
 // it, so the shape is spelled out once here instead of at each call site.
-__attribute__((warn_unused_result)) static Slice_u8 test_sb_built(StringBuffer sb) {
+__attribute__((warn_unused_result)) static Slice_u8
+test_sb_built(StringBuffer sb) {
   return slice_u8_take(sb.container, sb.len);
 }
 
@@ -4030,14 +4030,10 @@ static void test_sb_append_usize_within_cap(void) {
       usize n;
       const char *expected;
     } cases[] = {
-        {0, "0"},
-        {7, "7"},
-        {9, "9"},
-        {10, "10"},
-        {99, "99"},
-        {100, "100"},
-        {12345, "12345"},
-        {UINT64_MAX, "18446744073709551615"},
+        {0, "0"},         {7, "7"},
+        {9, "9"},         {10, "10"},
+        {99, "99"},       {100, "100"},
+        {12345, "12345"}, {UINT64_MAX, "18446744073709551615"},
     };
 
     for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
@@ -4718,9 +4714,9 @@ __attribute__((warn_unused_result)) static IO *test_io_real(Arena *arena) {
   assert(arena);
 
   IO *io = NULL;
-  assert(ErrKindNone ==
-         io_platform_make(arena, env_platform_make(), IoBackendDefault, &io)
-             .kind);
+  assert(
+      ErrKindNone ==
+      io_platform_make(arena, env_platform_make(), IoBackendDefault, &io).kind);
   assert(io);
 
   return io;
@@ -4796,9 +4792,9 @@ static void test_io_open_errors(void) {
   // An empty path is rejected before the syscall -- but not before the
   // operation is submitted: the check is in the syscall wrapper the loop runs,
   // so it reports through the callback like everything else.
-  assert(ErrKindInvalidData ==
-         test_open(io, slice_u8_make(NULL, 0), FileOpenOptionsReadOnly, &fd)
-             .kind);
+  assert(
+      ErrKindInvalidData ==
+      test_open(io, slice_u8_make(NULL, 0), FileOpenOptionsReadOnly, &fd).kind);
   assert(ErrKindInvalidData ==
          test_open(io, test_slice(""), FileOpenOptionsReadOnly, &fd).kind);
 
@@ -4872,8 +4868,9 @@ static void test_io_file_round_trip(void) {
   // Writing nothing is a no-op, not a truncation: the file is left as it was,
   // and nothing is ever submitted.
   {
-    assert(ErrKindNone ==
-           io_write_all_to_file_blocking(io, path, slice_u8_make(NULL, 0)).kind);
+    assert(
+        ErrKindNone ==
+        io_write_all_to_file_blocking(io, path, slice_u8_make(NULL, 0)).kind);
 
     Slice_u8 got = {0};
     assert(ErrKindNone ==
@@ -4900,11 +4897,10 @@ static void test_io_file_round_trip(void) {
     (void)test_remove_file(io, empty_path);
 
     i32 fd = -1;
-    assert(ErrKindNone == test_open(io, empty_path,
-                                    FileOpenOptionsWriteOnly |
-                                        FileOpenOptionsCreate,
-                                    &fd)
-                              .kind);
+    assert(ErrKindNone ==
+           test_open(io, empty_path,
+                     FileOpenOptionsWriteOnly | FileOpenOptionsCreate, &fd)
+               .kind);
     assert(fd >= 0);
     {
       IoOnce once = {0};
@@ -4941,9 +4937,9 @@ static void test_io_file_round_trip(void) {
         slice_u8_make((u8 *)long_path, sizeof(long_path) - 1);
 
     Slice_u8 got = {0};
-    assert(ErrKindRange ==
-           io_map_file_blocking(io, too_long, FileOpenOptionsReadOnly, &got)
-               .kind);
+    assert(
+        ErrKindRange ==
+        io_map_file_blocking(io, too_long, FileOpenOptionsReadOnly, &got).kind);
 
     const u8 byte = 'x';
     assert(ErrKindRange == io_write_all_to_file_blocking(
@@ -5377,9 +5373,10 @@ static void test_io_composites_mocked(void) {
     test_io_make(&test_io, env, test_file_perform, &ctx);
     Slice_u8 got = {0};
 
-    assert(ErrKindTooManyFiles ==
-           io_map_file_blocking(&test_io.io, path, FileOpenOptionsReadOnly, &got)
-               .kind);
+    assert(ErrKindTooManyFiles == io_map_file_blocking(&test_io.io, path,
+                                                       FileOpenOptionsReadOnly,
+                                                       &got)
+                                      .kind);
     assert(1 == ctx.open_calls);
     assert(0 == ctx.file_size_calls);
     // Nothing was opened, so nothing is closed.
@@ -5419,9 +5416,9 @@ static void test_io_composites_mocked(void) {
     test_io_make(&test_io, env, test_file_perform, &ctx);
     Slice_u8 got = {0};
 
-    assert(ErrKindRange ==
-           io_map_file_blocking(&test_io.io, path, FileOpenOptionsReadOnly, &got)
-               .kind);
+    assert(ErrKindRange == io_map_file_blocking(&test_io.io, path,
+                                                FileOpenOptionsReadOnly, &got)
+                               .kind);
     assert(1 == ctx.file_size_calls);
     assert(1 == ctx.close_calls);
     assert(slice_u8_is_empty(got));
@@ -5439,8 +5436,9 @@ static void test_io_composites_mocked(void) {
     assert(sizeof(payload) == ctx.write_calls);
 
     Slice_u8 got = {0};
-    assert(ErrKindNone ==
-           io_map_file_blocking(real, path, FileOpenOptionsReadOnly, &got).kind);
+    assert(
+        ErrKindNone ==
+        io_map_file_blocking(real, path, FileOpenOptionsReadOnly, &got).kind);
     assert(data.len == got.len);
     assert(0 == memcmp(data.data, got.data, data.len));
   }
@@ -5458,8 +5456,9 @@ static void test_io_composites_mocked(void) {
     assert(5 == ctx.write_calls);
 
     Slice_u8 got = {0};
-    assert(ErrKindNone ==
-           io_map_file_blocking(real, path, FileOpenOptionsReadOnly, &got).kind);
+    assert(
+        ErrKindNone ==
+        io_map_file_blocking(real, path, FileOpenOptionsReadOnly, &got).kind);
     assert(data.len == got.len);
     assert(0 == memcmp(data.data, got.data, data.len));
   }
@@ -5499,9 +5498,9 @@ static void test_io_composites_mocked(void) {
     test_io.submit_fails_with = ErrKindAgain;
     Slice_u8 got = {0};
 
-    assert(ErrKindAgain ==
-           io_map_file_blocking(&test_io.io, path, FileOpenOptionsReadOnly, &got)
-               .kind);
+    assert(ErrKindAgain == io_map_file_blocking(&test_io.io, path,
+                                                FileOpenOptionsReadOnly, &got)
+                               .kind);
     // The file was opened, so it is handed back even though nothing asked how
     // big it was.
     assert(1 == ctx.open_calls);
