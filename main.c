@@ -101,8 +101,8 @@ int main(i32 argc, char *argv[]) {
       return 1;
     }
 
-    err = io_write_all_to_file_blocking(io, torrent_file_path,
-                                        torrent_file_data);
+    err =
+        io_write_all_to_file_blocking(io, torrent_file_path, torrent_file_data);
     if (ErrKindNone != err.kind) {
       error_print("failed to write torrent file", err);
       return 1;
@@ -224,7 +224,7 @@ int main(i32 argc, char *argv[]) {
     }
 
     const Ipv4Addr listen_addr = {.port = peer_port, .ip = 0};
-    TorrentNetworkCtx ctx = {0};
+    TorrentNetworkCtx ctx = {.info_hash = info_hash_hex_trunc_slice};
     IoServer server = {0};
     Error err_listen = io_listen_and_serve_tcp_ipv4(
         io, &server, &ctx, listen_addr, torrent_client_on_accept);

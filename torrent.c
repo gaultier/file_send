@@ -1177,6 +1177,8 @@ typedef struct {
   // to it until the callback runs and the slot is what outlives that.
   IoCompletion completion;
   u8 recv_buf[TORRENT_CLIENT_RECV_BUF_LEN];
+
+  Slice_u8 info_hash;
   // More: torrent, etc.
 } TorrentClientHandleCtx;
 
@@ -1206,6 +1208,7 @@ typedef struct {
 
 struct TorrentNetworkCtx {
   TorrentClientHandleCtxPool pool;
+  Slice_u8 info_hash;
   // More...
 };
 
@@ -1313,12 +1316,50 @@ static void torrent_client_close(TorrentClientHandleCtx *client_ctx) {
   }
 }
 
+__attribute__((warn_unused_result)) static bool
+torrent_check_handshake(Slice_u8 data, Slice_u8 info_hash_expected,
+                        Slice_u8 *peer_id) {
+  assert(peer_id);
+
+  // One length byte, then the 19 bytes it counts, then 8 reserved bytes, the
+  // info hash and the peer id: 68 bytes, never more and never fewer. The
+  // length byte is part of `handshake_header_expected` below, not of the 19.
+  const usize handshake_len = 1 + 19 + 8 + 20 + 20;
+
+  if (handshake_len != data.len) {
+    return false;
+  }
+
+  const Slice_u8 handshake_header_expected =
+      slice_u8_from_cstr("\x13"
+                         "BitTorrent protocol");
+  if (!slice_u8_starts_with(data, handshake_header_expected)) {
+    return false;
+  }
+  slice_u8_advance(&data, handshake_header_expected.len);
+
+  // 8 reserved bytes.
+  slice_u8_advance(&data, 8);
+
+  const Slice_u8 info_hash_actual = slice_u8_take(data, 20);
+  if (!slice_u8_eq(info_hash_actual, info_hash_expected)) {
+    return false;
+  }
+  slice_u8_advance(&data, 20);
+
+  *peer_id = slice_u8_take(data, 20);
+  assert(20 == peer_id->len);
+
+  return true;
+}
+
 static void torrent_client_on_read(IoCompletion *completion, Error err,
                                    usize res) {
   assert(completion);
 
   TorrentClientHandleCtx *const client_ctx = completion->ctx;
   assert(client_ctx);
+  assert(20 == client_ctx->info_hash.len);
 
   if (ErrKindNone != err.kind) {
     error_print("failed to read from a peer", err);
@@ -1328,6 +1369,15 @@ static void torrent_client_on_read(IoCompletion *completion, Error err,
 
   assert(res <= sizeof(client_ctx->recv_buf));
   fwrite(client_ctx->recv_buf, sizeof(u8), res, stdout);
+  Slice_u8 recv = slice_u8_make(client_ctx->recv_buf, res);
+
+  Slice_u8 peer_id = {0};
+  if (!torrent_check_handshake(recv, client_ctx->info_hash, &peer_id)) {
+    fprintf(stderr, "wrong handshake from peer\n");
+
+  } else {
+    printf("received valid handshake\n");
+  }
 
   // TODO: Parse the peer handshake, and keep reading instead of hanging up.
   torrent_client_close(client_ctx);
@@ -1339,6 +1389,7 @@ torrent_client_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
   assert(io);
   assert(vctx);
   TorrentNetworkCtx *const network_ctx = vctx;
+  assert(20 == network_ctx->info_hash.len);
 
   const u32 ip = accept_addr.ip;
   printf("accepted: %u.%u.%u.%u:%hu\n", ip >> 24 & 0xff, ip >> 16 & 0xff,
@@ -1360,6 +1411,7 @@ torrent_client_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
   client_ctx->io = io;
   client_ctx->network_ctx = network_ctx;
   client_ctx->completion.ctx = client_ctx;
+  client_ctx->info_hash = network_ctx->info_hash;
 
   const Slice_u8 dst =
       slice_u8_make(client_ctx->recv_buf, sizeof(client_ctx->recv_buf));
@@ -1461,42 +1513,4 @@ torrent_validate_info_dict(BencodeValue info_dict) {
   }
 
   return (Error){.kind = ErrKindNone};
-}
-
-__attribute__((warn_unused_result)) static bool
-torrent_check_handshake(Slice_u8 data, Slice_u8 info_hash_expected,
-                        Slice_u8 *peer_id) {
-  assert(20 == info_hash_expected.len);
-  assert(peer_id);
-
-  // One length byte, then the 19 bytes it counts, then 8 reserved bytes, the
-  // info hash and the peer id: 68 bytes, never more and never fewer. The
-  // length byte is part of `handshake_header_expected` below, not of the 19.
-  const usize handshake_len = 1 + 19 + 8 + 20 + 20;
-
-  if (handshake_len != data.len) {
-    return false;
-  }
-
-  const Slice_u8 handshake_header_expected =
-      slice_u8_from_cstr("\x13"
-                         "BitTorrent protocol");
-  if (!slice_u8_starts_with(data, handshake_header_expected)) {
-    return false;
-  }
-  slice_u8_advance(&data, handshake_header_expected.len);
-
-  // 8 reserved bytes.
-  slice_u8_advance(&data, 8);
-
-  const Slice_u8 info_hash_actual = slice_u8_take(data, 20);
-  if (!slice_u8_eq(info_hash_expected, info_hash_actual)) {
-    return false;
-  }
-  slice_u8_advance(&data, 20);
-
-  *peer_id = slice_u8_take(data, 20);
-  assert(20 == peer_id->len);
-
-  return true;
 }
