@@ -346,7 +346,7 @@ unix_enable_socket_reuse(const IO *io, i32 fd) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_read(const IO *io, i32 fd, Slice_u8 data, usize *dst_read) {
+unix_read(IO *io, i32 fd, Slice_u8 data, usize *dst_read) {
   (void)io;
 
   assert(dst_read);

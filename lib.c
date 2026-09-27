@@ -538,6 +538,8 @@ struct IoCompletion {
 };
 
 struct IO {
+  const Env *env;
+
   Error (*socket)(const IO *io, SocketDomain domain, SocketType type, i32 *fd);
   Error (*listen)(const IO *io, i32 fd, i32 backlog);
   Error (*open)(const IO *io, Slice_u8 path, FileOpenOptions options, i32 *fd);
@@ -550,7 +552,7 @@ struct IO {
   Error (*udp_multicast_open_ipv4)(const IO *io, u32 ipv4, i32 *dst_fd);
   Error (*udp_send_to_ipv4)(const IO *io, i32 fd, Ipv4Addr addr, Slice_u8 msg,
                             usize *dst_sent);
-  Error (*read)(const IO *io, IoCompletion *completion, i32 fd, Slice_u8 data,
+  Error (*read)(IO *io, IoCompletion *completion, i32 fd, Slice_u8 data,
                 IoCallback cb);
   Error (*write)(const IO *io, i32 fd, Slice_u8 data, usize *dst_written);
   Error (*file_size)(const IO *io, i32 fd, usize *dst_size);

@@ -28,7 +28,7 @@ int main(i32 argc, char *argv[]) {
   assert(ErrKindNone == arena_valloc(&env, 1 * MiB, &scratch).kind);
 
   IO *io = {0};
-  Error err = io_platform_make(&arena, &io);
+  Error err = io_platform_make(&arena, &env, &io);
   if (ErrKindNone != err.kind) {
     error_print("failed to create the IO implementation for the platform", err);
     return 1;
