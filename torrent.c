@@ -1163,7 +1163,7 @@ typedef struct TorrentNetworkCtx TorrentNetworkCtx;
 
 #define TORRENT_PEER_ID_LEN 20
 
-#define TORRENT_PEER_RECV_BUF_LEN 1024
+#define TORRENT_PEER_RECV_BUF_CAP 1024
 
 typedef struct {
   // The caller's, passed through `io_listen_and_serve_tcp_ipv4`.
@@ -1177,7 +1177,7 @@ typedef struct {
   // does one thing at a time; in the slot, because the implementation holds on
   // to it until the callback runs and the slot is what outlives that.
   IoCompletion completion;
-  u8 recv_buf[TORRENT_PEER_RECV_BUF_LEN];
+  u8 recv_buf[TORRENT_PEER_RECV_BUF_CAP];
   usize recv_len;
 
   Slice_u8 info_hash;
@@ -1364,7 +1364,7 @@ static void torrent_peer_on_read(IoCompletion *completion, Error err,
   TorrentPeer *const peer = completion->ctx;
   assert(peer);
   assert(TORRENT_INFO_HASH_LEN == peer->info_hash.len);
-  assert(peer->recv_len <= TORRENT_PEER_RECV_BUF_LEN);
+  assert(peer->recv_len <= TORRENT_PEER_RECV_BUF_CAP);
 
   if (ErrKindNone != err.kind) {
     error_print("failed to read from a peer", err);
@@ -1373,7 +1373,7 @@ static void torrent_peer_on_read(IoCompletion *completion, Error err,
   }
 
   assert(!__builtin_add_overflow(peer->recv_len, res, &peer->recv_len));
-  assert(peer->recv_len <= TORRENT_PEER_RECV_BUF_LEN);
+  assert(peer->recv_len <= TORRENT_PEER_RECV_BUF_CAP);
 
   torrent_peer_tick(peer, peer->io);
 }
@@ -1387,7 +1387,7 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
     if (peer->recv_len < TORRENT_PEER_HANDSHAKE_LEN) {
       const Error err =
           io->read(io, &peer->completion, peer->socket,
-                   slice_u8_make(peer->recv_buf, TORRENT_PEER_RECV_BUF_LEN),
+                   slice_u8_make(peer->recv_buf, TORRENT_PEER_RECV_BUF_CAP),
                    torrent_peer_on_read);
       if (ErrKindNone != err.kind) {
         torrent_peer_close(peer);
@@ -1409,16 +1409,23 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
 
     peer->state = TorrentPeerStateHandshaked;
 
+    assert(peer->recv_len >= TORRENT_PEER_HANDSHAKE_LEN);
+    const usize remaining = peer->recv_len - TORRENT_PEER_HANDSHAKE_LEN;
+    assert(remaining < TORRENT_PEER_RECV_BUF_CAP);
+    memmove(peer->recv_buf, peer->recv_buf + peer->recv_len, remaining);
+    peer->recv_len = remaining;
+
     const Error err =
         io->read(io, &peer->completion, peer->socket,
-                 slice_u8_make(peer->recv_buf, TORRENT_PEER_RECV_BUF_LEN),
+                 slice_u8_make(peer->recv_buf, TORRENT_PEER_RECV_BUF_CAP),
                  torrent_peer_on_read);
     if (ErrKindNone != err.kind) {
       torrent_peer_close(peer);
       return;
     }
-  } break;
+  }
 
+    __attribute__((fallthrough));
   case TorrentPeerStateHandshaked: {
     // TODO
     torrent_peer_close(peer);
