@@ -224,7 +224,12 @@ int main(i32 argc, char *argv[]) {
     }
 
     const Ipv4Addr listen_addr = {.port = peer_port, .ip = 0};
-    TorrentNetworkCtx ctx = {.info_hash = info_hash_hex_trunc_slice};
+    // The raw truncated digest, not `info_hash_hex_trunc_slice`: LSD announces
+    // the info hash as 40 hex characters, but a peer handshake carries the 20
+    // bytes those characters spell. `info_hash` outlives the event loop below,
+    // so the slice onto it stays good for as long as any connection does.
+    TorrentNetworkCtx ctx = {
+        .info_hash = slice_u8_make(info_hash, TORRENT_INFO_HASH_LEN)};
     IoServer server = {0};
     Error err_listen = io_listen_and_serve_tcp_ipv4(
         io, &server, &ctx, listen_addr, torrent_client_on_accept);

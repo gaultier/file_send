@@ -1154,6 +1154,20 @@ typedef enum {
 
 typedef struct TorrentNetworkCtx TorrentNetworkCtx;
 
+// The info hash as it goes on the wire between peers: raw bytes, and 20 of
+// them, which for v2 is the SHA-256 of the info dict truncated to the width
+// v1's SHA-1 had.
+//
+// The other representation is the 40 lowercase hex characters
+// `sha256_encode_hex_trunc` produces, and that one is for Local Service
+// Discovery, whose `Infohash:` header is text. The two are never
+// interchangeable: a handshake carrying hex would match no peer, and every
+// `Slice_u8` holding an info hash has to say which of the two it is.
+#define TORRENT_INFO_HASH_LEN 20
+
+// A peer id is 20 bytes of whatever the peer chose.
+#define TORRENT_PEER_ID_LEN 20
+
 // How much of a peer's message is taken in at a time. Part of the slot rather
 // than an arena of its own: one connection does one thing at a time, so one
 // buffer is enough, and a per-connection allocation would be a mapping per
@@ -1320,11 +1334,15 @@ __attribute__((warn_unused_result)) static bool
 torrent_check_handshake(Slice_u8 data, Slice_u8 info_hash_expected,
                         Slice_u8 *peer_id) {
   assert(peer_id);
+  // Raw bytes, not the hex form: a hex info hash would simply match nothing,
+  // and the peer would look like it answered with the wrong torrent.
+  assert(TORRENT_INFO_HASH_LEN == info_hash_expected.len);
 
   // One length byte, then the 19 bytes it counts, then 8 reserved bytes, the
   // info hash and the peer id: 68 bytes, never more and never fewer. The
   // length byte is part of `handshake_header_expected` below, not of the 19.
-  const usize handshake_len = 1 + 19 + 8 + 20 + 20;
+  const usize handshake_len =
+      1 + 19 + 8 + TORRENT_INFO_HASH_LEN + TORRENT_PEER_ID_LEN;
 
   if (handshake_len != data.len) {
     return false;
@@ -1341,14 +1359,14 @@ torrent_check_handshake(Slice_u8 data, Slice_u8 info_hash_expected,
   // 8 reserved bytes.
   slice_u8_advance(&data, 8);
 
-  const Slice_u8 info_hash_actual = slice_u8_take(data, 20);
+  const Slice_u8 info_hash_actual = slice_u8_take(data, TORRENT_INFO_HASH_LEN);
   if (!slice_u8_eq(info_hash_actual, info_hash_expected)) {
     return false;
   }
-  slice_u8_advance(&data, 20);
+  slice_u8_advance(&data, TORRENT_INFO_HASH_LEN);
 
-  *peer_id = slice_u8_take(data, 20);
-  assert(20 == peer_id->len);
+  *peer_id = slice_u8_take(data, TORRENT_PEER_ID_LEN);
+  assert(TORRENT_PEER_ID_LEN == peer_id->len);
 
   return true;
 }
@@ -1359,7 +1377,7 @@ static void torrent_client_on_read(IoCompletion *completion, Error err,
 
   TorrentClientHandleCtx *const client_ctx = completion->ctx;
   assert(client_ctx);
-  assert(20 == client_ctx->info_hash.len);
+  assert(TORRENT_INFO_HASH_LEN == client_ctx->info_hash.len);
 
   if (ErrKindNone != err.kind) {
     error_print("failed to read from a peer", err);
@@ -1389,7 +1407,7 @@ torrent_client_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
   assert(io);
   assert(vctx);
   TorrentNetworkCtx *const network_ctx = vctx;
-  assert(20 == network_ctx->info_hash.len);
+  assert(TORRENT_INFO_HASH_LEN == network_ctx->info_hash.len);
 
   const u32 ip = accept_addr.ip;
   printf("accepted: %u.%u.%u.%u:%hu\n", ip >> 24 & 0xff, ip >> 16 & 0xff,

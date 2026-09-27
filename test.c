@@ -910,6 +910,24 @@ static TestIoPerformResult test_server_perform(TestIo *test_io,
   return TestIoPerformDone;
 }
 
+// The same info hash as `TEST_LSD_INFOHASH`, in the other representation: the
+// 20 raw bytes those 40 hex characters spell. A `TorrentNetworkCtx` always
+// carries this form, because that is what a peer handshake compares against.
+static u8 test_info_hash_bytes[TORRENT_INFO_HASH_LEN] = {
+    0x36, 0x3b, 0x69, 0xd6, 0x6a, 0xd2, 0xd5, 0x7c, 0xbd, 0x51,
+    0xc2, 0xf2, 0x71, 0x56, 0xae, 0xf8, 0xd0, 0xe6, 0x8a, 0x70};
+
+// Zero a network context and give it an info hash, since a context without one
+// is not a state the program can reach: `main` fills it in before the listener
+// ever starts.
+static void test_network_ctx_init(TorrentNetworkCtx *network_ctx) {
+  assert(network_ctx);
+
+  memset(network_ctx, 0, sizeof(*network_ctx));
+  network_ctx->info_hash =
+      slice_u8_make(test_info_hash_bytes, TORRENT_INFO_HASH_LEN);
+}
+
 // Run the listener to a standstill and report what stopped it. Every one of
 // these tests is the same shape: set the listener up, turn the loop until there
 // is nothing left in flight, and look at what was recorded.
@@ -984,7 +1002,8 @@ static void test_io_listen_and_serve_setup_failures(void) {
     const Env env = test_env_server_make(&ctx);
     TestIo test_io = {0};
     IoServer server = {0};
-    TorrentNetworkCtx network_ctx = {0};
+    TorrentNetworkCtx network_ctx;
+    test_network_ctx_init(&network_ctx);
 
     const Error err =
         test_server_run(&test_io, &ctx, &env, &server, &network_ctx, addr);
@@ -1001,7 +1020,8 @@ static void test_io_listen_and_serve_setup_failures(void) {
     const Env env = test_env_server_make(&ctx);
     TestIo test_io = {0};
     IoServer server = {0};
-    TorrentNetworkCtx network_ctx = {0};
+    TorrentNetworkCtx network_ctx;
+    test_network_ctx_init(&network_ctx);
 
     assert(ErrKindInvalidData ==
            test_server_run(&test_io, &ctx, &env, &server, &network_ctx, addr)
@@ -1029,7 +1049,8 @@ static void test_io_listen_and_serve_accept(void) {
     const Env env = test_env_server_make(&ctx);
     TestIo test_io = {0};
     IoServer server = {0};
-    TorrentNetworkCtx network_ctx = {0};
+    TorrentNetworkCtx network_ctx;
+    test_network_ctx_init(&network_ctx);
 
     assert(ErrKindInvalidData ==
            test_server_run(&test_io, &ctx, &env, &server, &network_ctx, addr)
@@ -1057,7 +1078,8 @@ static void test_io_listen_and_serve_accept(void) {
     const Env env = test_env_server_make(&ctx);
     TestIo test_io = {0};
     IoServer server = {0};
-    TorrentNetworkCtx network_ctx = {0};
+    TorrentNetworkCtx network_ctx;
+    test_network_ctx_init(&network_ctx);
 
     test_io_make(&test_io, &env, test_server_perform, &ctx);
     test_io.submit_fails_for = IoActionKindRead;
@@ -1092,7 +1114,8 @@ static void test_io_listen_and_serve_accept(void) {
     const Env env = test_env_server_make(&ctx);
     TestIo test_io = {0};
     IoServer server = {0};
-    TorrentNetworkCtx network_ctx = {0};
+    TorrentNetworkCtx network_ctx;
+    test_network_ctx_init(&network_ctx);
 
     assert(ErrKindInvalidData ==
            test_server_run(&test_io, &ctx, &env, &server, &network_ctx, addr)
@@ -1113,7 +1136,8 @@ static void test_io_listen_and_serve_accept(void) {
     const Env env = test_env_server_make(&ctx);
     TestIo test_io = {0};
     IoServer server = {0};
-    TorrentNetworkCtx network_ctx = {0};
+    TorrentNetworkCtx network_ctx;
+    test_network_ctx_init(&network_ctx);
 
     assert(ErrKindInvalidData ==
            test_server_run(&test_io, &ctx, &env, &server, &network_ctx, addr)
@@ -1137,7 +1161,7 @@ static void test_torrent_client_pool_exhaustion(void) {
   // operation per slot: too much for the stack, either of them.
   static TorrentNetworkCtx network_ctx;
   static TestIo test_io;
-  memset(&network_ctx, 0, sizeof(network_ctx));
+  test_network_ctx_init(&network_ctx);
 
   TestServerCtx ctx = {.accept_success_max = TORRENT_CLIENTS_MAX + 1,
                        .read_parks = true,
