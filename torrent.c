@@ -1638,7 +1638,8 @@ torrent_peer_read(TorrentPeer *peer, IO *io) {
   assert(!peer->read_in_flight);
   assert(!peer->closing);
 
-  log(peer->logger, LogLevelDebug, "queuing read");
+  log(peer->logger, LogLevelDebug, "queuing read: space=%zu",
+      TORRENT_PEER_RECV_BUF_CAP - peer->recv_len);
 
   const Slice_u8 dst =
       slice_u8_make(peer->recv_buf + peer->recv_len,
@@ -1664,7 +1665,7 @@ torrent_peer_write(TorrentPeer *peer, IO *io) {
   assert(!peer->write_in_flight);
   assert(!peer->closing);
 
-  log(peer->logger, LogLevelDebug, "queuing write");
+  log(peer->logger, LogLevelDebug, "queuing write: space=%zu", peer->send_len);
 
   const Slice_u8 src = slice_u8_make(peer->send_buf, peer->send_len);
 
