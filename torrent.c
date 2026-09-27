@@ -1140,17 +1140,17 @@ torrent_gen_torrent_file_data(Slice_u8 file_path, Slice_u8 file_data,
 }
 
 typedef enum {
-  Choke,
-  Unchoke,
-  Interested,
-  Uninterested,
-  Bitfield,
-  Have,
-  Request,
-  Piece,
-  Cancel,
+  TorrentMessageKindChoke,
+  TorrentMessageKindUnchoke,
+  TorrentMessageKindInterested,
+  TorrentMessageKindUninterested,
+  TorrentMessageKindBitfield,
+  TorrentMessageKindHave,
+  TorrentMessageKindRequest,
+  TorrentMessageKindPiece,
+  TorrentMessageKindCancel,
   // TODO: v2 adds more.
-} TorrentMsgKind;
+} TorrentMessageKind;
 
 typedef struct TorrentNetworkCtx TorrentNetworkCtx;
 
