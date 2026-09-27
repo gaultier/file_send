@@ -241,7 +241,8 @@ int main(i32 argc, char *argv[]) {
     // The event loop, and the whole of the program from here: every connection
     // accepted, every byte read and every hang-up is a callback reached from
     // this one line. It returns when the listener cannot go on.
-    const Error err_run = io_run_until(io, &server.done, IO_TICK_NS);
+    const Error err_run =
+        io_run_until(io, &server.done, 5ULL * 1000 * 1000 * 1000);
     if (ErrKindNone != err_run.kind) {
       error_print("the event loop stopped", err_run);
       return 1;

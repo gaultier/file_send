@@ -728,15 +728,30 @@ static void test_io_make(TestIo *test_io, const Env *env, TestIoPerform perform,
   };
 }
 
+// More turns than draining anything here can need. A turn answers every operation
+// the fake is holding, so the only reason to need another is a callback that
+// submitted one, and nothing under test chains deeper than the pool is wide.
+#define TEST_IO_DRAIN_TURNS_MAX (4 * TEST_IO_IN_FLIGHT_MAX)
+
 // Turn the loop until nothing is outstanding. A parked operation is dropped
 // rather than answered, so a script that parks reaches this too.
 static void test_io_drain(TestIo *test_io) {
   assert(test_io);
 
-  while (test_io->submitted_len > 0) {
+  bool drained = false;
+  for (usize i = 0; i < TEST_IO_DRAIN_TURNS_MAX; i++) {
+    if (0 == test_io->submitted_len) {
+      drained = true;
+      break;
+    }
+
     const Error err = test_io->io.run_for_ns(&test_io->io, 1);
     assert(ErrKindNone == err.kind);
   }
+
+  // A drain that does not finish is a chain of callbacks that never ends, which
+  // is a bug in what is under test and not a reason to turn the loop again.
+  assert(drained);
 }
 
 // ---------- Peer handshakes ----------
@@ -1728,10 +1743,12 @@ test_peer_run(TestIo *test_io, TestPeerCtx *ctx, const Env *env,
   const usize turns_max = ctx->says.len + 2 * TEST_HANDSHAKE_LEN + 16;
 
   TorrentPeerState last = peer->state;
-  usize turns = 0;
-  while (test_io->submitted_len > 0) {
-    turns += 1;
-    assert(turns <= turns_max);
+  bool drained = false;
+  for (usize i = 0; i < turns_max; i++) {
+    if (0 == test_io->submitted_len) {
+      drained = true;
+      break;
+    }
 
     const Error err = test_io->io.run_for_ns(&test_io->io, 1);
     assert(ErrKindNone == err.kind);
@@ -1740,6 +1757,7 @@ test_peer_run(TestIo *test_io, TestPeerCtx *ctx, const Env *env,
       last = peer->state;
     }
   }
+  assert(drained);
 
   test_stdout_restore(saved);
 
@@ -2133,6 +2151,11 @@ static void test_torrent_peer_recv_buf_compacted(void) {
   assert(peer);
   torrent_peer_init(peer, &test_io.io, &network_ctx,
                     (Ipv4Addr){.ip = 0x7f000001, .port = 6881}, TEST_PEER_FD);
+
+  // Our own handshake has gone out already, which is the state a connection is in
+  // from its first tick onwards: the initial state is the one before anything has
+  // been sent, and it never holds bytes.
+  peer->state = TorrentPeerStateSentHandshake;
 
   // The handshake, two messages and a fragment, as one read would have left
   // them. The tick is called by hand because the point is the buffer it works
