@@ -1177,6 +1177,7 @@ typedef struct {
 
 typedef enum {
   TorrentPeerStateInitial,
+  TorrentPeerStateSentHandshake,
   TorrentPeerStateHandshaked,
 } TorrentPeerState;
 
@@ -1249,6 +1250,7 @@ torrent_peer_parse_message(Slice_u8 *data, TorrentPeerMessage *dst_msg,
 
   u32 msg_size = 0;
   if (!slice_u8_consume_u32_be(data, &msg_size)) {
+    printf("[D000] \n");
     return (Error){.kind = ErrKindNone};
   }
   printf("[D001] %u\n", msg_size);
@@ -1476,6 +1478,8 @@ static void torrent_peer_on_write(IoCompletion *completion, Error err,
   TorrentPeer *const peer = completion->ctx;
   assert(peer);
   assert(TORRENT_INFO_HASH_LEN == peer->info_hash.len);
+  // No unexpected write.
+  assert(peer->send_len > 0);
   assert(peer->send_len <= TORRENT_PEER_RECV_BUF_CAP);
 
   if (ErrKindNone != err.kind) {
@@ -1492,8 +1496,11 @@ static void torrent_peer_on_write(IoCompletion *completion, Error err,
     return;
   }
 
+  printf("res=%zu send_len=%zu\n", res, peer->send_len);
+  assert(res <= peer->send_len);
+  assert(res <= TORRENT_PEER_RECV_BUF_CAP);
   memmove(peer->send_buf, peer->send_buf + res, res);
-  assert(!__builtin_sub_overflow(peer->send_len, res, &peer->send_len));
+  peer->send_len -= res;
   assert(peer->send_len <= TORRENT_PEER_RECV_BUF_CAP);
 
   torrent_peer_tick(peer, peer->io);
@@ -1534,6 +1541,7 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
 
   switch (peer->state) {
   case TorrentPeerStateInitial: {
+    printf("send_len=%zu\n", peer->send_len);
     assert(0 == peer->send_len);
     // Send the handshake.
     {
@@ -1544,6 +1552,7 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
              28);
       memcpy(send.data + 28, peer->info_hash.data, 20);
       memcpy(send.data + 48, peer->id, 20);
+      peer->send_len = send.len;
 
       const Error err = io->write(io, &peer->completion_write, peer->socket,
                                   send, torrent_peer_on_write);
@@ -1553,6 +1562,11 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
       }
     }
 
+    peer->state = TorrentPeerStateSentHandshake;
+  }
+
+    __attribute__((fallthrough));
+  case TorrentPeerStateSentHandshake: {
     if (peer->recv_len < TORRENT_PEER_HANDSHAKE_LEN) {
       const Error err = torrent_peer_read(peer, io);
       if (ErrKindNone != err.kind) {
@@ -1611,6 +1625,7 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
       torrent_peer_close(peer);
       return;
     }
+    puts("[D010]");
     return;
   } break;
   }
@@ -1639,6 +1654,7 @@ static void torrent_peer_init(TorrentPeer *peer, IO *io,
   peer->completion_read.ctx = peer;
   peer->completion_write.ctx = peer;
   peer->info_hash = network_ctx->info_hash;
+  peer->id[0] = 1;
 }
 
 static void torrent_peer_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
