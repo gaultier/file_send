@@ -11,12 +11,17 @@ clang -std=c99 -g -DWITH_TESTS -fprofile-instr-generate -fcoverage-mapping \
 # Once with no filter, once with one, so the filter path is exercised too.
 LLVM_PROFILE_FILE="$OUT/cov-%p.profraw" "$OUT/cov" test >/dev/null 2>&1
 LLVM_PROFILE_FILE="$OUT/cov-%p.profraw" "$OUT/cov" test slice_u8 >/dev/null 2>&1
+# Every `.c` in the tree, not a hand-kept list: the platform files that this
+# build did not compile carry no coverage data and llvm-cov skips them, whereas
+# a list silently stops reporting on a file the day one is added.
+SOURCES=$(echo *.c)
+
 xcrun llvm-profdata merge -sparse "$OUT"/cov-*.profraw -o "$OUT/cov.profdata"
 
-xcrun llvm-cov report "$OUT/cov" -instr-profile="$OUT/cov.profdata" lib.c sha2.c torrent.c unix.c win32.c main.c test.c
+xcrun llvm-cov report "$OUT/cov" -instr-profile="$OUT/cov.profdata" $SOURCES
 
 # Uncovered lines, if any.
 echo
 echo "Uncovered lines:"
-xcrun llvm-cov show "$OUT/cov" -instr-profile="$OUT/cov.profdata" lib.c sha2.c torrent.c unix.c win32.c main.c test.c \
+xcrun llvm-cov show "$OUT/cov" -instr-profile="$OUT/cov.profdata" $SOURCES \
   | awk '{ if (match($0, /^ *[0-9]+\| *0\|/)) print }' | sed 's/|.*0|/|/'

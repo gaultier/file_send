@@ -3494,6 +3494,210 @@ static void test_sha256_encode_hex_trunc(void) {
 // libtorrent reports the same string for that file.
 #define TEST_LSD_INFOHASH "363b69d66ad2d57cbd51c2f27156aef8d0e68a70"
 
+// A BitTorrent v1 handshake on the wire is 68 bytes: one length byte, the 19
+// protocol-name bytes it counts, 8 reserved bytes, the 20-byte info hash and
+// the 20-byte peer id.
+#define TEST_HANDSHAKE_LEN (1 + 19 + 8 + 20 + 20)
+
+// Lay a well-formed handshake into `dst`. The reserved bytes are left zeroed;
+// a test that cares about them writes them itself.
+static void test_handshake_fill(u8 dst[TEST_HANDSHAKE_LEN], Slice_u8 info_hash,
+                                Slice_u8 peer_id) {
+  assert(dst);
+  assert(20 == info_hash.len);
+  assert(20 == peer_id.len);
+
+  memcpy(dst, "\x13"
+              "BitTorrent protocol",
+         20);
+  memset(dst + 20, 0, 8);
+  memcpy(dst + 28, info_hash.data, 20);
+  memcpy(dst + 48, peer_id.data, 20);
+}
+
+static void test_torrent_check_handshake(void) {
+  // Not text: an info hash and a peer id are arbitrary bytes, so both carry a
+  // NUL and a 0xFF to catch anything that treats them as C strings.
+  u8 info_hash_bytes[20] = {0x00, 0xff, 0x01, 0x02, 0x03, 0x04, 0x05,
+                            0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
+                            0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x00};
+  const Slice_u8 info_hash = slice_u8_make(info_hash_bytes, 20);
+
+  u8 peer_id_bytes[20] = {'-', 'F', 'S', '0', '0', '0', '1', 0x00, 0xff, 0x2a,
+                          1,   2,   3,   4,   5,   6,   7,   8,    9,    10};
+  const Slice_u8 peer_id_expected = slice_u8_make(peer_id_bytes, 20);
+
+  // The whole point: a handshake whose info hash is the one we asked for is
+  // accepted, and `*peer_id` comes back as the 20 bytes that follow it.
+  {
+    u8 data[TEST_HANDSHAKE_LEN] = {0};
+    test_handshake_fill(data, info_hash, peer_id_expected);
+
+    Slice_u8 peer_id = {0};
+    assert(torrent_check_handshake(slice_u8_make(data, sizeof(data)), info_hash,
+                                   &peer_id));
+    assert(slice_u8_eq(peer_id_expected, peer_id));
+
+    // A view into the caller's buffer, not a copy: the peer id starts at the
+    // 49th byte, right after the info hash.
+    assert(data + 48 == peer_id.data);
+    assert(20 == peer_id.len);
+  }
+
+  // The 8 reserved bytes say which extensions the peer speaks, and this does
+  // not care which: all-ones is as acceptable as all-zeroes.
+  {
+    u8 data[TEST_HANDSHAKE_LEN] = {0};
+    test_handshake_fill(data, info_hash, peer_id_expected);
+    memset(data + 20, 0xff, 8);
+
+    Slice_u8 peer_id = {0};
+    assert(torrent_check_handshake(slice_u8_make(data, sizeof(data)), info_hash,
+                                   &peer_id));
+    assert(slice_u8_eq(peer_id_expected, peer_id));
+  }
+
+  // A peer that answered with someone else's torrent. One differing byte is
+  // enough, and it is rejected wherever in the hash it sits.
+  {
+    const usize positions[] = {0, 1, 10, 19};
+    for (usize i = 0; i < sizeof(positions) / sizeof(positions[0]); i++) {
+      u8 data[TEST_HANDSHAKE_LEN] = {0};
+      test_handshake_fill(data, info_hash, peer_id_expected);
+      data[28 + positions[i]] ^= 0x01;
+
+      Slice_u8 peer_id = {0};
+      assert(!torrent_check_handshake(slice_u8_make(data, sizeof(data)),
+                                      info_hash, &peer_id));
+      // Untouched on rejection, so a caller that forgets to check the return
+      // value gets an obviously empty slice rather than someone else's bytes.
+      assert(NULL == peer_id.data);
+      assert(0 == peer_id.len);
+    }
+  }
+
+  // The protocol name has to be exactly `BitTorrent protocol`, and the byte in
+  // front of it exactly the 19 that counts it. A peer speaking something else
+  // is not one of ours.
+  {
+    const char *const headers[] = {
+        // The length byte, one too small and one too large.
+        "\x12"
+        "BitTorrent protocol",
+        "\x14"
+        "BitTorrent protocol",
+        // The name itself, wrong at the front, in the middle, at the end.
+        "\x13"
+        "XitTorrent protocol",
+        "\x13"
+        "BitTorrent Protocol",
+        "\x13"
+        "BitTorrent protocoL",
+        // A different protocol that happens to be 19 bytes long.
+        "\x13"
+        "AzureusMessaging!!!",
+    };
+    for (usize i = 0; i < sizeof(headers) / sizeof(headers[0]); i++) {
+      u8 data[TEST_HANDSHAKE_LEN] = {0};
+      test_handshake_fill(data, info_hash, peer_id_expected);
+      memcpy(data, headers[i], 20);
+
+      Slice_u8 peer_id = {0};
+      assert(!torrent_check_handshake(slice_u8_make(data, sizeof(data)),
+                                      info_hash, &peer_id));
+      assert(NULL == peer_id.data);
+    }
+  }
+
+  // Every length but 68 is refused, and refused by the length check rather
+  // than by reading off the end: a short read is not a handshake yet, and a
+  // long one has the next message glued to it. The loop starts at 1 because a
+  // zero-length slice has no buffer to point at.
+  {
+    u8 data[TEST_HANDSHAKE_LEN + 4] = {0};
+    test_handshake_fill(data, info_hash, peer_id_expected);
+    memcpy(data + TEST_HANDSHAKE_LEN, "\x00\x00\x00\x00", 4);
+
+    for (usize len = 1; len < sizeof(data); len++) {
+      if (TEST_HANDSHAKE_LEN == len) {
+        continue;
+      }
+
+      Slice_u8 peer_id = {0};
+      assert(!torrent_check_handshake(slice_u8_make(data, len), info_hash,
+                                      &peer_id));
+      assert(NULL == peer_id.data);
+    }
+  }
+
+  // The empty slice, which has no data pointer at all.
+  {
+    Slice_u8 peer_id = {0};
+    assert(!torrent_check_handshake(slice_u8_make(NULL, 0), info_hash,
+                                    &peer_id));
+    assert(NULL == peer_id.data);
+  }
+
+  // An all-zero info hash is a legitimate 20 bytes, and matching it must not
+  // be special-cased into a mismatch by anything comparing against NUL.
+  {
+    u8 zero_hash_bytes[20] = {0};
+    const Slice_u8 zero_hash = slice_u8_make(zero_hash_bytes, 20);
+
+    u8 data[TEST_HANDSHAKE_LEN] = {0};
+    test_handshake_fill(data, zero_hash, peer_id_expected);
+
+    Slice_u8 peer_id = {0};
+    assert(torrent_check_handshake(slice_u8_make(data, sizeof(data)), zero_hash,
+                                   &peer_id));
+    assert(slice_u8_eq(peer_id_expected, peer_id));
+
+    // ...and the non-zero hash must not match that same handshake.
+    Slice_u8 peer_id_other = {0};
+    assert(!torrent_check_handshake(slice_u8_make(data, sizeof(data)),
+                                    info_hash, &peer_id_other));
+    assert(NULL == peer_id_other.data);
+  }
+
+  // An all-zero peer id is equally legitimate, and comes back as 20 bytes
+  // rather than as an empty slice.
+  {
+    u8 zero_peer_id_bytes[20] = {0};
+    const Slice_u8 zero_peer_id = slice_u8_make(zero_peer_id_bytes, 20);
+
+    u8 data[TEST_HANDSHAKE_LEN] = {0};
+    test_handshake_fill(data, info_hash, zero_peer_id);
+
+    Slice_u8 peer_id = {0};
+    assert(torrent_check_handshake(slice_u8_make(data, sizeof(data)), info_hash,
+                                   &peer_id));
+    assert(20 == peer_id.len);
+    assert(slice_u8_eq(zero_peer_id, peer_id));
+  }
+
+  // `*peer_id` is overwritten, not merged into: a caller reusing one variable
+  // across two peers gets the second peer's id, not a mix.
+  {
+    u8 other_peer_id_bytes[20] = {0};
+    memset(other_peer_id_bytes, 0x5a, sizeof(other_peer_id_bytes));
+    const Slice_u8 other_peer_id = slice_u8_make(other_peer_id_bytes, 20);
+
+    u8 first[TEST_HANDSHAKE_LEN] = {0};
+    test_handshake_fill(first, info_hash, peer_id_expected);
+    u8 second[TEST_HANDSHAKE_LEN] = {0};
+    test_handshake_fill(second, info_hash, other_peer_id);
+
+    Slice_u8 peer_id = {0};
+    assert(torrent_check_handshake(slice_u8_make(first, sizeof(first)),
+                                   info_hash, &peer_id));
+    assert(slice_u8_eq(peer_id_expected, peer_id));
+
+    assert(torrent_check_handshake(slice_u8_make(second, sizeof(second)),
+                                   info_hash, &peer_id));
+    assert(slice_u8_eq(other_peer_id, peer_id));
+  }
+}
+
 static void test_torrent_make_udp_broadcast_message(void) {
   // The exact bytes. The expected message is not invented here: it is the shape
   // libtorrent 2.1 sends, captured off the 239.192.152.143:6771 group, with
@@ -5350,6 +5554,7 @@ static void test(const char *filter) {
       {"sha256_encode_hex_trunc", test_sha256_encode_hex_trunc},
       {"torrent_make_udp_broadcast_message",
        test_torrent_make_udp_broadcast_message},
+      {"torrent_check_handshake", test_torrent_check_handshake},
       {"sb_make", test_sb_make},
       {"sb_extend_within_cap", test_sb_extend_within_cap},
       {"sb_append_usize_within_cap", test_sb_append_usize_within_cap},

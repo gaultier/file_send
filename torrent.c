@@ -1469,9 +1469,12 @@ torrent_check_handshake(Slice_u8 data, Slice_u8 info_hash_expected,
   assert(20 == info_hash_expected.len);
   assert(peer_id);
 
-  const usize handshake_header_len = 19 + 8 + 20 + 20;
+  // One length byte, then the 19 bytes it counts, then 8 reserved bytes, the
+  // info hash and the peer id: 68 bytes, never more and never fewer. The
+  // length byte is part of `handshake_header_expected` below, not of the 19.
+  const usize handshake_len = 1 + 19 + 8 + 20 + 20;
 
-  if (handshake_header_len != data.len) {
+  if (handshake_len != data.len) {
     return false;
   }
 
