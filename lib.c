@@ -373,7 +373,9 @@ slice_u8_consume_u32(Slice_u8 *slice, u32 *res) {
   }
 
   if (res) {
-    *res = *(u32 *)slice->data;
+    // `memcpy` and not a cast through a `u32 *`: a slice into a receive buffer
+    // is aligned for nothing in particular.
+    memcpy(res, slice->data, sizeof(*res));
   }
 
   slice_u8_advance(slice, sizeof(u32));

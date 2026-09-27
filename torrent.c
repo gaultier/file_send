@@ -1233,6 +1233,28 @@ struct TorrentNetworkCtx {
   // More...
 };
 
+__attribute__((warn_unused_result)) static Error
+torrent_parse_peer_message(Slice_u8 *data, TorrentPeerMessage *dst_msg,
+                           bool *present) {
+  assert(data);
+  assert(data->data);
+  assert(dst_msg);
+  assert(present);
+
+  u32 msg_size = 0;
+  if (!slice_u8_consume_u32(data, &msg_size)) {
+    return (Error){.kind = ErrKindNone};
+  }
+
+  // Keep-alive?
+  if (0 == msg_size) {
+    *present = true;
+    return (Error){.kind = ErrKindNone};
+  }
+
+  return (Error){.kind = ErrKindNone};
+}
+
 __attribute__((warn_unused_result)) static TorrentPeer *
 torrent_peer_ctx_pool_acquire(TorrentpeerHandleCtxPool *pool) {
   assert(pool);
@@ -1381,6 +1403,25 @@ torrent_check_handshake(Slice_u8 data, Slice_u8 info_hash_expected,
 static void torrent_peer_tick(TorrentPeer *peer, IO *io);
 
 static void torrent_peer_on_read(IoCompletion *completion, Error err,
+                                 usize res);
+
+// Wait for more from the peer, after the bytes already buffered: a read aimed
+// at the front of the buffer would overwrite a message that is still arriving.
+__attribute__((warn_unused_result)) static Error
+torrent_peer_read(TorrentPeer *peer, IO *io) {
+  assert(peer);
+  assert(io);
+  assert(peer->recv_len < TORRENT_PEER_RECV_BUF_CAP);
+
+  const Slice_u8 dst =
+      slice_u8_make(peer->recv_buf + peer->recv_len,
+                    TORRENT_PEER_RECV_BUF_CAP - peer->recv_len);
+
+  return io->read(io, &peer->completion, peer->socket, dst,
+                  torrent_peer_on_read);
+}
+
+static void torrent_peer_on_read(IoCompletion *completion, Error err,
                                  usize res) {
   assert(completion);
 
@@ -1391,6 +1432,14 @@ static void torrent_peer_on_read(IoCompletion *completion, Error err,
 
   if (ErrKindNone != err.kind) {
     error_print("failed to read from a peer", err);
+    torrent_peer_close(peer);
+    return;
+  }
+
+  // Nothing read and nothing wrong is end of file: the peer hung up. Asking
+  // again would answer 0 for ever, since a descriptor at end of file stays
+  // readable.
+  if (0 == res) {
     torrent_peer_close(peer);
     return;
   }
@@ -1408,10 +1457,7 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
   switch (peer->state) {
   case TorrentPeerStateInitial: {
     if (peer->recv_len < TORRENT_PEER_HANDSHAKE_LEN) {
-      const Error err =
-          io->read(io, &peer->completion, peer->socket,
-                   slice_u8_make(peer->recv_buf, TORRENT_PEER_RECV_BUF_CAP),
-                   torrent_peer_on_read);
+      const Error err = torrent_peer_read(peer, io);
       if (ErrKindNone != err.kind) {
         torrent_peer_close(peer);
         return;
@@ -1419,8 +1465,11 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
       return;
     }
 
-    Slice_u8 recv = slice_u8_make(peer->recv_buf, peer->recv_len);
-    fwrite(peer->recv_buf, sizeof(u8), peer->recv_len, stdout);
+    // Exactly the handshake and not a byte more: a peer is free to put its
+    // first message in the same packet, and those bytes belong to the next
+    // state.
+    const Slice_u8 recv =
+        slice_u8_make(peer->recv_buf, TORRENT_PEER_HANDSHAKE_LEN);
 
     Slice_u8 peer_id = {0};
     if (!torrent_check_handshake(recv, peer->info_hash, &peer_id)) {
@@ -1432,23 +1481,18 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
 
     peer->state = TorrentPeerStateHandshaked;
 
+    // Drop the handshake, moving whatever arrived behind it to the front of
+    // the buffer.
     assert(peer->recv_len >= TORRENT_PEER_HANDSHAKE_LEN);
     const usize remaining = peer->recv_len - TORRENT_PEER_HANDSHAKE_LEN;
     assert(remaining < TORRENT_PEER_RECV_BUF_CAP);
-    assert(peer->recv_buf);
-    memmove(peer->recv_buf, peer->recv_buf + peer->recv_len, remaining);
+    memmove(peer->recv_buf, peer->recv_buf + TORRENT_PEER_HANDSHAKE_LEN,
+            remaining);
     peer->recv_len = remaining;
-
-    const Error err =
-        io->read(io, &peer->completion, peer->socket,
-                 slice_u8_make(peer->recv_buf, TORRENT_PEER_RECV_BUF_CAP),
-                 torrent_peer_on_read);
-    if (ErrKindNone != err.kind) {
-      torrent_peer_close(peer);
-      return;
-    }
   }
 
+    // The handshake is consumed, so the next state runs on what is left over
+    // instead of waiting for a read it may not need.
     __attribute__((fallthrough));
   case TorrentPeerStateHandshaked: {
     // TODO
@@ -1456,6 +1500,30 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
     return;
   } break;
   }
+}
+
+// Point a freshly acquired slot at a connection. Its own function because the
+// listener is not the only way a connection starts: an outgoing `connect` lands
+// in the same state, waiting for the same handshake.
+static void torrent_peer_init(TorrentPeer *peer, IO *io,
+                              TorrentNetworkCtx *network_ctx, Ipv4Addr addr,
+                              i32 socket) {
+  assert(peer);
+  assert(io);
+  assert(network_ctx);
+  assert(TORRENT_INFO_HASH_LEN == network_ctx->info_hash.len);
+  assert(socket >= 0);
+  // A slot straight from the pool, so the state machine is at its start.
+  assert(TorrentPeerStateInitial == peer->state);
+  assert(0 == peer->recv_len);
+
+  peer->cb_ctx = network_ctx;
+  peer->addr = addr;
+  peer->socket = socket;
+  peer->io = io;
+  peer->network_ctx = network_ctx;
+  peer->completion.ctx = peer;
+  peer->info_hash = network_ctx->info_hash;
 }
 
 static void torrent_peer_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
@@ -1479,24 +1547,12 @@ static void torrent_peer_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
     return;
   }
 
-  peer_ctx->cb_ctx = vctx;
-  peer_ctx->addr = accept_addr;
-  peer_ctx->socket = accept_socket;
-  peer_ctx->io = io;
-  peer_ctx->network_ctx = network_ctx;
-  peer_ctx->completion.ctx = peer_ctx;
-  peer_ctx->info_hash = network_ctx->info_hash;
+  torrent_peer_init(peer_ctx, io, network_ctx, accept_addr, accept_socket);
 
-  const Slice_u8 dst =
-      slice_u8_make(peer_ctx->recv_buf, sizeof(peer_ctx->recv_buf));
-  const Error err = io->read(io, &peer_ctx->completion, peer_ctx->socket, dst,
-                             torrent_peer_on_read);
-  if (ErrKindNone != err.kind) {
-    // The read never started, so nothing else is going to hang up on the peer
-    // or hand the slot back.
-    torrent_peer_close(peer_ctx);
-    return;
-  }
+  // Nothing buffered yet and the initial state, so the tick's first move is the
+  // read that waits for the handshake. It hangs up on the peer itself if that
+  // read cannot even be submitted, so there is nothing left to do here.
+  torrent_peer_tick(peer_ctx, io);
 }
 
 __attribute__((warn_unused_result)) static Error
