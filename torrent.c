@@ -1154,30 +1154,12 @@ typedef enum {
 
 typedef struct TorrentNetworkCtx TorrentNetworkCtx;
 
-// The info hash as it goes on the wire between peers: raw bytes, and 20 of
-// them, which for v2 is the SHA-256 of the info dict truncated to the width
-// v1's SHA-1 had.
-//
-// The other representation is the 40 lowercase hex characters
-// `sha256_encode_hex_trunc` produces, and that one is for Local Service
-// Discovery, whose `Infohash:` header is text. The two are never
-// interchangeable: a handshake carrying hex would match no peer, and every
-// `Slice_u8` holding an info hash has to say which of the two it is.
 #define TORRENT_INFO_HASH_LEN 20
 
-// A peer id is 20 bytes of whatever the peer chose.
 #define TORRENT_PEER_ID_LEN 20
 
-// How much of a peer's message is taken in at a time. Part of the slot rather
-// than an arena of its own: one connection does one thing at a time, so one
-// buffer is enough, and a per-connection allocation would be a mapping per
-// peer that nothing ever hands back.
-#define TORRENT_CLIENT_RECV_BUF_LEN 128
+#define TORRENT_PEER_RECV_BUF_LEN 1024
 
-// One connection, for as long as it lasts. Everything a peer needs is in here
-// because a connection is now a chain of callbacks rather than a function on a
-// thread of its own: there is no stack to keep any of it on between one
-// operation answering and the next being submitted.
 typedef struct {
   // The caller's, passed through `io_listen_and_serve_tcp_ipv4`.
   void *cb_ctx;
@@ -1190,34 +1172,29 @@ typedef struct {
   // does one thing at a time; in the slot, because the implementation holds on
   // to it until the callback runs and the slot is what outlives that.
   IoCompletion completion;
-  u8 recv_buf[TORRENT_CLIENT_RECV_BUF_LEN];
+  u8 recv_buf[TORRENT_PEER_RECV_BUF_LEN];
 
   Slice_u8 info_hash;
   // More: torrent, etc.
-} TorrentClientHandleCtx;
+} TorrentPeer;
 
-#define TORRENT_CLIENTS_MAX 1024
+#define TORRENT_PEERS_MAX 1024
 
 typedef u64 PoolSlotGroup;
 
 // Unit is bits.
 #define POOL_SLOTS_PER_GROUP (sizeof(PoolSlotGroup) * 8)
-_Static_assert(0 == (TORRENT_CLIENTS_MAX % POOL_SLOTS_PER_GROUP),
+_Static_assert(0 == (TORRENT_PEERS_MAX % POOL_SLOTS_PER_GROUP),
                "must be a multiple");
 
-#define POOL_SLOT_GROUPS (TORRENT_CLIENTS_MAX / POOL_SLOTS_PER_GROUP)
+#define POOL_SLOT_GROUPS (TORRENT_PEERS_MAX / POOL_SLOTS_PER_GROUP)
 
-// Plain reads and writes, and no atomics: one thread runs the event loop, every
-// callback runs from inside it, and so acquiring and releasing a slot are just
-// two more things that happen in order on that thread. Nothing here was ever
-// contended -- the atomics were for the thread per client that the loop
-// replaced.
 typedef struct {
   // Bitset.
   // Bit `i` of group `g` means: `slots[g * POOL_SLOTS_PER_GROUP + i]` is
   // occupied.
   PoolSlotGroup occupied[POOL_SLOT_GROUPS];
-  TorrentClientHandleCtx slots[TORRENT_CLIENTS_MAX];
+  TorrentPeer slots[TORRENT_PEERS_MAX];
 } TorrentClientHandleCtxPool;
 
 struct TorrentNetworkCtx {
@@ -1226,7 +1203,7 @@ struct TorrentNetworkCtx {
   // More...
 };
 
-__attribute__((warn_unused_result)) static TorrentClientHandleCtx *
+__attribute__((warn_unused_result)) static TorrentPeer *
 torrent_client_ctx_pool_acquire(TorrentClientHandleCtxPool *pool) {
   assert(pool);
 
@@ -1249,9 +1226,9 @@ torrent_client_ctx_pool_acquire(TorrentClientHandleCtxPool *pool) {
     pool->occupied[i] |= mask;
 
     const usize slot_idx = i * POOL_SLOTS_PER_GROUP + bit_idx;
-    assert(slot_idx < TORRENT_CLIENTS_MAX);
+    assert(slot_idx < TORRENT_PEERS_MAX);
 
-    TorrentClientHandleCtx *res = &pool->slots[slot_idx];
+    TorrentPeer *res = &pool->slots[slot_idx];
     assert(0 == res->cb_ctx);
     assert(0 == res->io);
     assert(0 == res->network_ctx);
@@ -1269,13 +1246,13 @@ torrent_client_ctx_pool_acquire(TorrentClientHandleCtxPool *pool) {
 }
 
 static void torrent_client_ctx_pool_release(TorrentClientHandleCtxPool *pool,
-                                            TorrentClientHandleCtx *slot) {
+                                            TorrentPeer *slot) {
   assert(pool);
   assert(slot);
 
   assert(slot >= pool->slots);
   const usize slot_idx = (usize)(slot - pool->slots);
-  assert(slot_idx < TORRENT_CLIENTS_MAX);
+  assert(slot_idx < TORRENT_PEERS_MAX);
 
   const usize slot_group_idx = slot_idx / POOL_SLOTS_PER_GROUP;
   assert(slot_group_idx < POOL_SLOT_GROUPS);
@@ -1300,7 +1277,7 @@ static void torrent_client_on_close(IoCompletion *completion, Error err,
   (void)err;
   (void)res;
 
-  TorrentClientHandleCtx *const client_ctx = completion->ctx;
+  TorrentPeer *const client_ctx = completion->ctx;
   assert(client_ctx);
   assert(client_ctx->network_ctx);
 
@@ -1311,7 +1288,7 @@ static void torrent_client_on_close(IoCompletion *completion, Error err,
 
 // Hang up and hand the slot back. Every way a connection can end goes through
 // here, so the slot is released exactly once however it ended.
-static void torrent_client_close(TorrentClientHandleCtx *client_ctx) {
+static void torrent_client_close(TorrentPeer *client_ctx) {
   assert(client_ctx);
   assert(client_ctx->io);
   assert(client_ctx->network_ctx);
@@ -1375,7 +1352,7 @@ static void torrent_client_on_read(IoCompletion *completion, Error err,
                                    usize res) {
   assert(completion);
 
-  TorrentClientHandleCtx *const client_ctx = completion->ctx;
+  TorrentPeer *const client_ctx = completion->ctx;
   assert(client_ctx);
   assert(TORRENT_INFO_HASH_LEN == client_ctx->info_hash.len);
 
@@ -1413,7 +1390,7 @@ torrent_client_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
   printf("accepted: %u.%u.%u.%u:%hu\n", ip >> 24 & 0xff, ip >> 16 & 0xff,
          ip >> 8 & 0xff, ip >> 0 & 0xff, accept_addr.port);
 
-  TorrentClientHandleCtx *const client_ctx =
+  TorrentPeer *const client_ctx =
       torrent_client_ctx_pool_acquire(&network_ctx->pool);
   if (!client_ctx) {
     fprintf(stderr, "backpressure: no available pool slot for client\n");
