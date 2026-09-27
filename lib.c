@@ -11,6 +11,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if (defined(__APPLE__) && defined(__MACH__))
+#define PLATFORM_DARWIN
+#endif
+
 #if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
 #define PLATFORM_UNIX 1
 #elif defined(_WIN32)
@@ -474,6 +478,16 @@ path_last_component(Slice_u8 path, u8 separator) {
 
 // ---------- IO ----------
 
+typedef struct Env Env;
+struct Env {
+  usize (*get_page_size)(const Env *env);
+  Error (*valloc)(const Env *io, usize bytes_count, u8 **res);
+  Error (*vprotect_none)(const Env *env, void *ptr, usize size);
+  usize (*get_process_id)(const Env *env);
+};
+
+__attribute__((warn_unused_result)) static Env env_platform_make(void);
+
 // Named before the struct body so its own slots, and the platform wrappers
 // that fill them, can take the vtable they belong to: a slot that composes
 // other slots calls them through `io`, which is what lets one platform
@@ -536,31 +550,17 @@ struct IO {
   Error (*udp_multicast_open_ipv4)(const IO *io, u32 ipv4, i32 *dst_fd);
   Error (*udp_send_to_ipv4)(const IO *io, i32 fd, Ipv4Addr addr, Slice_u8 msg,
                             usize *dst_sent);
-  Error (*read)(const IO *io, i32 fd, Slice_u8 data, usize *dst_read);
+  Error (*read)(const IO *io, IoCompletion *completion, i32 fd, Slice_u8 data,
+                IoCallback cb);
   Error (*write)(const IO *io, i32 fd, Slice_u8 data, usize *dst_written);
   Error (*file_size)(const IO *io, i32 fd, usize *dst_size);
   Error (*map_file)(const IO *io, Slice_u8 path, FileOpenOptions opts,
                     Slice_u8 *dst);
   Error (*write_all_to_file)(const IO *io, Slice_u8 path, Slice_u8 data);
   Error (*remove_file)(const IO *io, Slice_u8 path);
-  usize (*get_page_size)(const IO *io);
-  Error (*valloc)(const IO *io, usize bytes_count, u8 **res);
-  Error (*vprotect_none)(const IO *io, void *ptr, usize size);
-  usize (*get_process_id)(const IO *io);
 
-  // Swallow this process's own standard output until the matching restore,
-  // which is handed back whatever `stdout_silence` produced. Only the test
-  // harness calls these, to keep a chatty run quiet; the program proper never
-  // redirects itself. They are slots and not three lines of `dup` in the
-  // harness because what it takes to do this is exactly the kind of thing
-  // that differs per platform.
   Error (*stdout_silence)(const IO *io, i32 *dst_saved);
   Error (*stdout_restore)(const IO *io, i32 saved);
-
-  // The implementation's own state, reached by every slot above as
-  // `io->ctx`. It is not the caller's: a callback's user data travels
-  // separately, because the two have different lifetimes and owners.
-  void *ctx;
 };
 
 typedef Error (*AcceptCallback)(const IO *io, void *cb_ctx,
@@ -691,11 +691,11 @@ __attribute__((warn_unused_result)) static usize ceil_usize(usize numerator,
 // On success `*res` is the arena; on failure it is left alone and the reason
 // `mmap` gave is passed through.
 __attribute__((warn_unused_result)) static Error
-arena_valloc(const IO *io, usize bytes_count, Arena *res) {
-  assert(io);
+arena_valloc(const Env *env, usize bytes_count, Arena *res) {
+  assert(env);
   assert(res);
 
-  const usize page_size = io->get_page_size(io);
+  const usize page_size = env->get_page_size(env);
   assert(page_size > 0);
 
   const usize usable_bytes = usize_round_up_multiple_of(bytes_count, page_size);
@@ -705,7 +705,7 @@ arena_valloc(const IO *io, usize bytes_count, Arena *res) {
 
   u8 *arena_memory = NULL;
   {
-    const Error err = io->valloc(io, os_alloc_size, &arena_memory);
+    const Error err = env->valloc(env, os_alloc_size, &arena_memory);
     if (ErrKindNone != err.kind) {
       return err;
     }
@@ -713,7 +713,7 @@ arena_valloc(const IO *io, usize bytes_count, Arena *res) {
   assert(arena_memory);
 
   assert(ErrKindNone ==
-         io->vprotect_none(io, arena_memory + usable_bytes, page_size).kind);
+         env->vprotect_none(env, arena_memory + usable_bytes, page_size).kind);
 
   // Right-align the arena against the guard page so that *any* write past
   // `arena.end` faults immediately, then round the start down to the

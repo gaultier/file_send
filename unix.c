@@ -94,8 +94,8 @@ __attribute__((warn_unused_result)) static Error unix_error_from_errno(i32 e) {
 // On success `*res` is the mapping; on failure it is left alone and the
 // `errno` `mmap` set is mapped onto an `Error`.
 __attribute__((warn_unused_result)) static Error
-unix_valloc(const IO *io, usize bytes_count, u8 **res) {
-  (void)io;
+unix_valloc(const Env *env, usize bytes_count, u8 **res) {
+  (void)env;
 
   assert(bytes_count > 0);
   assert(res);
@@ -112,8 +112,8 @@ unix_valloc(const IO *io, usize bytes_count, u8 **res) {
 }
 
 __attribute__((warn_unused_result)) static usize
-unix_get_page_size(const IO *io) {
-  (void)io;
+unix_get_page_size(const Env *env) {
+  (void)env;
 
   const i64 res = sysconf(_SC_PAGE_SIZE);
   assert(-1 != res && "unreachable");
@@ -122,8 +122,8 @@ unix_get_page_size(const IO *io) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_vprotect_none(const IO *io, void *ptr, usize size) {
-  (void)io;
+unix_vprotect_none(const Env *env, void *ptr, usize size) {
+  (void)env;
 
   if (-1 == mprotect(ptr, size, PROT_NONE)) {
     return unix_error_from_errno(errno);
@@ -488,8 +488,8 @@ unix_remove_file(const IO *io, Slice_u8 path) {
 }
 
 __attribute__((warn_unused_result)) static usize
-unix_get_process_id(const IO *io) {
-  (void)io;
+unix_get_process_id(const Env *env) {
+  (void)env;
 
   // `getpid` cannot fail, and a pid is never negative.
   const i64 res = (i64)getpid();
@@ -657,31 +657,11 @@ end:
   return err;
 }
 
-__attribute__((warn_unused_result)) static IO io_platform_make(void) {
-  return (IO){
-      .socket = unix_socket,
-      .listen = unix_listen,
-      .open = unix_open,
-      .tcp_bind_ipv4 = unix_tcp_bind_ipv4,
-      .accept = unix_accept,
-      .thread_create = unix_thread_create,
-      .close = unix_close,
-      .enable_socket_reuse = unix_enable_socket_reuse,
-      .udp_multicast_open_ipv4 = unix_udp_multicast_open_ipv4,
-      .udp_send_to_ipv4 = unix_udp_send_to_ipv4,
-      .read = unix_read,
-      .write = unix_write,
-      .file_size = unix_file_size,
-      .map_file = unix_map_file,
-      .write_all_to_file = unix_write_all_to_file,
-      .remove_file = unix_remove_file,
+__attribute__((warn_unused_result)) static Env env_platform_make(void) {
+  return (Env){
       .get_page_size = unix_get_page_size,
       .valloc = unix_valloc,
       .vprotect_none = unix_vprotect_none,
       .get_process_id = unix_get_process_id,
-      .stdout_silence = unix_stdout_silence,
-      .stdout_restore = unix_stdout_restore,
-      // The Unix implementation is stateless; every slot ignores its `ctx`.
-      .ctx = NULL,
   };
 }
