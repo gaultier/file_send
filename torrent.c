@@ -1178,9 +1178,11 @@ typedef struct {
   // to it until the callback runs and the slot is what outlives that.
   IoCompletion completion;
   u8 recv_buf[TORRENT_PEER_RECV_BUF_LEN];
+  usize recv_len;
 
   Slice_u8 info_hash;
   // More: torrent, etc.
+  TorrentPeerState state;
 } TorrentPeer;
 
 #define TORRENT_PEERS_MAX 1024
@@ -1312,6 +1314,8 @@ static void torrent_peer_close(TorrentPeer *peer_ctx) {
   }
 }
 
+#define TORRENT_PEER_HANDSHAKE_LEN (1 + 19 + 8 + 20 + 20)
+
 __attribute__((warn_unused_result)) static bool
 torrent_check_handshake(Slice_u8 data, Slice_u8 info_hash_expected,
                         Slice_u8 *peer_id) {
@@ -1323,10 +1327,8 @@ torrent_check_handshake(Slice_u8 data, Slice_u8 info_hash_expected,
   // One length byte, then the 19 bytes it counts, then 8 reserved bytes, the
   // info hash and the peer id: 68 bytes, never more and never fewer. The
   // length byte is part of `handshake_header_expected` below, not of the 19.
-  const usize handshake_len =
-      1 + 19 + 8 + TORRENT_INFO_HASH_LEN + TORRENT_PEER_ID_LEN;
 
-  if (handshake_len != data.len) {
+  if (TORRENT_PEER_HANDSHAKE_LEN != data.len) {
     return false;
   }
 
@@ -1353,39 +1355,80 @@ torrent_check_handshake(Slice_u8 data, Slice_u8 info_hash_expected,
   return true;
 }
 
+static void torrent_peer_tick(TorrentPeer *peer, IO *io);
+
 static void torrent_peer_on_read(IoCompletion *completion, Error err,
                                  usize res) {
   assert(completion);
 
-  TorrentPeer *const peer_ctx = completion->ctx;
-  assert(peer_ctx);
-  assert(TORRENT_INFO_HASH_LEN == peer_ctx->info_hash.len);
+  TorrentPeer *const peer = completion->ctx;
+  assert(peer);
+  assert(TORRENT_INFO_HASH_LEN == peer->info_hash.len);
+  assert(peer->recv_len <= TORRENT_PEER_RECV_BUF_LEN);
 
   if (ErrKindNone != err.kind) {
     error_print("failed to read from a peer", err);
-    torrent_peer_close(peer_ctx);
+    torrent_peer_close(peer);
     return;
   }
 
-  assert(res <= sizeof(peer_ctx->recv_buf));
-  fwrite(peer_ctx->recv_buf, sizeof(u8), res, stdout);
-  Slice_u8 recv = slice_u8_make(peer_ctx->recv_buf, res);
+  assert(!__builtin_add_overflow(peer->recv_len, res, &peer->recv_len));
+  assert(peer->recv_len <= TORRENT_PEER_RECV_BUF_LEN);
 
-  Slice_u8 peer_id = {0};
-  if (!torrent_check_handshake(recv, peer_ctx->info_hash, &peer_id)) {
-    fprintf(stderr, "wrong handshake from peer\n");
-
-  } else {
-    printf("received valid handshake\n");
-  }
-
-  // TODO: Parse the peer handshake, and keep reading instead of hanging up.
-  torrent_peer_close(peer_ctx);
+  torrent_peer_tick(peer, peer->io);
 }
 
-__attribute__((warn_unused_result)) static Error
-torrent_peer_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
-                       i32 accept_socket) {
+static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
+  assert(peer);
+  assert(io);
+
+  switch (peer->state) {
+  case TorrentPeerStateInitial: {
+    if (peer->recv_len < TORRENT_PEER_HANDSHAKE_LEN) {
+      const Error err =
+          io->read(io, &peer->completion, peer->socket,
+                   slice_u8_make(peer->recv_buf, TORRENT_PEER_RECV_BUF_LEN),
+                   torrent_peer_on_read);
+      if (ErrKindNone != err.kind) {
+        torrent_peer_close(peer);
+        return;
+      }
+      return;
+    }
+
+    Slice_u8 recv = slice_u8_make(peer->recv_buf, peer->recv_len);
+    fwrite(peer->recv_buf, sizeof(u8), peer->recv_len, stdout);
+
+    Slice_u8 peer_id = {0};
+    if (!torrent_check_handshake(recv, peer->info_hash, &peer_id)) {
+      fprintf(stderr, "wrong handshake from peer\n");
+      torrent_peer_close(peer);
+      return;
+    }
+    printf("received valid handshake\n");
+
+    peer->state = TorrentPeerStateHandshaked;
+
+    const Error err =
+        io->read(io, &peer->completion, peer->socket,
+                 slice_u8_make(peer->recv_buf, TORRENT_PEER_RECV_BUF_LEN),
+                 torrent_peer_on_read);
+    if (ErrKindNone != err.kind) {
+      torrent_peer_close(peer);
+      return;
+    }
+  } break;
+
+  case TorrentPeerStateHandshaked: {
+    // TODO
+    torrent_peer_close(peer);
+    return;
+  } break;
+  }
+}
+
+static void torrent_peer_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
+                                   i32 accept_socket) {
   assert(io);
   assert(vctx);
   TorrentNetworkCtx *const network_ctx = vctx;
@@ -1402,7 +1445,7 @@ torrent_peer_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
     // Refused, so there is no slot to keep a completion in and nothing waiting
     // on the answer: this is the hang-up `Env` is for.
     (void)io->env->close_socket(io->env, accept_socket);
-    return (Error){.kind = ErrKindOOM};
+    return;
   }
 
   peer_ctx->cb_ctx = vctx;
@@ -1421,10 +1464,8 @@ torrent_peer_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
     // The read never started, so nothing else is going to hang up on the peer
     // or hand the slot back.
     torrent_peer_close(peer_ctx);
-    return err;
+    return;
   }
-
-  return (Error){.kind = ErrKindNone};
 }
 
 __attribute__((warn_unused_result)) static Error

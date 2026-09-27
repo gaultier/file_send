@@ -1180,8 +1180,8 @@ io_write_all_to_file_blocking(IO *io, Slice_u8 path, Slice_u8 data) {
 
 // `accept_socket` belongs to the callback from the moment it is handed over,
 // including hanging up on it when the callback itself fails.
-typedef Error (*AcceptCallback)(IO *io, void *cb_ctx, Ipv4Addr accept_addr,
-                                i32 accept_socket);
+typedef void (*AcceptCallback)(IO *io, void *cb_ctx, Ipv4Addr accept_addr,
+                               i32 accept_socket);
 
 // A listener and the one accept it always has in flight. Set up synchronously,
 // because every step of the setup is an `Env` call that answers on the spot;
@@ -1279,12 +1279,8 @@ static void io_server_on_accept(IoCompletion *completion, Error err,
   const i32 accept_socket = (i32)res;
   assert(accept_socket >= 0);
 
-  const Error err_on_accept =
-      server->on_accept(server->io, server->cb_ctx,
-                        completion->action.v.accept.addr, accept_socket);
-  if (ErrKindNone != err_on_accept.kind) {
-    error_print("failed to handle connection", err_on_accept);
-  }
+  server->on_accept(server->io, server->cb_ctx,
+                    completion->action.v.accept.addr, accept_socket);
 
   // The callback owns that connection now, whether it managed anything with
   // it or not, so the listener goes straight back to waiting.
