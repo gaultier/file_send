@@ -1178,6 +1178,11 @@ _Static_assert(0 == (TORRENT_CLIENTS_MAX % POOL_SLOTS_PER_GROUP),
 
 #define POOL_SLOT_GROUPS (TORRENT_CLIENTS_MAX / POOL_SLOTS_PER_GROUP)
 
+// Plain reads and writes, and no atomics: one thread runs the event loop, every
+// callback runs from inside it, and so acquiring and releasing a slot are just
+// two more things that happen in order on that thread. Nothing here was ever
+// contended -- the atomics were for the thread per client that the loop
+// replaced.
 typedef struct {
   // Bitset.
   // Bit `i` of group `g` means: `slots[g * POOL_SLOTS_PER_GROUP + i]` is
@@ -1196,14 +1201,11 @@ torrent_client_ctx_pool_acquire(TorrentClientHandleCtxPool *pool) {
   assert(pool);
 
   for (usize i = 0; i < POOL_SLOT_GROUPS; i++) {
-    // 'Relaxed' means that we sometimes can report the slot group as full when
-    // it's not. It's a TOCTOU window we accept and there is no easy fix.
-    const PoolSlotGroup slot_group =
-        __atomic_load_n(&pool->occupied[i], __ATOMIC_RELAXED);
+    const PoolSlotGroup slot_group = pool->occupied[i];
 
     const i32 first_unset_bit = __builtin_ffsll((i64)~slot_group);
 
-    // Slot full, keep scanning to find a free slot?
+    // This group is full; there may be a free slot in a later one.
     if (0 == first_unset_bit) {
       continue;
     }
@@ -1211,14 +1213,10 @@ torrent_client_ctx_pool_acquire(TorrentClientHandleCtxPool *pool) {
     const u32 bit_idx = (u32)(first_unset_bit - 1);
     const PoolSlotGroup mask = 1ULL << bit_idx;
 
-    // Mark the slot as occupied.
-    const PoolSlotGroup prev =
-        __atomic_fetch_or(&pool->occupied[i], mask, __ATOMIC_ACQUIRE);
-
-    // Since there is only one concurrent caller of 'pool_acquire' no
-    // one could have concurrently acquired the slot that was free at the start
-    // of this loop iteration.
-    assert(0 == (prev & mask));
+    // The read above is still good: one thread runs the loop, and between that
+    // read and this write there is nothing for it to have been doing but this.
+    assert(0 == (pool->occupied[i] & mask));
+    pool->occupied[i] |= mask;
 
     const usize slot_idx = i * POOL_SLOTS_PER_GROUP + bit_idx;
     assert(slot_idx < TORRENT_CLIENTS_MAX);
@@ -1256,13 +1254,11 @@ static void torrent_client_ctx_pool_release(TorrentClientHandleCtxPool *pool,
   // We are still the owner so we are responsible for zeroing it.
   memset(slot, 0, sizeof(*slot));
 
-  const PoolSlotGroup mask = ~(1ULL << bit_idx);
-  const PoolSlotGroup prev = __atomic_fetch_and(&pool->occupied[slot_group_idx],
-                                                mask, __ATOMIC_RELEASE);
+  const PoolSlotGroup mask = 1ULL << bit_idx;
 
-  // Sanity check against double release of the same slot: the slot was indeed
-  // occupied before.
-  assert(0 != (prev & ~mask));
+  // Sanity check against double release of the same slot: it was occupied.
+  assert(0 != (pool->occupied[slot_group_idx] & mask));
+  pool->occupied[slot_group_idx] &= ~mask;
 }
 
 // A connection, one callback at a time. It reads once and hangs up, which is
