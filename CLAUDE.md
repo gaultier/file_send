@@ -4,3 +4,4 @@
 - Always use braces in loops and conditionals
 - Functions that return a value must use `__attribute__((warn_unused_result))`
 - Local variables and function pointer arguments must use `const` if possible
+- Keep code comments very short with simple words. A comment is a sentence starting with an uppercase letter and ending with a period. Do not describe the before/after state of a commit, only explain the overall architecture or unclear things from the code (e.g. lifetimes).
