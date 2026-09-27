@@ -27,6 +27,7 @@ typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
+typedef int16_t i16;
 typedef int32_t i32;
 typedef int64_t i64;
 typedef size_t usize;
@@ -517,17 +518,23 @@ typedef struct {
 typedef void *(*ThreadCallback)(void *data);
 
 typedef enum {
-  IoActionRead,
-  IoActionWrite,
-  IoActionAccept,
-  IoActionConnect,
-  IoActionSendTo,
+  IoActionKindRead,
+  IoActionKindWrite,
+  IoActionKindAccept,
+  IoActionKindConnect,
+  IoActionKindSendTo,
+} IoActionKind;
+
+typedef struct {
+  IoActionKind kind;
+  union {
+    Slice_u8 data; // Read, write.
+  } v;
 } IoAction;
 
 typedef struct IoCompletion IoCompletion;
 
-typedef void (*IoCallback)(void *ctx, IoCompletion *completion, Error err,
-                           usize res);
+typedef void (*IoCallback)(IoCompletion *completion, Error err, usize res);
 
 struct IoCompletion {
   // Intrusive linked list.
