@@ -1941,7 +1941,7 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
 // in the same state, waiting for the same handshake.
 static void torrent_peer_init(TorrentPeer *peer, IO *io,
                               TorrentNetworkCtx *network_ctx, Ipv4Addr addr,
-                              i32 socket) {
+                              i32 socket, u32 ip) {
   assert(peer);
   assert(io);
   assert(network_ctx);
@@ -1963,8 +1963,14 @@ static void torrent_peer_init(TorrentPeer *peer, IO *io,
   // TODO: a real peer id, generated once for the process. Two peers sharing one
   // makes a remote think it has connected to itself.
   peer->id[0] = 1;
+
+  char log_prefix[32] = {0};
+  snprintf((char *)log_prefix, sizeof(log_prefix) - 1,
+           "[peer %u.%u.%u.%u:%hu] ", ip >> 24 & 0xff, ip >> 16 & 0xff,
+           ip >> 8 & 0xff, ip >> 0 & 0xff, ip);
+
   peer->logger =
-      log_make(network_ctx->log_level_mask, slice_u8_from_cstr("[peer] "));
+      log_make(network_ctx->log_level_mask, slice_u8_from_cstr(log_prefix));
 
   log(peer->logger, LogLevelDebug, "init");
 }
@@ -1977,8 +1983,6 @@ static void torrent_peer_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
   assert(TORRENT_INFO_HASH_LEN == network_ctx->info_hash.len);
 
   const u32 ip = accept_addr.ip;
-  printf("accepted: %u.%u.%u.%u:%hu\n", ip >> 24 & 0xff, ip >> 16 & 0xff,
-         ip >> 8 & 0xff, ip >> 0 & 0xff, accept_addr.port);
 
   TorrentPeer *const peer = torrent_peer_ctx_pool_acquire(&network_ctx->pool);
   if (!peer) {
@@ -1989,7 +1993,7 @@ static void torrent_peer_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
     return;
   }
 
-  torrent_peer_init(peer, io, network_ctx, accept_addr, accept_socket);
+  torrent_peer_init(peer, io, network_ctx, accept_addr, accept_socket, ip);
   log(peer->logger, LogLevelInfo, "accepted");
 
   // Nothing buffered yet and the initial state, so the tick's first move is the
