@@ -502,6 +502,27 @@ typedef struct {
 
 typedef void *(*ThreadCallback)(void *data);
 
+typedef enum {
+  IoActionRead,
+  IoActionWrite,
+  IoActionAccept,
+  IoActionConnect,
+  IoActionSendTo,
+} IoAction;
+
+typedef struct IoCompletion IoCompletion;
+
+typedef void (*IoCallback)(void *ctx, IoCompletion *completion, Error err,
+                           usize res);
+
+struct IoCompletion {
+  // Intrusive linked list.
+  IoCompletion *next;
+  void *ctx;
+  IoCallback cb;
+  IoAction action;
+};
+
 struct IO {
   Error (*socket)(const IO *io, SocketDomain domain, SocketType type, i32 *fd);
   Error (*listen)(const IO *io, i32 fd, i32 backlog);
