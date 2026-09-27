@@ -28,3 +28,9 @@
   - `epoll_pwait2` takes a `timespec`, so `run_for_ns` would not have to round
     its nanoseconds up to a millisecond
   - nothing drives `IO.connect` on either platform yet, so it is untested
+  - once the peer protocol writes to sockets, measure whether `write` and
+    `send_to` should make the syscall in the slot rather than on the next turn
+    of the loop, as libuv's `uv_write` does. The reasoning, and what it would
+    cost, is on the `IO` struct in `lib.c`; the short of it is that it buys a
+    return-to-loop and not a syscall, needs the answer kept on the completion,
+    and is only safe while nothing else is pending on that descriptor.

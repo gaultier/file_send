@@ -656,11 +656,35 @@ struct IoCompletion {
   IoAction action;
 };
 
-// Every slot here submits an operation and returns at once. An `Error` from a
-// slot means the operation was never submitted and its callback will never
-// run -- the only reason for one is that the implementation has no room left
-// to take the operation, which is backpressure and not a failure of the
-// operation. Anything the operation itself has to report reaches the callback.
+// Every slot here submits an operation and returns at once, without making the
+// syscall: that happens on the next turn of the loop. An `Error` from a slot
+// means the operation was never submitted and its callback will never run -- the
+// only reason for one is that the implementation has no room left to take the
+// operation, which is backpressure and not a failure of the operation. Anything
+// the operation itself has to report reaches the callback.
+//
+// libuv makes the write syscall in `uv_write` itself and only waits for
+// writability if that answers `EAGAIN`, while leaving a read to wait
+// (`uv__read_start` has a standing `TODO: try to do the read inline?`). The
+// asymmetry is well judged -- a send buffer usually has room, whereas data
+// usually has not arrived -- and it is deliberately not copied here yet:
+//
+//   - It is not a syscall cheaper. Submitting a change and being handed it back
+//     are one `kevent` on Darwin, and the syscall follows immediately, so the
+//     whole of the difference is that the bytes leave after control returns to
+//     the loop instead of before. Which matters more the more the loop does per
+//     turn, and not at all for a file, which never answers `EAGAIN`.
+//   - For a read it would be worse, not better: attempting at submission leaves
+//     less time for data to arrive than attempting a turn later does.
+//   - The callback has to stay deferred either way -- libuv defers it too, via
+//     `write_completed_queue` -- so an operation the slot completed itself needs
+//     its answer kept until the loop delivers it, which is three more fields on
+//     every completion.
+//   - And it is only safe while nothing else is pending on that descriptor, or
+//     the stream reorders. libuv guards on `empty_queue` for exactly that.
+//
+// Nothing here writes to a socket yet, so there is no measurement to weigh any
+// of that against. Revisit with the peer protocol, when there is one.
 //
 // The completion belongs to the implementation from the moment it is submitted
 // until its callback runs, so it has to outlive that and must not be touched,
