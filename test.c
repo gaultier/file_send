@@ -515,7 +515,7 @@ typedef enum {
   TestIoPerformDone,
   // The operation is never answered, the way a peer that has gone quiet never
   // answers: the completion is dropped and its callback never runs. The only
-  // way for a test to hold a connection open, which is what filling the client
+  // way for a test to hold a connection open, which is what filling the peer
   // pool needs.
   TestIoPerformParked,
 } TestIoPerformResult;
@@ -524,7 +524,7 @@ typedef TestIoPerformResult (*TestIoPerform)(TestIo *test_io,
                                              IoCompletion *completion, i32 fd,
                                              Error *dst_err, usize *dst_res);
 
-// Enough for every slot of the client pool to have an operation in flight, plus
+// Enough for every slot of the peer pool to have an operation in flight, plus
 // the listener's own.
 #define TEST_IO_IN_FLIGHT_MAX (TORRENT_PEERS_MAX + 16)
 
@@ -745,7 +745,7 @@ typedef struct {
 
   // Leave every read unanswered, the way a peer that connects and then says
   // nothing does. The only way to hold connections open, and so the only way to
-  // fill the client pool.
+  // fill the peer pool.
   bool read_parks;
 
   usize socket_calls;
@@ -945,7 +945,7 @@ test_server_run(TestIo *test_io, TestServerCtx *ctx, const Env *env,
   const i32 saved = test_stdout_silence();
 
   const Error err_listen = io_listen_and_serve_tcp_ipv4(
-      &test_io->io, server, network_ctx, addr, torrent_client_on_accept);
+      &test_io->io, server, network_ctx, addr, torrent_peer_on_accept);
 
   // Whether the setup failed or the listener ran and stopped, the loop is
   // turned until nothing is outstanding: a listener that came down still has a
@@ -1087,7 +1087,7 @@ static void test_io_listen_and_serve_accept(void) {
 
     const i32 saved = test_stdout_silence();
     const Error err_listen = io_listen_and_serve_tcp_ipv4(
-        &test_io.io, &server, &network_ctx, addr, torrent_client_on_accept);
+        &test_io.io, &server, &network_ctx, addr, torrent_peer_on_accept);
     assert(ErrKindNone == err_listen.kind);
     assert(ErrKindNone == io_run_until(&test_io.io, &server.done, 1).kind);
     test_stdout_restore(saved);
@@ -1153,7 +1153,7 @@ static void test_io_listen_and_serve_accept(void) {
 // Backpressure: one more connection than the pool holds, all of them held open
 // by a read that never answers. Reaching this with real sockets would mean
 // opening `TORRENT_PEERS_MAX` of them.
-static void test_torrent_client_pool_exhaustion(void) {
+static void test_torrent_peer_pool_exhaustion(void) {
   const Ipv4Addr addr = {.ip = 0x7f000001, .port = 12345};
 
   // The pool is a megabyte or so of slots, and the fake `IO` has room for an
@@ -3491,7 +3491,7 @@ static void test_sha256_encode_hex_trunc(void) {
     }
   }
 
-  // The lowercase alphabet, which is what BEP 14 and every client expect.
+  // The lowercase alphabet, which is what BEP 14 and every peer expect.
   {
     u8 digest[SHA256_DIGEST_LENGTH] = {0};
     memset(digest, 0xbe, sizeof(digest));
@@ -5530,7 +5530,7 @@ static void test(const char *filter) {
       {"io_listen_and_serve_setup_failures",
        test_io_listen_and_serve_setup_failures},
       {"io_listen_and_serve_accept", test_io_listen_and_serve_accept},
-      {"torrent_client_pool_exhaustion", test_torrent_client_pool_exhaustion},
+      {"torrent_peer_pool_exhaustion", test_torrent_peer_pool_exhaustion},
       {"io_syscall_failures", test_io_syscall_failures},
       {"torrent_make_dicts_oom", test_torrent_make_dicts_oom},
       {"io_composites_mocked", test_io_composites_mocked},

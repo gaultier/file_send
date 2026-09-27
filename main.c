@@ -232,7 +232,7 @@ int main(i32 argc, char *argv[]) {
         .info_hash = slice_u8_make(info_hash, TORRENT_INFO_HASH_LEN)};
     IoServer server = {0};
     Error err_listen = io_listen_and_serve_tcp_ipv4(
-        io, &server, &ctx, listen_addr, torrent_client_on_accept);
+        io, &server, &ctx, listen_addr, torrent_peer_on_accept);
     if (ErrKindNone != err_listen.kind) {
       error_print("failed to listen and serve", err_listen);
       return 1;

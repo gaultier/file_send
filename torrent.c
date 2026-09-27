@@ -761,7 +761,7 @@ __attribute__((warn_unused_result)) static Error torrent_make_metainfo_dict_v2(
     //
     // Keyed by the merkle root, not by the file name: that is what ties a
     // layer back to its file across the whole torrent, and it is what every
-    // other client looks up.
+    // other peer looks up.
     {
       BencodeValue *const layer_key = &pieces_value->v.list.data[0];
       layer_key->kind = BencodeKindString;
@@ -1152,6 +1152,11 @@ typedef enum {
   // TODO: v2 adds more.
 } TorrentMessageKind;
 
+typedef enum {
+  TorrentPeerStateInitial,
+  TorrentPeerStateHandshaked,
+} TorrentPeerState;
+
 typedef struct TorrentNetworkCtx TorrentNetworkCtx;
 
 #define TORRENT_INFO_HASH_LEN 20
@@ -1195,16 +1200,16 @@ typedef struct {
   // occupied.
   PoolSlotGroup occupied[POOL_SLOT_GROUPS];
   TorrentPeer slots[TORRENT_PEERS_MAX];
-} TorrentClientHandleCtxPool;
+} TorrentpeerHandleCtxPool;
 
 struct TorrentNetworkCtx {
-  TorrentClientHandleCtxPool pool;
+  TorrentpeerHandleCtxPool pool;
   Slice_u8 info_hash;
   // More...
 };
 
 __attribute__((warn_unused_result)) static TorrentPeer *
-torrent_client_ctx_pool_acquire(TorrentClientHandleCtxPool *pool) {
+torrent_peer_ctx_pool_acquire(TorrentpeerHandleCtxPool *pool) {
   assert(pool);
 
   for (usize i = 0; i < POOL_SLOT_GROUPS; i++) {
@@ -1245,8 +1250,8 @@ torrent_client_ctx_pool_acquire(TorrentClientHandleCtxPool *pool) {
   return NULL;
 }
 
-static void torrent_client_ctx_pool_release(TorrentClientHandleCtxPool *pool,
-                                            TorrentPeer *slot) {
+static void torrent_peer_ctx_pool_release(TorrentpeerHandleCtxPool *pool,
+                                          TorrentPeer *slot) {
   assert(pool);
   assert(slot);
 
@@ -1271,39 +1276,39 @@ static void torrent_client_ctx_pool_release(TorrentClientHandleCtxPool *pool,
 // A connection, one callback at a time. It reads once and hangs up, which is
 // all the peer protocol amounts to so far; what replaces the single read is
 // more of these, not a thread.
-static void torrent_client_on_close(IoCompletion *completion, Error err,
-                                    usize res) {
+static void torrent_peer_on_close(IoCompletion *completion, Error err,
+                                  usize res) {
   assert(completion);
   (void)err;
   (void)res;
 
-  TorrentPeer *const client_ctx = completion->ctx;
-  assert(client_ctx);
-  assert(client_ctx->network_ctx);
+  TorrentPeer *const peer_ctx = completion->ctx;
+  assert(peer_ctx);
+  assert(peer_ctx->network_ctx);
 
   // Whatever hanging up reported is of no use to anyone: the connection is
   // over, and there is nothing left to do differently.
-  torrent_client_ctx_pool_release(&client_ctx->network_ctx->pool, client_ctx);
+  torrent_peer_ctx_pool_release(&peer_ctx->network_ctx->pool, peer_ctx);
 }
 
 // Hang up and hand the slot back. Every way a connection can end goes through
 // here, so the slot is released exactly once however it ended.
-static void torrent_client_close(TorrentPeer *client_ctx) {
-  assert(client_ctx);
-  assert(client_ctx->io);
-  assert(client_ctx->network_ctx);
+static void torrent_peer_close(TorrentPeer *peer_ctx) {
+  assert(peer_ctx);
+  assert(peer_ctx->io);
+  assert(peer_ctx->network_ctx);
 
-  IO *const io = client_ctx->io;
+  IO *const io = peer_ctx->io;
 
-  const Error err = io->close(io, &client_ctx->completion, client_ctx->socket,
-                              torrent_client_on_close);
+  const Error err = io->close(io, &peer_ctx->completion, peer_ctx->socket,
+                              torrent_peer_on_close);
   if (ErrKindNone != err.kind) {
-    // The close was never submitted, so `torrent_client_on_close` will not run:
+    // The close was never submitted, so `torrent_peer_on_close` will not run:
     // hang up here instead, and hand the slot back, or the connection would
     // cost a slot for the life of the process.
     error_print("failed to hang up on a peer", err);
-    (void)io->env->close_socket(io->env, client_ctx->socket);
-    torrent_client_ctx_pool_release(&client_ctx->network_ctx->pool, client_ctx);
+    (void)io->env->close_socket(io->env, peer_ctx->socket);
+    torrent_peer_ctx_pool_release(&peer_ctx->network_ctx->pool, peer_ctx);
   }
 }
 
@@ -1348,26 +1353,26 @@ torrent_check_handshake(Slice_u8 data, Slice_u8 info_hash_expected,
   return true;
 }
 
-static void torrent_client_on_read(IoCompletion *completion, Error err,
-                                   usize res) {
+static void torrent_peer_on_read(IoCompletion *completion, Error err,
+                                 usize res) {
   assert(completion);
 
-  TorrentPeer *const client_ctx = completion->ctx;
-  assert(client_ctx);
-  assert(TORRENT_INFO_HASH_LEN == client_ctx->info_hash.len);
+  TorrentPeer *const peer_ctx = completion->ctx;
+  assert(peer_ctx);
+  assert(TORRENT_INFO_HASH_LEN == peer_ctx->info_hash.len);
 
   if (ErrKindNone != err.kind) {
     error_print("failed to read from a peer", err);
-    torrent_client_close(client_ctx);
+    torrent_peer_close(peer_ctx);
     return;
   }
 
-  assert(res <= sizeof(client_ctx->recv_buf));
-  fwrite(client_ctx->recv_buf, sizeof(u8), res, stdout);
-  Slice_u8 recv = slice_u8_make(client_ctx->recv_buf, res);
+  assert(res <= sizeof(peer_ctx->recv_buf));
+  fwrite(peer_ctx->recv_buf, sizeof(u8), res, stdout);
+  Slice_u8 recv = slice_u8_make(peer_ctx->recv_buf, res);
 
   Slice_u8 peer_id = {0};
-  if (!torrent_check_handshake(recv, client_ctx->info_hash, &peer_id)) {
+  if (!torrent_check_handshake(recv, peer_ctx->info_hash, &peer_id)) {
     fprintf(stderr, "wrong handshake from peer\n");
 
   } else {
@@ -1375,12 +1380,12 @@ static void torrent_client_on_read(IoCompletion *completion, Error err,
   }
 
   // TODO: Parse the peer handshake, and keep reading instead of hanging up.
-  torrent_client_close(client_ctx);
+  torrent_peer_close(peer_ctx);
 }
 
 __attribute__((warn_unused_result)) static Error
-torrent_client_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
-                         i32 accept_socket) {
+torrent_peer_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
+                       i32 accept_socket) {
   assert(io);
   assert(vctx);
   TorrentNetworkCtx *const network_ctx = vctx;
@@ -1390,32 +1395,32 @@ torrent_client_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
   printf("accepted: %u.%u.%u.%u:%hu\n", ip >> 24 & 0xff, ip >> 16 & 0xff,
          ip >> 8 & 0xff, ip >> 0 & 0xff, accept_addr.port);
 
-  TorrentPeer *const client_ctx =
-      torrent_client_ctx_pool_acquire(&network_ctx->pool);
-  if (!client_ctx) {
-    fprintf(stderr, "backpressure: no available pool slot for client\n");
+  TorrentPeer *const peer_ctx =
+      torrent_peer_ctx_pool_acquire(&network_ctx->pool);
+  if (!peer_ctx) {
+    fprintf(stderr, "backpressure: no available pool slot for peer\n");
     // Refused, so there is no slot to keep a completion in and nothing waiting
     // on the answer: this is the hang-up `Env` is for.
     (void)io->env->close_socket(io->env, accept_socket);
     return (Error){.kind = ErrKindOOM};
   }
 
-  client_ctx->cb_ctx = vctx;
-  client_ctx->addr = accept_addr;
-  client_ctx->socket = accept_socket;
-  client_ctx->io = io;
-  client_ctx->network_ctx = network_ctx;
-  client_ctx->completion.ctx = client_ctx;
-  client_ctx->info_hash = network_ctx->info_hash;
+  peer_ctx->cb_ctx = vctx;
+  peer_ctx->addr = accept_addr;
+  peer_ctx->socket = accept_socket;
+  peer_ctx->io = io;
+  peer_ctx->network_ctx = network_ctx;
+  peer_ctx->completion.ctx = peer_ctx;
+  peer_ctx->info_hash = network_ctx->info_hash;
 
   const Slice_u8 dst =
-      slice_u8_make(client_ctx->recv_buf, sizeof(client_ctx->recv_buf));
-  const Error err = io->read(io, &client_ctx->completion, client_ctx->socket,
-                             dst, torrent_client_on_read);
+      slice_u8_make(peer_ctx->recv_buf, sizeof(peer_ctx->recv_buf));
+  const Error err = io->read(io, &peer_ctx->completion, peer_ctx->socket, dst,
+                             torrent_peer_on_read);
   if (ErrKindNone != err.kind) {
     // The read never started, so nothing else is going to hang up on the peer
     // or hand the slot back.
-    torrent_client_close(client_ctx);
+    torrent_peer_close(peer_ctx);
     return err;
   }
 
