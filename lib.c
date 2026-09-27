@@ -342,12 +342,6 @@ __attribute__((warn_unused_result)) static Slice_u8 slice_u8_make(u8 *data,
   return (Slice_u8){.data = data, .len = len};
 }
 
-// Consume the first byte of `*slice` if it is `expected`.
-//
-// `*slice` is only advanced on a match, which is what makes it usable as a
-// speculative `if (ErrNone != expect(...)) { return ...; }` inside a parse
-// that rolls back. A byte that simply does not match is reported the same way
-// as a missing one: it is the caller that knows whether that is an error.
 __attribute__((warn_unused_result)) static Error
 slice_u8_expect_u8(Slice_u8 *slice, u8 expected) {
   assert(slice);
@@ -368,7 +362,7 @@ slice_u8_expect_u8(Slice_u8 *slice, u8 expected) {
 __attribute__((warn_unused_result)) static bool
 slice_u8_consume_u8(Slice_u8 *slice, u8 *dst) {
   assert(slice);
-  if (slice->len < sizeof(u32)) {
+  if (slice->len < sizeof(*dst)) {
     return false;
   }
 
@@ -376,7 +370,7 @@ slice_u8_consume_u8(Slice_u8 *slice, u8 *dst) {
     *dst = slice->data[0];
   }
 
-  slice_u8_advance(slice, sizeof(u32));
+  slice_u8_advance(slice, sizeof(*dst));
 
   return true;
 }
@@ -385,6 +379,7 @@ __attribute__((warn_unused_result)) static bool
 slice_u8_consume_n(Slice_u8 *slice, Slice_u8 *dst) {
   assert(slice);
   assert(dst);
+  assert(dst->data || 0 == dst->len);
 
   if (slice->len < dst->len) {
     return false;
@@ -402,12 +397,16 @@ slice_u8_consume_u32_be(Slice_u8 *slice, u32 *dst) {
   assert(slice);
   assert(dst);
 
-  Slice_u8 dst_slice = {.data = (u8 *)dst, .len = sizeof(*dst)};
-  const bool res = slice_u8_consume_n(slice, &dst_slice);
+  if (slice->len < sizeof(*dst)) {
+    return false;
+  }
 
-  ntohl(*dst);
+  *dst = (u32)slice->data[0] << 24 | (u32)slice->data[1] << 16 |
+         (u32)slice->data[2] << 8 | (u32)slice->data[3];
 
-  return res;
+  slice_u8_advance(slice, sizeof(*dst));
+
+  return true;
 }
 
 // The extension of the last component of `path`, dot included, or an empty
