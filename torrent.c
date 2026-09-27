@@ -1152,6 +1152,29 @@ typedef enum {
   // TODO: v2 adds more.
 } TorrentMessageKind;
 
+typedef struct {
+  u32 idx;
+  u32 begin;
+  u32 len;
+} PeerMessageIndexBeginLength;
+
+typedef struct {
+  u32 idx;
+  u32 begin;
+  // TODO: Data.
+} PeerMessagePiece;
+
+typedef struct {
+  TorrentMessageKind kind;
+  union {
+    u32 have;                                  // Have
+    PeerMessageIndexBeginLength idx_begin_len; // Request | Cancel
+    PeerMessagePiece piece;
+
+    // TODO: Bitfield.
+  } v;
+} TorrentPeerMessage;
+
 typedef enum {
   TorrentPeerStateInitial,
   TorrentPeerStateHandshaked,
@@ -1412,6 +1435,7 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
     assert(peer->recv_len >= TORRENT_PEER_HANDSHAKE_LEN);
     const usize remaining = peer->recv_len - TORRENT_PEER_HANDSHAKE_LEN;
     assert(remaining < TORRENT_PEER_RECV_BUF_CAP);
+    assert(peer->recv_buf);
     memmove(peer->recv_buf, peer->recv_buf + peer->recv_len, remaining);
     peer->recv_len = remaining;
 

@@ -365,6 +365,22 @@ slice_u8_consume(Slice_u8 *slice, u8 expected) {
   return (Error){.kind = ErrKindNone};
 }
 
+__attribute__((warn_unused_result)) static bool
+slice_u8_consume_u32(Slice_u8 *slice, u32 *res) {
+  assert(slice);
+  if (slice->len < sizeof(u32)) {
+    return false;
+  }
+
+  if (res) {
+    *res = *(u32 *)slice->data;
+  }
+
+  slice_u8_advance(slice, sizeof(u32));
+
+  return true;
+}
+
 // The extension of the last component of `path`, dot included, or an empty
 // slice when there is none. The result borrows from `path`: nothing is
 // copied, and it is always a suffix of the input.
