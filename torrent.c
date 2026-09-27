@@ -1532,18 +1532,20 @@ static void torrent_peer_on_close(IoCompletion *completion, Error err,
   (void)err;
   (void)res;
 
-  TorrentPeer *const peer_ctx = completion->ctx;
-  torrent_peer_assert_invariants(peer_ctx);
-  assert(&peer_ctx->completion_close == completion);
+  TorrentPeer *const peer = completion->ctx;
+  torrent_peer_assert_invariants(peer);
+  assert(&peer->completion_close == completion);
   // The hang-up is the last thing to happen on a connection, so nothing else
   // can still be pointing into the slot that is about to be handed back.
-  assert(peer_ctx->closing);
-  assert(!peer_ctx->read_in_flight);
-  assert(!peer_ctx->write_in_flight);
+  assert(peer->closing);
+  assert(!peer->read_in_flight);
+  assert(!peer->write_in_flight);
+
+  log(peer->logger, LogLevelInfo, "closed");
 
   // Whatever hanging up reported is of no use to anyone: the connection is
   // over, and there is nothing left to do differently.
-  torrent_peer_ctx_pool_release(&peer_ctx->network_ctx->pool, peer_ctx);
+  torrent_peer_ctx_pool_release(&peer->network_ctx->pool, peer);
 }
 
 // Hang up and hand the slot back. Every way a connection can end goes through
@@ -1553,27 +1555,28 @@ static void torrent_peer_on_close(IoCompletion *completion, Error err,
 // another operation is still with the kernel: the descriptor cannot be closed
 // under a registration that still points at this slot. The last callback to
 // report comes back here and finishes the job.
-static void torrent_peer_close(TorrentPeer *peer_ctx) {
-  torrent_peer_assert_invariants(peer_ctx);
+static void torrent_peer_close(TorrentPeer *peer) {
+  torrent_peer_assert_invariants(peer);
+  log(peer->logger, LogLevelInfo, "queuing close");
 
-  peer_ctx->closing = true;
+  peer->closing = true;
 
   // Something is still in flight. Its callback sees `closing` and comes back.
-  if (peer_ctx->read_in_flight || peer_ctx->write_in_flight) {
+  if (peer->read_in_flight || peer->write_in_flight) {
     return;
   }
 
-  IO *const io = peer_ctx->io;
+  IO *const io = peer->io;
 
-  const Error err = io->close(io, &peer_ctx->completion_close, peer_ctx->socket,
+  const Error err = io->close(io, &peer->completion_close, peer->socket,
                               torrent_peer_on_close);
   if (ErrKindNone != err.kind) {
     // The close was never submitted, so `torrent_peer_on_close` will not run:
     // hang up here instead, and hand the slot back, or the connection would
     // cost a slot for the life of the process.
     error_print("failed to hang up on a peer", err);
-    (void)io->env->close_socket(io->env, peer_ctx->socket);
-    torrent_peer_ctx_pool_release(&peer_ctx->network_ctx->pool, peer_ctx);
+    (void)io->env->close_socket(io->env, peer->socket);
+    torrent_peer_ctx_pool_release(&peer->network_ctx->pool, peer);
   }
 }
 
@@ -1635,6 +1638,8 @@ torrent_peer_read(TorrentPeer *peer, IO *io) {
   assert(!peer->read_in_flight);
   assert(!peer->closing);
 
+  log(peer->logger, LogLevelDebug, "queuing read");
+
   const Slice_u8 dst =
       slice_u8_make(peer->recv_buf + peer->recv_len,
                     TORRENT_PEER_RECV_BUF_CAP - peer->recv_len);
@@ -1659,6 +1664,8 @@ torrent_peer_write(TorrentPeer *peer, IO *io) {
   assert(!peer->write_in_flight);
   assert(!peer->closing);
 
+  log(peer->logger, LogLevelDebug, "queuing write");
+
   const Slice_u8 src = slice_u8_make(peer->send_buf, peer->send_len);
 
   const Error err = io->write(io, &peer->completion_write, peer->socket, src,
@@ -1681,6 +1688,8 @@ static void torrent_peer_on_write(IoCompletion *completion, Error err,
   // Nothing goes out that was not asked for.
   assert(peer->send_len > 0);
   assert(res <= peer->send_len);
+
+  log(peer->logger, LogLevelDebug, "on_write");
 
   peer->write_in_flight = false;
 
@@ -1725,6 +1734,8 @@ static void torrent_peer_on_read(IoCompletion *completion, Error err,
   // What was asked for fitted in what was left of the buffer, so what came back
   // does too.
   assert(res <= TORRENT_PEER_RECV_BUF_CAP - peer->recv_len);
+
+  log(peer->logger, LogLevelDebug, "on_read");
 
   peer->read_in_flight = false;
 
@@ -1783,6 +1794,8 @@ static void torrent_peer_queue_handshake(TorrentPeer *peer) {
   assert(torrent_check_handshake(
       slice_u8_make(peer->send_buf, TORRENT_PEER_HANDSHAKE_LEN),
       peer->info_hash, &queued_peer_id));
+
+  log(peer->logger, LogLevelDebug, "queued handshake");
 }
 
 // One pass of the state machine, run from whichever callback has just reported.
@@ -1796,6 +1809,8 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
   torrent_peer_assert_invariants(peer);
   assert(io == peer->io);
   assert(!peer->closing);
+
+  log(peer->logger, LogLevelDebug, "tick %d", peer->state);
 
   switch (peer->state) {
   case TorrentPeerStateInitial: {
@@ -1819,11 +1834,13 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
 
     Slice_u8 peer_id = {0};
     if (!torrent_check_handshake(recv, peer->info_hash, &peer_id)) {
-      fprintf(stderr, "wrong handshake from peer\n");
+      log(peer->logger, LogLevelError, "received invalid handshake");
       torrent_peer_close(peer);
       return;
     }
     assert(TORRENT_PEER_ID_LEN == peer_id.len);
+
+    log(peer->logger, LogLevelInfo, "received valid handshake");
 
     peer->state = TorrentPeerStateHandshaked;
 
@@ -1944,6 +1961,8 @@ static void torrent_peer_init(TorrentPeer *peer, IO *io,
   peer->id[0] = 1;
   peer->logger =
       log_make(network_ctx->log_level_mask, slice_u8_from_cstr("[peer] "));
+
+  log(peer->logger, LogLevelDebug, "init");
 }
 
 static void torrent_peer_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
@@ -1957,9 +1976,8 @@ static void torrent_peer_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
   printf("accepted: %u.%u.%u.%u:%hu\n", ip >> 24 & 0xff, ip >> 16 & 0xff,
          ip >> 8 & 0xff, ip >> 0 & 0xff, accept_addr.port);
 
-  TorrentPeer *const peer_ctx =
-      torrent_peer_ctx_pool_acquire(&network_ctx->pool);
-  if (!peer_ctx) {
+  TorrentPeer *const peer = torrent_peer_ctx_pool_acquire(&network_ctx->pool);
+  if (!peer) {
     fprintf(stderr, "backpressure: no available pool slot for peer\n");
     // Refused, so there is no slot to keep a completion in and nothing waiting
     // on the answer: this is the hang-up `Env` is for.
@@ -1967,13 +1985,13 @@ static void torrent_peer_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
     return;
   }
 
-  torrent_peer_init(peer_ctx, io, network_ctx, accept_addr, accept_socket);
-  log(peer_ctx->logger, LogLevelInfo, "accepted");
+  torrent_peer_init(peer, io, network_ctx, accept_addr, accept_socket);
+  log(peer->logger, LogLevelInfo, "accepted");
 
   // Nothing buffered yet and the initial state, so the tick's first move is the
   // read that waits for the handshake. It hangs up on the peer itself if that
   // read cannot even be submitted, so there is nothing left to do here.
-  torrent_peer_tick(peer_ctx, io);
+  torrent_peer_tick(peer, io);
 }
 
 __attribute__((warn_unused_result)) static Error
