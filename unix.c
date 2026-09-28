@@ -8,6 +8,7 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 // `strerror_r` and not `strerror`: `strerror` hands back a buffer shared by
@@ -767,6 +768,24 @@ unix_io_perform(IoCompletion *completion, i32 fd, usize *dst_res) {
   *dst_res = res;
 
   return err;
+}
+
+// The clock behind every deadline, shared by both readiness backends: the
+// kernel makes no distinction here, so neither does this.
+//
+// `CLOCK_MONOTONIC` and not `CLOCK_REALTIME`: a deadline has to survive the
+// clock being set, and a realtime clock stepping back an hour would hold every
+// connection open for an hour. Darwin's is `mach_absolute_time` with the
+// timebase already applied, so there is no `mach_timebase_info` to do by hand.
+__attribute__((warn_unused_result)) static u64 unix_monotonic_ns(IO *io) {
+  (void)io;
+
+  struct timespec ts = {0};
+  // Nothing to report: the clock exists and the pointer is this stack frame's,
+  // which are the only two things the call can object to.
+  assert(0 == clock_gettime(CLOCK_MONOTONIC, &ts));
+
+  return (u64)ts.tv_sec * Second + (u64)ts.tv_nsec;
 }
 
 __attribute__((warn_unused_result)) static const Env *env_platform_make(void) {

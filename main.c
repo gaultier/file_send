@@ -243,9 +243,23 @@ int main(i32 argc, char *argv[]) {
 
     // The event loop, and the whole of the program from here: every connection
     // accepted, every byte read and every hang-up is a callback reached from
-    // this one line. It returns when the listener cannot go on.
-    const Error err_run =
-        io_run_until(io, &server.done, 5ULL * 1000 * 1000 * 1000);
+    // these few lines. It returns when the listener cannot go on.
+    //
+    // Not `io_run_until`, which waits a fixed tick: a turn here is as long as
+    // the nearest peer deadline, so a keep-alive goes out when it is due and a
+    // loop with nothing to do wakes a handful of times a minute rather than ten
+    // times a second. `torrent_peers_deadlines_run` is where the deciding
+    // happens -- the loop only says when.
+    Error err_run = {.kind = ErrKindNone};
+    while (!server.done) {
+      const u64 now_ns = io->monotonic_ns(io);
+      const u64 earliest = torrent_peers_deadlines_run(&ctx, io, now_ns);
+
+      err_run = io->run_for_ns(io, torrent_peers_wait_ns(earliest, now_ns));
+      if (ErrKindNone != err_run.kind) {
+        break;
+      }
+    }
     if (ErrKindNone != err_run.kind) {
       error_print("the event loop stopped", err_run);
       return 1;

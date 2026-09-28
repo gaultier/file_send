@@ -537,6 +537,12 @@ struct TestIo {
   // The script's own state, whatever it is.
   void *script;
 
+  // What the clock answers. A field and not a syscall, so a test moves time by
+  // assigning to it: "the connection closes after four minutes of silence" is
+  // then three lines and no waiting, which is better than anything a real timer
+  // operation would have given.
+  u64 now_ns;
+
   // When set, submitting an operation of this kind fails rather than being
   // taken. Every caller of a slot has a branch for that -- the callback will
   // never run, so whatever it would have cleaned up has to be cleaned up on the
@@ -633,6 +639,13 @@ __attribute__((warn_unused_result)) static Error test_io_run_for_ns(IO *io,
   return (Error){.kind = ErrKindNone};
 }
 
+__attribute__((warn_unused_result)) static u64 test_io_monotonic_ns(IO *io) {
+  assert(io);
+
+  const TestIo *const test_io = (const TestIo *)io;
+  return test_io->now_ns;
+}
+
 // The slots, which do between them exactly what the real ones do: record what
 // was asked for, and ask for a turn of the loop.
 
@@ -717,6 +730,7 @@ static void test_io_make(TestIo *test_io, const Env *env, TestIoPerform perform,
   test_io->io = (IO){
       .env = env,
       .run_for_ns = test_io_run_for_ns,
+      .monotonic_ns = test_io_monotonic_ns,
       .open = test_io_open,
       .close = test_io_close,
       .read = test_io_read,
@@ -1337,6 +1351,42 @@ static void test_torrent_peer_to_cstr(void) {
                      torrent_message_kind_to_cstr(TorrentMessageKindBitfield)));
   assert(0 == strcmp("keep-alive", torrent_message_kind_to_cstr(
                                        TorrentMessageKindKeepAlive)));
+
+  // And the actor's two, for the same reason: an event or a command with no name
+  // of its own makes a peer's log line unreadable exactly where it matters.
+  const TorrentEventKind events[] = {
+      TorrentEventKindNone,      TorrentEventKindAccepted,
+      TorrentEventKindConnected, TorrentEventKindHangup,
+      TorrentEventKindMalformed, TorrentEventKindHandshake,
+      TorrentEventKindMessage,   TorrentEventKindDeadline,
+  };
+
+  for (usize i = 0; i < sizeof(events) / sizeof(events[0]); i++) {
+    const char *const got = torrent_event_kind_to_cstr(events[i]);
+    assert(got);
+    assert(strlen(got) > 0);
+
+    for (usize j = 0; j < i; j++) {
+      assert(0 != strcmp(got, torrent_event_kind_to_cstr(events[j])));
+    }
+  }
+
+  const TorrentCommandKind commands[] = {
+      TorrentCommandKindNone,
+      TorrentCommandKindSendHandshake,
+      TorrentCommandKindSendKeepAlive,
+      TorrentCommandKindClose,
+  };
+
+  for (usize i = 0; i < sizeof(commands) / sizeof(commands[0]); i++) {
+    const char *const got = torrent_command_kind_to_cstr(commands[i]);
+    assert(got);
+    assert(strlen(got) > 0);
+
+    for (usize j = 0; j < i; j++) {
+      assert(0 != strcmp(got, torrent_command_kind_to_cstr(commands[j])));
+    }
+  }
 }
 
 // ---------- Peer messages ----------
@@ -2324,7 +2374,7 @@ static void test_torrent_peer_recv_buf_compacted(void) {
   peer->recv_len = sizeof(handshake) + sizeof(trailing);
 
   const i32 saved = test_stdout_silence();
-  torrent_peer_tick(peer, &test_io.io);
+  torrent_peer_tick(peer, &test_io.io, test_io.now_ns);
   test_stdout_restore(saved);
 
   // A handshake with bytes behind it is still a handshake: what follows is not
@@ -2346,6 +2396,594 @@ static void test_torrent_peer_recv_buf_compacted(void) {
   test_io_drain(&test_io);
   assert(1 == ctx.close_calls);
   assert(test_peer_pool_is_empty(&network_ctx));
+}
+
+
+// ---------- The peer as an actor ----------
+
+// A peer holding only the fields `torrent_peer_run` reads. It touches no io, no
+// buffers and no logger, and that is the property this whole test rests on:
+// every case below is a value in and a value out.
+__attribute__((warn_unused_result)) static TorrentPeer
+test_peer_actor_make(TorrentPeerState state) {
+  TorrentPeer peer = {0};
+  peer.state = state;
+  peer.idle_due_at = TORRENT_PEER_DEADLINE_NONE;
+  peer.keep_alive_due_at = TORRENT_PEER_DEADLINE_NONE;
+  peer.deadline_at = TORRENT_PEER_DEADLINE_NONE;
+
+  return peer;
+}
+
+// A peer that handshook at `now_ns`, which is where every `Handshaked` case
+// starts from.
+__attribute__((warn_unused_result)) static TorrentPeer
+test_peer_actor_handshaked(u64 now_ns) {
+  TorrentPeer peer = test_peer_actor_make(TorrentPeerStateHandshaked);
+  peer.idle_due_at = now_ns + TORRENT_PEER_IDLE_NS;
+  peer.keep_alive_due_at = now_ns + TORRENT_PEER_KEEP_ALIVE_NS;
+  peer.deadline_at = torrent_peer_deadline_earliest(&peer);
+
+  return peer;
+}
+
+// One call, with the two things that hold of every one of them checked in
+// passing: the batch is within its bound with nothing behind a `Close`, and
+// `deadline_at` is left as the earliest of whatever the call decided on. The
+// walk reads that field and nothing else recomputes it, so a call that left it
+// stale is a peer woken at the wrong moment, or never.
+__attribute__((warn_unused_result)) static u32
+test_peer_actor_run(TorrentPeer *peer, TorrentEventKind kind, u64 now_ns) {
+  assert(peer);
+
+  const u32 commands_len =
+      torrent_peer_run(peer, (TorrentEvent){.kind = kind}, now_ns);
+
+  assert(commands_len <= TORRENT_PEER_COMMANDS_MAX);
+  assert(peer->deadline_at == torrent_peer_deadline_earliest(peer));
+
+  for (u32 i = 0; i + 1 < commands_len; i++) {
+    assert(TorrentCommandKindClose != peer->commands[i].kind);
+  }
+
+  return commands_len;
+}
+
+// The whole of a peer's decision making, called directly. There is no io here
+// and nothing to drive: the point of the actor is that its answer is decided by
+// the state, the event and the time alone, so this is a table of those three
+// against what comes back.
+static void test_torrent_peer_run(void) {
+  // Not zero, so that a deadline left unset cannot pass for one that happens to
+  // be due, and far enough in that a case can look backwards from it.
+  const u64 now = 1000 * Second;
+
+  // The earliest of nothing is nothing, which is what a peer with no deadline at
+  // all answers and what the loop reads as "wait for the ceiling".
+  {
+    const TorrentPeer peer = test_peer_actor_make(TorrentPeerStateInitial);
+    assert(TORRENT_PEER_DEADLINE_NONE == torrent_peer_deadline_earliest(&peer));
+  }
+
+  // Which commands put bytes on the wire. That is what moves the keep-alive
+  // deadline, and a wrong answer here is a peer we go quiet on.
+  assert(torrent_command_kind_sends(TorrentCommandKindSendHandshake));
+  assert(torrent_command_kind_sends(TorrentCommandKindSendKeepAlive));
+  assert(!torrent_command_kind_sends(TorrentCommandKindClose));
+  assert(!torrent_command_kind_sends(TorrentCommandKindNone));
+
+  // The transport having a connection is the only thing the initial state acts
+  // on, and answering one is the same thing to a peer as asking for one.
+  {
+    const TorrentEventKind starts[] = {TorrentEventKindAccepted,
+                                       TorrentEventKindConnected};
+
+    for (usize i = 0; i < sizeof(starts) / sizeof(starts[0]); i++) {
+      TorrentPeer peer = test_peer_actor_make(TorrentPeerStateInitial);
+
+      assert(1 == test_peer_actor_run(&peer, starts[i], now));
+      assert(TorrentCommandKindSendHandshake == peer.commands[0].kind);
+      assert(TorrentPeerStateSentHandshake == peer.state);
+
+      // The tight interval and not the four minutes a handshaked peer gets: a
+      // peer that connects and then says nothing must not hold a pool slot.
+      assert(now + TORRENT_PEER_HANDSHAKE_NS == peer.idle_due_at);
+      // And the handshake going out is this process saying something, which is
+      // what the other deadline measures.
+      assert(now + TORRENT_PEER_KEEP_ALIVE_NS == peer.keep_alive_due_at);
+      assert(peer.idle_due_at == peer.deadline_at);
+    }
+  }
+
+  // Anything else there cannot have happened before there is a connection, so
+  // there is nothing to do with it but hang up.
+  {
+    const TorrentEventKind rest[] = {
+        TorrentEventKindHangup, TorrentEventKindMalformed,
+        TorrentEventKindHandshake, TorrentEventKindMessage,
+        TorrentEventKindDeadline};
+
+    for (usize i = 0; i < sizeof(rest) / sizeof(rest[0]); i++) {
+      TorrentPeer peer = test_peer_actor_make(TorrentPeerStateInitial);
+
+      assert(1 == test_peer_actor_run(&peer, rest[i], now));
+      assert(TorrentCommandKindClose == peer.commands[0].kind);
+      assert(TorrentPeerStateInitial == peer.state);
+      // A peer on its way out is not waited on, and a `Close` is not this
+      // process saying anything either.
+      assert(TORRENT_PEER_DEADLINE_NONE == peer.deadline_at);
+    }
+  }
+
+  // Their handshake, which is the one thing that state is waiting for.
+  {
+    TorrentPeer peer = test_peer_actor_make(TorrentPeerStateSentHandshake);
+    peer.idle_due_at = now + TORRENT_PEER_HANDSHAKE_NS;
+    peer.keep_alive_due_at = now + TORRENT_PEER_KEEP_ALIVE_NS;
+    peer.deadline_at = torrent_peer_deadline_earliest(&peer);
+
+    const u64 later = now + 5 * Second;
+
+    // Nothing goes out. A bitfield will, once there are pieces to announce it
+    // with.
+    assert(0 == test_peer_actor_run(&peer, TorrentEventKindHandshake, later));
+    assert(TorrentPeerStateHandshaked == peer.state);
+
+    // Silence is allowed from here on, so the interval opens up.
+    assert(later + TORRENT_PEER_IDLE_NS == peer.idle_due_at);
+    assert(later + TORRENT_PEER_KEEP_ALIVE_NS == peer.keep_alive_due_at);
+    // Keep-alive is the nearer of the two, which is the whole point of idle
+    // being twice it: there is room for one to go out and be answered before the
+    // close, and one lost keep-alive is survivable.
+    assert(peer.keep_alive_due_at == peer.deadline_at);
+  }
+
+  // And anything that is not their handshake ends it, silence included. That is
+  // what one idle deadline carrying a tighter interval buys over a handshake
+  // deadline beside it: `Deadline` needs no case of its own here.
+  {
+    const TorrentEventKind rest[] = {
+        TorrentEventKindAccepted, TorrentEventKindConnected,
+        TorrentEventKindHangup,   TorrentEventKindMalformed,
+        TorrentEventKindMessage,  TorrentEventKindDeadline};
+
+    for (usize i = 0; i < sizeof(rest) / sizeof(rest[0]); i++) {
+      TorrentPeer peer = test_peer_actor_make(TorrentPeerStateSentHandshake);
+      peer.idle_due_at = now + TORRENT_PEER_HANDSHAKE_NS;
+      peer.deadline_at = torrent_peer_deadline_earliest(&peer);
+
+      assert(1 == test_peer_actor_run(&peer, rest[i], now + Second));
+      assert(TorrentCommandKindClose == peer.commands[0].kind);
+      assert(TorrentPeerStateSentHandshake == peer.state);
+    }
+  }
+
+  // A message is the peer being alive, and that is the whole of the re-arm.
+  {
+    TorrentPeer peer = test_peer_actor_handshaked(now);
+    const u64 later = now + 3 * Minute;
+
+    // Past the keep-alive instant and still nothing goes out: only a `Deadline`
+    // acts on a deadline, which is what stops a busy peer from earning a
+    // keep-alive per message.
+    assert(later > peer.keep_alive_due_at);
+    assert(later < peer.idle_due_at);
+    assert(0 == test_peer_actor_run(&peer, TorrentEventKindMessage, later));
+
+    assert(later + TORRENT_PEER_IDLE_NS == peer.idle_due_at);
+    // Our own silence is unchanged: what the peer said is not us saying
+    // anything, and resetting this on what arrives would mean a peer that floods
+    // us never hears from us and closes us.
+    assert(now + TORRENT_PEER_KEEP_ALIVE_NS == peer.keep_alive_due_at);
+    assert(peer.keep_alive_due_at == peer.deadline_at);
+  }
+
+  // Nothing heard in four minutes, so the connection is not worth its slot. Both
+  // deadlines are past by then and only one answer comes back: bytes sent to a
+  // peer that is about to be hung up on are bytes for nothing.
+  {
+    TorrentPeer peer = test_peer_actor_handshaked(now);
+    const u64 later = peer.idle_due_at;
+
+    assert(later > peer.keep_alive_due_at);
+    assert(1 == test_peer_actor_run(&peer, TorrentEventKindDeadline, later));
+    assert(TorrentCommandKindClose == peer.commands[0].kind);
+    // Nothing went out, so nothing re-armed our own silence either.
+    assert(now + TORRENT_PEER_KEEP_ALIVE_NS == peer.keep_alive_due_at);
+  }
+
+  // Two minutes of us saying nothing, which is the one thing a keep-alive is
+  // for. The close is still two minutes off, so it is not that.
+  {
+    TorrentPeer peer = test_peer_actor_handshaked(now);
+    const u64 later = peer.keep_alive_due_at;
+
+    assert(later < peer.idle_due_at);
+    assert(1 == test_peer_actor_run(&peer, TorrentEventKindDeadline, later));
+    assert(TorrentCommandKindSendKeepAlive == peer.commands[0].kind);
+
+    // Re-armed from now, and the peer's own silence left alone: our keep-alive
+    // must not hold a dead peer open.
+    assert(later + TORRENT_PEER_KEEP_ALIVE_NS == peer.keep_alive_due_at);
+    assert(now + TORRENT_PEER_IDLE_NS == peer.idle_due_at);
+    // Which makes the close the nearer of the two from here on.
+    assert(peer.idle_due_at == peer.deadline_at);
+  }
+
+  // A deadline event with nothing actually due. The walk does not produce one,
+  // comparing before it calls, but the answer has to be "nothing" rather than a
+  // close: one missed comparison would otherwise hang up on every peer at once.
+  {
+    TorrentPeer peer = test_peer_actor_handshaked(now);
+    const u64 later = now + Second;
+
+    assert(0 == test_peer_actor_run(&peer, TorrentEventKindDeadline, later));
+    assert(now + TORRENT_PEER_IDLE_NS == peer.idle_due_at);
+    assert(now + TORRENT_PEER_KEEP_ALIVE_NS == peer.keep_alive_due_at);
+  }
+
+  // The transport going, and the peer talking nonsense: two different facts with
+  // the one answer, and both of them a command rather than an error, which is
+  // what lets this return a count and never an `Error`.
+  {
+    const TorrentEventKind overs[] = {TorrentEventKindHangup,
+                                      TorrentEventKindMalformed};
+
+    for (usize i = 0; i < sizeof(overs) / sizeof(overs[0]); i++) {
+      TorrentPeer peer = test_peer_actor_handshaked(now);
+
+      assert(1 == test_peer_actor_run(&peer, overs[i], now + Second));
+      assert(TorrentCommandKindClose == peer.commands[0].kind);
+      assert(TorrentPeerStateHandshaked == peer.state);
+    }
+  }
+}
+
+// A recognisable instant to start from: not zero, so that a deadline left unset
+// cannot pass for one that is genuinely due, and far enough in that a case can
+// look backwards from it.
+#define TEST_PEER_NOW_NS (1000 * Second)
+
+// A connection in `Handshaked` with a read outstanding and nothing more to say,
+// which is the state every deadline below is measured from. The slot is the
+// pool's first, these starting with it empty.
+__attribute__((warn_unused_result)) static TorrentPeer *
+test_peer_handshaked(TestIo *test_io, TestPeerCtx *ctx, const Env *env,
+                     TorrentNetworkCtx *network_ctx, Slice_u8 handshake) {
+  assert(test_io);
+  assert(ctx);
+  assert(network_ctx);
+  assert(test_peer_pool_is_empty(network_ctx));
+
+  *ctx = (TestPeerCtx){.says = handshake};
+  test_io_make(test_io, env, test_peer_perform, ctx);
+  test_io->now_ns = TEST_PEER_NOW_NS;
+
+  const i32 saved = test_stdout_silence();
+  torrent_peer_on_accept(&test_io->io, network_ctx,
+                         (Ipv4Addr){.ip = 0x7f000001, .port = 6881},
+                         TEST_PEER_FD);
+  // One turn is the whole of it: ours goes out and theirs comes back without
+  // the loop being turned in between, and what is left outstanding is the read
+  // waiting for a first message that never comes.
+  const Error err = test_io->io.run_for_ns(&test_io->io, 1);
+  assert(ErrKindNone == err.kind);
+  test_stdout_restore(saved);
+
+  TorrentPeer *const peer = &network_ctx->pool.slots[0];
+  assert(TorrentPeerStateHandshaked == peer->state);
+  assert(peer->read_in_flight);
+  assert(!peer->closing);
+  assert(1 == ctx->write_calls);
+  assert(1 == ctx->read_calls);
+
+  // Both were set the moment the handshake arrived, and no time has passed
+  // since.
+  assert(TEST_PEER_NOW_NS + TORRENT_PEER_IDLE_NS == peer->idle_due_at);
+  assert(TEST_PEER_NOW_NS + TORRENT_PEER_KEEP_ALIVE_NS ==
+         peer->keep_alive_due_at);
+  assert(peer->keep_alive_due_at == peer->deadline_at);
+
+  return peer;
+}
+
+// Finish whatever is outstanding and insist the slot came back. Every case below
+// ends here: a connection lets go of its slot however it ended, and one left
+// behind is a slot lost for the life of the process.
+static void test_peer_drain_empty(TestIo *test_io,
+                                  TorrentNetworkCtx *network_ctx) {
+  assert(test_io);
+  assert(network_ctx);
+
+  const i32 saved = test_stdout_silence();
+  test_io_drain(test_io);
+  test_stdout_restore(saved);
+
+  assert(test_peer_pool_is_empty(network_ctx));
+}
+
+// The walk that finds due peers, and the wait it sizes. This is what a timer
+// library would have been here, and what it replaces is `uv_timer`: not a
+// platform abstraction but a min-heap peeked to size the one timeout argument
+// `kevent` and `epoll_wait` already take. Here the peeking is a comparison per
+// occupied slot and the arming is an assignment, so there is no structure to
+// keep in sync at all.
+static void test_torrent_peer_deadlines(void) {
+  static TorrentNetworkCtx network_ctx;
+  static TestIo test_io;
+
+  u8 peer_id_bytes[TORRENT_PEER_ID_LEN];
+  memset(peer_id_bytes, 'P', sizeof(peer_id_bytes));
+
+  test_network_ctx_init(&network_ctx);
+
+  u8 handshake[TEST_HANDSHAKE_LEN] = {0};
+  test_handshake_fill(handshake, network_ctx.info_hash,
+                      slice_u8_make(peer_id_bytes, sizeof(peer_id_bytes)));
+  const Slice_u8 whole = slice_u8_make(handshake, sizeof(handshake));
+
+  // The four zero bytes a keep-alive is: a length prefix of nothing, with no tag
+  // behind it. Spelled out rather than taken from the code that writes them.
+  const u8 keep_alive[] = {0x00, 0x00, 0x00, 0x00};
+
+  // The wait, on its own: the nearest deadline when it is nearer than the
+  // ceiling, the ceiling when it is not, and the ceiling again when there is no
+  // deadline at all. Zero is what must never come back, a loop that waits for no
+  // time being a loop that spins.
+  {
+    const u64 now = TEST_PEER_NOW_NS;
+
+    assert(1 == torrent_peers_wait_ns(now + 1, now));
+    assert(TORRENT_PEER_LOOP_WAIT_NS_MAX - 1 ==
+           torrent_peers_wait_ns(now + TORRENT_PEER_LOOP_WAIT_NS_MAX - 1, now));
+    assert(TORRENT_PEER_LOOP_WAIT_NS_MAX ==
+           torrent_peers_wait_ns(now + TORRENT_PEER_LOOP_WAIT_NS_MAX, now));
+    assert(TORRENT_PEER_LOOP_WAIT_NS_MAX ==
+           torrent_peers_wait_ns(now + TORRENT_PEER_KEEP_ALIVE_NS, now));
+    assert(TORRENT_PEER_LOOP_WAIT_NS_MAX ==
+           torrent_peers_wait_ns(TORRENT_PEER_DEADLINE_NONE, now));
+  }
+
+  // An empty pool: nothing to walk, and nothing to wait for either.
+  {
+    TestPeerCtx ctx = {0};
+    const Env env = test_env_peer_make(&ctx);
+    test_io_make(&test_io, &env, test_peer_perform, &ctx);
+
+    assert(test_peer_pool_is_empty(&network_ctx));
+    assert(TORRENT_PEER_DEADLINE_NONE ==
+           torrent_peers_deadlines_run(&network_ctx, &test_io.io,
+                                       TEST_PEER_NOW_NS));
+  }
+
+  // A second after the handshake nothing is due, so nothing is called at all and
+  // the answer is what the loop waits on: the keep-alive, the nearer of the two.
+  {
+    TestPeerCtx ctx = {0};
+    const Env env = test_env_peer_make(&ctx);
+    TorrentPeer *const peer =
+        test_peer_handshaked(&test_io, &ctx, &env, &network_ctx, whole);
+
+    test_io.now_ns = TEST_PEER_NOW_NS + Second;
+    assert(peer->keep_alive_due_at ==
+           torrent_peers_deadlines_run(&network_ctx, &test_io.io,
+                                       test_io.now_ns));
+
+    // Nothing went out and nothing moved.
+    assert(1 == ctx.write_calls);
+    assert(TEST_PEER_NOW_NS + TORRENT_PEER_KEEP_ALIVE_NS ==
+           peer->keep_alive_due_at);
+    assert(!peer->closing);
+
+    test_peer_drain_empty(&test_io, &network_ctx);
+    assert(1 == ctx.close_calls);
+  }
+
+  // Two minutes of silence in both directions: the keep-alive is due, the close
+  // is not, and four zero bytes go out.
+  {
+    TestPeerCtx ctx = {0};
+    const Env env = test_env_peer_make(&ctx);
+    TorrentPeer *const peer =
+        test_peer_handshaked(&test_io, &ctx, &env, &network_ctx, whole);
+
+    test_io.now_ns = peer->keep_alive_due_at;
+    const u64 earliest = torrent_peers_deadlines_run(
+        &network_ctx, &test_io.io, test_io.now_ns);
+
+    // Re-armed from now, and the peer's own silence left alone: exactly one
+    // keep-alive interval is left before the close, which is what it buys.
+    assert(test_io.now_ns + TORRENT_PEER_KEEP_ALIVE_NS ==
+           peer->keep_alive_due_at);
+    assert(TEST_PEER_NOW_NS + TORRENT_PEER_IDLE_NS == peer->idle_due_at);
+    assert(peer->idle_due_at == earliest);
+
+    // Queued and submitted by the walk; performed by the loop, and not before.
+    assert(peer->write_in_flight);
+    assert(1 == ctx.write_calls);
+
+    test_peer_drain_empty(&test_io, &network_ctx);
+
+    assert(2 == ctx.write_calls);
+    assert(TEST_HANDSHAKE_LEN + sizeof(keep_alive) == ctx.written_len);
+    assert(0 == memcmp(ctx.written + TEST_HANDSHAKE_LEN, keep_alive,
+                       sizeof(keep_alive)));
+    assert(1 == ctx.close_calls);
+  }
+
+  // Four minutes of it, and the connection is not worth its slot.
+  {
+    TestPeerCtx ctx = {0};
+    const Env env = test_env_peer_make(&ctx);
+    TorrentPeer *const peer =
+        test_peer_handshaked(&test_io, &ctx, &env, &network_ctx, whole);
+
+    test_io.now_ns = peer->idle_due_at;
+    assert(test_io.now_ns > peer->keep_alive_due_at);
+
+    // Nothing is left to wait for: the one peer in the pool is on its way out.
+    assert(TORRENT_PEER_DEADLINE_NONE ==
+           torrent_peers_deadlines_run(&network_ctx, &test_io.io,
+                                       test_io.now_ns));
+
+    // The hang-up is waiting on the read that is still with the kernel, so the
+    // slot is still held and `IO`'s close has not been asked for yet.
+    assert(peer->closing);
+    assert(0 == ctx.close_calls);
+    assert(!test_peer_pool_is_empty(&network_ctx));
+
+    // A second walk is not fooled by that either: a peer whose hang-up is in
+    // flight is past being told anything, and waiting on its deadline would be
+    // waiting for something nothing will ever act on.
+    assert(TORRENT_PEER_DEADLINE_NONE ==
+           torrent_peers_deadlines_run(&network_ctx, &test_io.io,
+                                       test_io.now_ns));
+
+    test_peer_drain_empty(&test_io, &network_ctx);
+
+    assert(1 == ctx.close_calls);
+    // Only the handshake ever went out: no keep-alive on the way to the close.
+    assert(1 == ctx.write_calls);
+    assert(TEST_HANDSHAKE_LEN == ctx.written_len);
+  }
+
+  // The whole life of a silent peer: one keep-alive at two minutes, a close at
+  // four. The keep-alive going out must not push the close back -- `idle_due_at`
+  // measures what the peer has not said, and this process saying something is
+  // not the peer saying something.
+  {
+    TestPeerCtx ctx = {0};
+    const Env env = test_env_peer_make(&ctx);
+    TorrentPeer *const peer =
+        test_peer_handshaked(&test_io, &ctx, &env, &network_ctx, whole);
+
+    test_io.now_ns = TEST_PEER_NOW_NS + TORRENT_PEER_KEEP_ALIVE_NS;
+    assert(peer->idle_due_at ==
+           torrent_peers_deadlines_run(&network_ctx, &test_io.io,
+                                       test_io.now_ns));
+    assert(TEST_PEER_NOW_NS + TORRENT_PEER_IDLE_NS == peer->idle_due_at);
+
+    test_io.now_ns = TEST_PEER_NOW_NS + TORRENT_PEER_IDLE_NS;
+    assert(TORRENT_PEER_DEADLINE_NONE ==
+           torrent_peers_deadlines_run(&network_ctx, &test_io.io,
+                                       test_io.now_ns));
+    assert(peer->closing);
+
+    test_peer_drain_empty(&test_io, &network_ctx);
+
+    // The one keep-alive, and nothing after it.
+    assert(TEST_HANDSHAKE_LEN + sizeof(keep_alive) == ctx.written_len);
+    assert(1 == ctx.close_calls);
+  }
+
+  // A keep-alive with no room for it, and one with just enough. A send buffer
+  // this full means there are already bytes waiting to go out, which is the
+  // opposite of the silence a keep-alive is there to break: not sending one says
+  // nothing untrue, and the deadline has moved on either way.
+  {
+    TestPeerCtx ctx = {0};
+    const Env env = test_env_peer_make(&ctx);
+    test_io_make(&test_io, &env, test_peer_perform, &ctx);
+
+    assert(test_peer_pool_is_empty(&network_ctx));
+    TorrentPeer *const peer = torrent_peer_ctx_pool_acquire(&network_ctx.pool);
+    assert(peer);
+
+    const Ipv4Addr addr = {.ip = 0x7f000001, .port = 6881};
+    const i32 saved = test_stdout_silence();
+    torrent_peer_init(peer, &test_io.io, &network_ctx, addr, TEST_PEER_FD,
+                      addr.ip);
+    peer->state = TorrentPeerStateHandshaked;
+
+    // One byte short of enough.
+    peer->send_len = TORRENT_PEER_SEND_BUF_CAP - sizeof(keep_alive) + 1;
+    torrent_peer_queue_keep_alive(peer);
+    assert(TORRENT_PEER_SEND_BUF_CAP - sizeof(keep_alive) + 1 ==
+           peer->send_len);
+
+    // And exactly enough, which fills the buffer to the brim.
+    peer->send_len = TORRENT_PEER_SEND_BUF_CAP - sizeof(keep_alive);
+    torrent_peer_queue_keep_alive(peer);
+    test_stdout_restore(saved);
+
+    assert(TORRENT_PEER_SEND_BUF_CAP == peer->send_len);
+    assert(0 == memcmp(peer->send_buf + TORRENT_PEER_SEND_BUF_CAP -
+                           sizeof(keep_alive),
+                       keep_alive, sizeof(keep_alive)));
+
+    // Nothing was ever submitted for this one, so the slot goes back by hand
+    // rather than through a hang-up there is nothing to hang up on.
+    torrent_peer_ctx_pool_release(&network_ctx.pool, peer);
+    assert(test_peer_pool_is_empty(&network_ctx));
+  }
+
+  // The walk itself, over slots spread across the bitset. Only the peer that is
+  // due is called, and the answer is the minimum over the rest.
+  {
+    TestPeerCtx ctx = {0};
+    const Env env = test_env_peer_make(&ctx);
+    test_io_make(&test_io, &env, test_peer_perform, &ctx);
+    test_io.now_ns = TEST_PEER_NOW_NS;
+
+    assert(test_peer_pool_is_empty(&network_ctx));
+
+    // Placed by hand rather than taken from the pool in order: one in the first
+    // group of the bitset and one three groups along, so a walk that only looked
+    // where it started would pass the first check below and fail the second.
+    const usize slot_idxs[] = {1, 3 * POOL_SLOTS_PER_GROUP + 5};
+    const Ipv4Addr addr = {.ip = 0x7f000001, .port = 6881};
+
+    const i32 saved = test_stdout_silence();
+    for (usize i = 0; i < sizeof(slot_idxs) / sizeof(slot_idxs[0]); i++) {
+      const usize slot_idx = slot_idxs[i];
+      network_ctx.pool.occupied[slot_idx / POOL_SLOTS_PER_GROUP] |=
+          1ULL << (slot_idx % POOL_SLOTS_PER_GROUP);
+
+      TorrentPeer *const peer = &network_ctx.pool.slots[slot_idx];
+      torrent_peer_init(peer, &test_io.io, &network_ctx, addr, TEST_PEER_FD,
+                        addr.ip);
+      peer->state = TorrentPeerStateHandshaked;
+    }
+
+    TorrentPeer *const quiet = &network_ctx.pool.slots[slot_idxs[0]];
+    TorrentPeer *const due = &network_ctx.pool.slots[slot_idxs[1]];
+
+    // One with a minute to go, one with its keep-alive due this instant.
+    quiet->idle_due_at = TEST_PEER_NOW_NS + Minute;
+    quiet->keep_alive_due_at = TEST_PEER_NOW_NS + 2 * Minute;
+    quiet->deadline_at = torrent_peer_deadline_earliest(quiet);
+
+    due->idle_due_at = TEST_PEER_NOW_NS + 10 * Minute;
+    due->keep_alive_due_at = TEST_PEER_NOW_NS;
+    due->deadline_at = torrent_peer_deadline_earliest(due);
+
+    const u64 earliest = torrent_peers_deadlines_run(&network_ctx, &test_io.io,
+                                                     test_io.now_ns);
+
+    // The one that was due said something; the one that was not was never
+    // called, which is what comparing before calling is there to save.
+    assert(sizeof(keep_alive) == due->send_len);
+    assert(0 == memcmp(due->send_buf, keep_alive, sizeof(keep_alive)));
+    assert(0 == quiet->send_len);
+    assert(TEST_PEER_NOW_NS + TORRENT_PEER_KEEP_ALIVE_NS ==
+           due->keep_alive_due_at);
+    assert(TEST_PEER_NOW_NS + 2 * Minute == quiet->keep_alive_due_at);
+
+    // And the answer is the nearest deadline left, which belongs to the peer
+    // that was never called.
+    assert(quiet->idle_due_at == earliest);
+
+    // Both are long past by then, so both go and the pool is empty for whatever
+    // runs next.
+    test_io.now_ns = TEST_PEER_NOW_NS + 20 * Minute;
+    assert(TORRENT_PEER_DEADLINE_NONE ==
+           torrent_peers_deadlines_run(&network_ctx, &test_io.io,
+                                       test_io.now_ns));
+    test_stdout_restore(saved);
+
+    test_peer_drain_empty(&test_io, &network_ctx);
+    assert(2 == ctx.close_calls);
+  }
 }
 
 static void test_arena_valloc(void) {
@@ -6787,6 +7425,8 @@ static void test(const char *filter) {
       {"torrent_peer_pool_exhaustion", test_torrent_peer_pool_exhaustion},
       {"torrent_peer_to_cstr", test_torrent_peer_to_cstr},
       {"torrent_peer_parse_message", test_torrent_peer_parse_message},
+      {"torrent_peer_run", test_torrent_peer_run},
+      {"torrent_peer_deadlines", test_torrent_peer_deadlines},
       {"torrent_peer_state_machine", test_torrent_peer_state_machine},
       {"torrent_peer_messages", test_torrent_peer_messages},
       {"torrent_peer_recv_buf_compacted", test_torrent_peer_recv_buf_compacted},

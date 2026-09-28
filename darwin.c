@@ -10,7 +10,6 @@
 // while the callbacks are running.
 #define KQUEUE_MAX_EVENTS 1024
 
-#define NS_PER_SEC (1000 * 1000 * 1000)
 
 // The Darwin `IO`: one kqueue, one thread, and no queue of its own.
 //
@@ -218,8 +217,8 @@ __attribute__((warn_unused_result)) static Error darwin_run_for_ns(IO *io,
 
   struct kevent events[KQUEUE_MAX_EVENTS] = {0};
   const struct timespec timeout = {
-      .tv_sec = (time_t)(ns / NS_PER_SEC),
-      .tv_nsec = (long)(ns % NS_PER_SEC),
+      .tv_sec = (time_t)(ns / Second),
+      .tv_nsec = (long)(ns % Second),
   };
 
   assert(io_darwin->changelist_len <= INT_MAX);
@@ -430,6 +429,7 @@ darwin_io_kqueue_make(Arena *arena, const Env *env, IO **dst) {
   io->io = (IO){
       .env = env,
       .run_for_ns = darwin_run_for_ns,
+      .monotonic_ns = unix_monotonic_ns,
       .open = darwin_open,
       .close = darwin_close,
       .read = darwin_read,

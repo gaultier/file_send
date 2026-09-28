@@ -1234,7 +1234,7 @@ typedef struct {
     u32 have;                                  // Have
     PeerMessageIndexBeginLength idx_begin_len; // Request | Cancel
     PeerMessagePiece piece;
-    PeerMessageUnknown unknown;                // Unknown
+    PeerMessageUnknown unknown; // Unknown
 
     // TODO: Bitfield.
   } v;
@@ -1259,6 +1259,144 @@ torrent_peer_state_to_cstr(TorrentPeerState state) {
   }
 
   assert(0 && "unreachable");
+}
+
+// ---------- The peer as an actor ----------
+//
+// `torrent_peer_run` below is the whole of a peer's decision making, and it
+// cannot fail: no io, no allocation, no clock, and the answer is decided by
+// `peer->state` and the event alone. Anything that would be an error is a
+// command, `Close` above all, which is what lets it return a plain count
+// instead of an `Error`.
+//
+// Everything else in this file is the bridge: it turns bytes into events and
+// commands into io operations, and it owns `recv_buf`, `send_buf` and all the
+// serialising. `SendHandshake` means "put one on the wire", not "here it is".
+
+// The commands one event can produce. Eight is the bound because the fan-out is
+// a write, a file operation and a close at the very worst; the assert in
+// `torrent_peer_command_push` is what keeps that true.
+#define TORRENT_PEER_COMMANDS_MAX 8
+
+// Every event is the transport reporting, one peer message, or time having
+// moved far enough that something is due. Zero is not one of them: `Initial`
+// waits for `Accepted` or `Connected`, which are real events carrying real
+// news, rather than for a sentinel that a zeroed struct would produce by
+// accident.
+typedef enum {
+  TorrentEventKindNone = 0,
+  // The transport has a connection: one answered, and one asked for.
+  TorrentEventKindAccepted,
+  TorrentEventKindConnected,
+  // The transport says the connection is over: end of file, a reset, or an
+  // operation that failed. Nothing more will be read from it or written to it.
+  TorrentEventKindHangup,
+  // The peer's bytes are not the protocol: a handshake that matches nothing, or
+  // a message whose length and tag disagree. Not a `Hangup`, because there the
+  // transport is gone and here it is the peer that is wrong.
+  TorrentEventKindMalformed,
+  TorrentEventKindHandshake,
+  TorrentEventKindMessage,
+  // One of this peer's deadlines has passed. Which one is not said, because the
+  // peer's own fields already say it.
+  TorrentEventKindDeadline,
+} TorrentEventKind;
+
+// The name of `kind`, for diagnostics only.
+__attribute__((warn_unused_result)) static const char *
+torrent_event_kind_to_cstr(TorrentEventKind kind) {
+  switch (kind) {
+  case TorrentEventKindNone:
+    return "none";
+  case TorrentEventKindAccepted:
+    return "accepted";
+  case TorrentEventKindConnected:
+    return "connected";
+  case TorrentEventKindHangup:
+    return "hangup";
+  case TorrentEventKindMalformed:
+    return "malformed";
+  case TorrentEventKindHandshake:
+    return "handshake";
+  case TorrentEventKindMessage:
+    return "message";
+  case TorrentEventKindDeadline:
+    return "deadline";
+  }
+
+  assert(0 && "unreachable");
+  return "?";
+}
+
+typedef struct {
+  TorrentEventKind kind;
+  union {
+    // A message the parser understood. An unknown tag never gets here: the
+    // bridge steps over it, so this stays closed.
+    TorrentPeerMessage msg; // Message
+  } v;
+} TorrentEvent;
+
+// Never a read: the bridge keeps one outstanding whatever the state, so this
+// enum having no way to ask for one is the point. A state that forgot to ask
+// for a read would be a peer going quiet, which is a whole class of bug that
+// only shows up hours later.
+//
+// No `ArmTimer` either: a deadline is set by assigning to the peer, which
+// `torrent_peer_run` does itself, so it needs no help from the bridge.
+typedef enum {
+  TorrentCommandKindNone = 0,
+  TorrentCommandKindSendHandshake,
+  TorrentCommandKindSendKeepAlive,
+  // Always last in a batch, which `torrent_peer_command_push` keeps true: the
+  // slot may be back in the pool before the bridge looks at the next command,
+  // so there must not be one.
+  TorrentCommandKindClose,
+
+  // TODO: `SendBitfield`, `SendRequests` and `WriteBlock`, once there is a
+  // torrent behind a peer to have pieces of. Each of them needs state that does
+  // not exist yet -- the `have` and `requested` bitsets, and a file to write
+  // into -- so they are not sitting here as values with nothing behind them.
+} TorrentCommandKind;
+
+// The name of `kind`, for diagnostics only.
+__attribute__((warn_unused_result)) static const char *
+torrent_command_kind_to_cstr(TorrentCommandKind kind) {
+  switch (kind) {
+  case TorrentCommandKindNone:
+    return "none";
+  case TorrentCommandKindSendHandshake:
+    return "send-handshake";
+  case TorrentCommandKindSendKeepAlive:
+    return "send-keep-alive";
+  case TorrentCommandKindClose:
+    return "close";
+  }
+
+  assert(0 && "unreachable");
+  return "?";
+}
+
+typedef struct {
+  TorrentCommandKind kind;
+  // TODO: a union, once `WriteBlock` has a block to carry.
+} TorrentCommand;
+
+// Does carrying this out put bytes on the wire? Which is what the keep-alive
+// deadline measures, so every command that goes out is asked.
+__attribute__((warn_unused_result)) static bool
+torrent_command_kind_sends(TorrentCommandKind kind) {
+  switch (kind) {
+  case TorrentCommandKindSendHandshake:
+  case TorrentCommandKindSendKeepAlive:
+    return true;
+  case TorrentCommandKindNone:
+  case TorrentCommandKindClose:
+    return false;
+  }
+
+  assert(0 && "unreachable");
+  return false;
 }
 
 typedef struct TorrentNetworkCtx TorrentNetworkCtx;
@@ -1310,8 +1448,237 @@ typedef struct {
   u8 id[20];
   // More: torrent, etc.
   TorrentPeerState state;
+
+  // Deadlines, as absolute instants on the clock `IO.monotonic_ns` reads;
+  // `TORRENT_PEER_DEADLINE_NONE` is one that is not set. Absolute and not
+  // intervals, so that the walk below compares them without repeating the
+  // arithmetic and so that re-arming one is a single assignment.
+  //
+  // What the peer has not said, and what we have not said. Two and not one
+  // because they measure opposite directions; see the constants below.
+  u64 idle_due_at;
+  u64 keep_alive_due_at;
+  // The earliest of the two, recomputed by every `torrent_peer_run`. The loop
+  // reads it to decide when to come back, so nothing else may write it.
+  u64 deadline_at;
+
+  // Scratch: valid from a `torrent_peer_run` returning until the next call
+  // overwrites them from index 0. They live here so that the bridge hands
+  // nothing in and gets back only how many were written.
+  TorrentCommand commands[TORRENT_PEER_COMMANDS_MAX];
+
   Logger logger;
 } TorrentPeer;
+
+// Deadlines live on the peer as absolute instants, and this is one that is not
+// set. `UINT64_MAX` rather than zero, so that "not set" compares as further
+// away than anything real and needs no case of its own.
+#define TORRENT_PEER_DEADLINE_NONE UINT64_MAX
+
+// Two deadlines and not one, because they measure opposite directions. Idle
+// measures what the peer has not said and closes; keep-alive measures what we
+// have not said and sends. Reset either on the other's traffic and there is a
+// bug waiting: a keep-alive reset by what arrives means a peer that floods us
+// while we stay quiet never hears from us and closes us, and an idle reset by
+// what we send means our own keep-alives hold a dead peer open for ever.
+//
+// A minute would be too short for the idle side whatever else changed. BEP 3
+// has keep-alives going out about every two minutes, so a peer silent for
+// ninety seconds is behaving, and an idle timeout at or under two minutes drops
+// peers for nothing. Idle is twice keep-alive so that one in flight cannot race
+// the close, and so that one lost keep-alive is survivable.
+#define TORRENT_PEER_KEEP_ALIVE_NS (2 * Minute)
+#define TORRENT_PEER_IDLE_NS (2 * TORRENT_PEER_KEEP_ALIVE_NS)
+
+// Before the handshake, silence is never legitimate: a peer that connects sends
+// its handshake at once. So the same `idle_due_at` field carries a much tighter
+// interval until `Handshaked`, which is what stops a peer that connects and
+// then says nothing from holding a pool slot for four minutes. One deadline
+// with the interval chosen by the state, because closing on silence is one rule
+// either way.
+#define TORRENT_PEER_HANDSHAKE_NS (30 * Second)
+
+// The longest one turn of the event loop waits when no deadline is nearer. Not
+// a tick: nothing is polled and a turn ending is not a reason to do anything.
+// It is only here so that a loop with no peers at all still comes back.
+#define TORRENT_PEER_LOOP_WAIT_NS_MAX (5 * Second)
+
+// The earliest deadline still live, which is what the loop reads to decide when
+// to call again. Recomputed at the end of every `torrent_peer_run`, so it is
+// never stale and there is nothing to keep in sync.
+//
+// TODO: a third will join these once requests exist, and it is a third pair and
+// not a variant of these two: reset by sending a request, and answered by a
+// block to ask someone else for rather than by a peer to close.
+__attribute__((warn_unused_result)) static u64
+torrent_peer_deadline_earliest(const TorrentPeer *peer) {
+  assert(peer);
+
+  u64 earliest = TORRENT_PEER_DEADLINE_NONE;
+  const u64 deadlines[] = {peer->idle_due_at, peer->keep_alive_due_at};
+
+  for (usize i = 0; i < sizeof(deadlines) / sizeof(deadlines[0]); i++) {
+    if (deadlines[i] < earliest) {
+      earliest = deadlines[i];
+    }
+  }
+
+  return earliest;
+}
+
+// One command onto the peer's array. The assert is where the bound is kept, and
+// it is here rather than at the end of `torrent_peer_run` so that it fires in
+// the handler that wrote too many, before the array is already past its end.
+static void torrent_peer_command_push(TorrentPeer *peer, u32 *commands_len,
+                                      const TorrentCommand command) {
+  assert(peer);
+  assert(commands_len);
+  assert(*commands_len < TORRENT_PEER_COMMANDS_MAX);
+  assert(TorrentCommandKindNone != command.kind);
+  // Nothing follows a `Close`: the slot may be back in the pool before the
+  // bridge reaches the next command, so there must not be one.
+  assert(0 == *commands_len ||
+         TorrentCommandKindClose != peer->commands[*commands_len - 1].kind);
+
+  peer->commands[(*commands_len)++] = command;
+}
+
+// `torrent_peer_run` cannot fail, so the answer is a count and never an
+// `Error`. At most `TORRENT_PEER_COMMANDS_MAX`, and zero whenever the event
+// asks nothing of this peer, which is the ordinary answer. The commands are in
+// `peer->commands[0..n)` and are the bridge's until it calls again.
+//
+// `now_ns` is monotonic and passed in rather than read here, which is what
+// keeps this a function of its arguments: deciding on a deadline needs the
+// time, and reading a clock would be the one syscall in here. `last_run_at` is
+// deliberately not a parameter beside it -- every deadline is relative to
+// something the protocol did and each of those has its own instant, so
+// measuring from when this last ran drifts off what was meant, this being
+// called constantly for unrelated reasons.
+__attribute__((warn_unused_result)) static u32
+torrent_peer_run(TorrentPeer *peer, const TorrentEvent event,
+                 const u64 now_ns) {
+  assert(peer);
+  assert(TorrentEventKindNone != event.kind);
+
+  u32 commands_len = 0;
+
+  // `break` and one tail return, not a return per case: `-Wunreachable-code` is
+  // on, so a `break` behind a `return` would not build.
+  switch (peer->state) {
+  case TorrentPeerStateInitial: {
+    // Nothing goes out before the transport says there is somewhere to put it.
+    if (TorrentEventKindAccepted != event.kind &&
+        TorrentEventKindConnected != event.kind) {
+      torrent_peer_command_push(
+          peer, &commands_len,
+          (TorrentCommand){.kind = TorrentCommandKindClose});
+      break;
+    }
+
+    // No saga, and no 'handshake sent (confirmed)' state to go with it: this
+    // state means the handshake is the transport's problem now. A TCP write
+    // that fails is not recoverable, so the connection ends, and a request is
+    // timed from its own write completing rather than from here.
+    peer->state = TorrentPeerStateSentHandshake;
+    // The tight interval, until there is a handshake to be generous about.
+    peer->idle_due_at = now_ns + TORRENT_PEER_HANDSHAKE_NS;
+    torrent_peer_command_push(
+        peer, &commands_len,
+        (TorrentCommand){.kind = TorrentCommandKindSendHandshake});
+  } break;
+
+  case TorrentPeerStateSentHandshake: {
+    // A `Deadline` needs no case of its own here, and that is the point of one
+    // idle deadline rather than a handshake one beside it: anything that is not
+    // the handshake closes, silence included.
+    if (TorrentEventKindHandshake != event.kind) {
+      torrent_peer_command_push(
+          peer, &commands_len,
+          (TorrentCommand){.kind = TorrentCommandKindClose});
+      break;
+    }
+
+    peer->state = TorrentPeerStateHandshaked;
+    // Silence is allowed from here on, so the interval opens up.
+    peer->idle_due_at = now_ns + TORRENT_PEER_IDLE_NS;
+    peer->keep_alive_due_at = now_ns + TORRENT_PEER_KEEP_ALIVE_NS;
+
+    // TODO: a `SendBitfield` here, once there are pieces to announce.
+  } break;
+
+  case TorrentPeerStateHandshaked: {
+    // The bridge produces these in `Initial` and `SentHandshake` only, so one
+    // here is the bridge having lost track of the state rather than anything a
+    // peer can cause.
+    assert(TorrentEventKindAccepted != event.kind);
+    assert(TorrentEventKindConnected != event.kind);
+    assert(TorrentEventKindHandshake != event.kind);
+
+    if (TorrentEventKindDeadline == event.kind) {
+      // Nothing heard for long enough that the connection is not worth its
+      // slot. The pool is the reason to care: a peer that says nothing is
+      // holding a slot another peer could use.
+      if (now_ns >= peer->idle_due_at) {
+        torrent_peer_command_push(
+            peer, &commands_len,
+            (TorrentCommand){.kind = TorrentCommandKindClose});
+        break;
+      }
+
+      // Keep-alive is this and only this, and it is a separate deadline because
+      // it is about what we have not said rather than about what the peer has
+      // not. Anything going out re-arms it below, so a peer we are busy with
+      // never gets one, and a peer sending extensions we skip does not earn one
+      // per message.
+      if (now_ns >= peer->keep_alive_due_at) {
+        torrent_peer_command_push(
+            peer, &commands_len,
+            (TorrentCommand){.kind = TorrentCommandKindSendKeepAlive});
+      }
+      break;
+    }
+
+    // The transport is gone, or the peer is talking nonsense. Either way there
+    // is nothing left to say to it.
+    if (TorrentEventKindHangup == event.kind ||
+        TorrentEventKindMalformed == event.kind) {
+      torrent_peer_command_push(
+          peer, &commands_len,
+          (TorrentCommand){.kind = TorrentCommandKindClose});
+      break;
+    }
+
+    // Anything said at all is the peer being alive, which is the whole of the
+    // re-arm: one assignment, and no structure to tell about it.
+    assert(TorrentEventKindMessage == event.kind);
+    peer->idle_due_at = now_ns + TORRENT_PEER_IDLE_NS;
+
+    // TODO: act on the message. This is where the `have` and `requested`
+    // bitsets are read and written, and where a block becomes a file write plus
+    // whatever the pacing says to request next.
+
+    // Nothing here wanted anything, so nothing is what goes out.
+  } break;
+  }
+
+  // Anything going out is us saying something, so the keep-alive deadline
+  // moves: it measures our own silence, and there is about to be none. One
+  // place for it, rather than an assignment beside every push that could forget
+  // one.
+  for (u32 i = 0; i < commands_len; i++) {
+    if (torrent_command_kind_sends(peer->commands[i].kind)) {
+      peer->keep_alive_due_at = now_ns + TORRENT_PEER_KEEP_ALIVE_NS;
+      break;
+    }
+  }
+
+  // The loop reads this to decide when to call again, so it is recomputed on
+  // every path rather than wherever a deadline happened to move.
+  peer->deadline_at = torrent_peer_deadline_earliest(peer);
+
+  return commands_len;
+}
 
 #define TORRENT_PEERS_MAX 1024
 
@@ -1369,7 +1736,8 @@ struct TorrentNetworkCtx {
 //   behind it. It is not waited on, since a message left in the buffer is one
 //   the caller comes back to for ever. `v.unknown` says what was skipped, which
 //   is the only reason a caller would care.
-// - Anything else is that message, with `*data` advanced past it and the rest of
+// - Anything else is that message, with `*data` advanced past it and the rest
+// of
 //   `*dst_msg` filled in.
 //
 // So the two answers that carry no message still differ in `*data`, and a
@@ -1607,6 +1975,11 @@ static void torrent_peer_assert_invariants(const TorrentPeer *peer) {
   assert(TorrentPeerStateInitial != peer->state ||
          (0 == peer->recv_len && 0 == peer->send_len));
 
+  // Not a field anyone may set: it is what the last `torrent_peer_run`
+  // computed, and the walk that finds due peers reads it. One that had drifted
+  // would mean a peer woken at the wrong moment, or never.
+  assert(peer->deadline_at == torrent_peer_deadline_earliest(peer));
+
   // What the buffers hold beyond that is not invariant: a read reports before
   // the tick that drains it, so between the two there is a whole handshake, or
   // a whole message, still sitting there.
@@ -1706,7 +2079,10 @@ torrent_check_handshake(Slice_u8 data, Slice_u8 info_hash_expected,
   return true;
 }
 
-static void torrent_peer_tick(TorrentPeer *peer, IO *io);
+static void torrent_peer_tick(TorrentPeer *peer, IO *io, u64 now_ns);
+
+__attribute__((warn_unused_result)) static bool
+torrent_peer_dispatch(TorrentPeer *peer, TorrentEvent event, u64 now_ns);
 
 static void torrent_peer_on_read(IoCompletion *completion, Error err,
                                  usize res);
@@ -1787,16 +2163,19 @@ static void torrent_peer_on_write(IoCompletion *completion, Error err,
     return;
   }
 
-  if (ErrKindNone != err.kind) {
-    error_print("failed to write to a peer", err);
-    torrent_peer_close(peer);
-    return;
-  }
+  // A failure, or a write that took nothing: going back with the same bytes
+  // would take nothing again, so there is no way forward on this connection
+  // either way. `Hangup` is a `Close` in every state, so there is nothing left
+  // to do here whatever comes back.
+  if (ErrKindNone != err.kind || 0 == res) {
+    if (ErrKindNone != err.kind) {
+      error_print("failed to write to a peer", err);
+    }
 
-  // A write that takes nothing is not progress, and going back with the same
-  // bytes would take nothing again: there is no way forward on this connection.
-  if (0 == res) {
-    torrent_peer_close(peer);
+    const bool alive = torrent_peer_dispatch(
+        peer, (TorrentEvent){.kind = TorrentEventKindHangup},
+        peer->io->monotonic_ns(peer->io));
+    assert(!alive);
     return;
   }
 
@@ -1808,7 +2187,7 @@ static void torrent_peer_on_write(IoCompletion *completion, Error err,
   memmove(peer->send_buf, peer->send_buf + res, unsent);
   peer->send_len = unsent;
 
-  torrent_peer_tick(peer, peer->io);
+  torrent_peer_tick(peer, peer->io, peer->io->monotonic_ns(peer->io));
 }
 
 static void torrent_peer_on_read(IoCompletion *completion, Error err,
@@ -1833,24 +2212,26 @@ static void torrent_peer_on_read(IoCompletion *completion, Error err,
     return;
   }
 
-  if (ErrKindNone != err.kind) {
-    error_print("failed to read from a peer", err);
-    torrent_peer_close(peer);
-    return;
-  }
+  // A failure, or nothing read and nothing wrong, which is end of file: the
+  // peer hung up, and asking again would answer 0 for ever since a descriptor
+  // at end of file stays readable. `Hangup` is a `Close` in every state, so
+  // there is nothing left to do here whatever comes back.
+  if (ErrKindNone != err.kind || 0 == res) {
+    if (ErrKindNone != err.kind) {
+      error_print("failed to read from a peer", err);
+    }
 
-  // Nothing read and nothing wrong is end of file: the peer hung up. Asking
-  // again would answer 0 for ever, since a descriptor at end of file stays
-  // readable.
-  if (0 == res) {
-    torrent_peer_close(peer);
+    const bool alive = torrent_peer_dispatch(
+        peer, (TorrentEvent){.kind = TorrentEventKindHangup},
+        peer->io->monotonic_ns(peer->io));
+    assert(!alive);
     return;
   }
 
   assert(!__builtin_add_overflow(peer->recv_len, res, &peer->recv_len));
   assert(peer->recv_len <= TORRENT_PEER_RECV_BUF_CAP);
 
-  torrent_peer_tick(peer, peer->io);
+  torrent_peer_tick(peer, peer->io, peer->io->monotonic_ns(peer->io));
 }
 
 // Put our own handshake in the send buffer. 68 bytes, the same shape as the one
@@ -1860,7 +2241,9 @@ static void torrent_peer_queue_handshake(TorrentPeer *peer) {
   // Nothing has been queued before it, so it goes out first, which is what a
   // peer waits for before saying anything itself.
   assert(0 == peer->send_len);
-  assert(TorrentPeerStateInitial == peer->state);
+  // `SentHandshake` and not `Initial`: the state moved when the peer decided to
+  // send one, and this is the bridge carrying that decision out.
+  assert(TorrentPeerStateSentHandshake == peer->state);
   _Static_assert(TORRENT_PEER_HANDSHAKE_LEN <= TORRENT_PEER_SEND_BUF_CAP,
                  "the handshake has to fit");
 
@@ -1886,14 +2269,128 @@ static void torrent_peer_queue_handshake(TorrentPeer *peer) {
   log(&peer->logger, LogLevelDebug, "queued handshake");
 }
 
-// One pass of the state machine, run from whichever callback has just reported.
+// Put a keep-alive in the send buffer: the length prefix on its own, four zero
+// bytes with no tag behind them.
+static void torrent_peer_queue_keep_alive(TorrentPeer *peer) {
+  torrent_peer_assert_invariants(peer);
+  _Static_assert(sizeof(u32) <= TORRENT_PEER_SEND_BUF_CAP,
+                 "a keep-alive has to fit");
+
+  // A send buffer this full means there are already bytes waiting to go out,
+  // which is the opposite of the silence a keep-alive is there to break: not
+  // sending one says nothing untrue, and the deadline has moved on either way.
+  if (TORRENT_PEER_SEND_BUF_CAP - peer->send_len < sizeof(u32)) {
+    log(&peer->logger, LogLevelDebug,
+        "dropped a keep-alive: %zu byte(s) already queued", peer->send_len);
+    return;
+  }
+
+  memset(peer->send_buf + peer->send_len, 0, sizeof(u32));
+  peer->send_len += sizeof(u32);
+
+  log(&peer->logger, LogLevelDebug, "queued keep-alive");
+}
+
+// Hand one event to the peer and carry out whatever it asks for. This is the
+// whole of the bridge's write side: every command turns into bytes in the send
+// buffer or into a hang-up, and nothing else here decides anything.
 //
-// Each state either has what it needs and moves on, or asks for one more
-// operation and returns. What it must never do is ask for an operation that is
-// already in flight: a completion holds one at a time, and both the read and
-// the write path come through here, so the two would otherwise arm the same
-// read twice over.
-static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
+// `now_ns` is passed in and not read here, so that everything one turn of the
+// loop does happens at the one instant. The walk that finds due peers compares
+// against it, and a second read a few instructions later would let a peer be
+// called about a deadline that, by that clock, has not passed.
+//
+// Answers false once the connection is over, in which case the slot may already
+// be back in the pool and `peer` is not to be touched again.
+__attribute__((warn_unused_result)) static bool
+torrent_peer_dispatch(TorrentPeer *peer, const TorrentEvent event,
+                      const u64 now_ns) {
+  torrent_peer_assert_invariants(peer);
+  assert(!peer->closing);
+
+  log(&peer->logger, LogLevelDebug, "%s in %s",
+      torrent_event_kind_to_cstr(event.kind),
+      torrent_peer_state_to_cstr(peer->state));
+
+  const u32 commands_len = torrent_peer_run(peer, event, now_ns);
+  assert(commands_len <= TORRENT_PEER_COMMANDS_MAX);
+
+  for (u32 i = 0; i < commands_len; i++) {
+    const TorrentCommand command = peer->commands[i];
+
+    log(&peer->logger, LogLevelDebug, "command %s",
+        torrent_command_kind_to_cstr(command.kind));
+
+    switch (command.kind) {
+    case TorrentCommandKindSendHandshake:
+      torrent_peer_queue_handshake(peer);
+      break;
+
+    case TorrentCommandKindSendKeepAlive:
+      torrent_peer_queue_keep_alive(peer);
+      break;
+
+    case TorrentCommandKindClose:
+      // Nothing follows it, which `torrent_peer_command_push` keeps true, so
+      // this is also the last time `peer` is looked at.
+      assert(i + 1 == commands_len);
+      torrent_peer_close(peer);
+      return false;
+
+    case TorrentCommandKindNone:
+      // `torrent_peer_command_push` refuses one, so this is unreachable and is
+      // here because `-Wswitch-enum` wants every value named -- which is the
+      // point: a command added without a case here fails to build.
+      assert(0 && "a command that says nothing");
+      break;
+    }
+  }
+
+  return true;
+}
+
+// The two operations, in the one place each is asked for. Both are guarded by
+// what is already in flight, because a completion holds one operation at a time
+// and every path through the bridge ends up here.
+//
+// A read is never a command: one is kept outstanding whatever the state, so no
+// state can stall the connection by forgetting to ask for one.
+//
+// Like `torrent_peer_dispatch`, this can end the connection -- an operation
+// that cannot even be submitted has no callback coming -- so `peer` is not to
+// be touched afterwards.
+static void torrent_peer_pump(TorrentPeer *peer, IO *io) {
+  torrent_peer_assert_invariants(peer);
+  assert(io == peer->io);
+  assert(!peer->closing);
+
+  if (peer->send_len > 0 && !peer->write_in_flight) {
+    const Error err = torrent_peer_write(peer, io);
+    if (ErrKindNone != err.kind) {
+      error_print("failed to write to a peer", err);
+      torrent_peer_close(peer);
+      return;
+    }
+  }
+
+  // Nothing more to be had from what has arrived, so wait for more of it. The
+  // buffer cannot already be full: a message too big for it is refused as
+  // malformed, and everything smaller has been taken out of it.
+  assert(peer->recv_len < TORRENT_PEER_RECV_BUF_CAP);
+  if (!peer->read_in_flight) {
+    const Error err = torrent_peer_read(peer, io);
+    if (ErrKindNone != err.kind) {
+      error_print("failed to read from a peer", err);
+      torrent_peer_close(peer);
+      return;
+    }
+  }
+}
+
+// The bridge's read side: whatever has arrived, turned into events one at a
+// time, and then a read and a write put out for what comes next. Run from
+// whichever callback has just reported.
+static void torrent_peer_tick(TorrentPeer *peer, IO *io, const u64 now_ns) {
   torrent_peer_assert_invariants(peer);
   assert(io == peer->io);
   assert(!peer->closing);
@@ -1901,52 +2398,41 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
   log(&peer->logger, LogLevelDebug, "tick in %s",
       torrent_peer_state_to_cstr(peer->state));
 
-  switch (peer->state) {
-  case TorrentPeerStateInitial: {
-    torrent_peer_queue_handshake(peer);
-    peer->state = TorrentPeerStateSentHandshake;
-  }
-
-    // Ours is queued; theirs is what the next state waits for, and it may
-    // already be in the buffer.
-    __attribute__((fallthrough));
-  case TorrentPeerStateSentHandshake: {
-    if (peer->recv_len < TORRENT_PEER_HANDSHAKE_LEN) {
-      break;
-    }
-
-    // Exactly the handshake and not a byte more: a peer is free to put its
-    // first message in the same packet, and those bytes belong to the next
-    // state.
+  // Their handshake, once the whole of it is here. Exactly the 68 bytes and not
+  // a byte more: a peer is free to put its first message in the same packet,
+  // and those bytes belong to the drain below.
+  if (TorrentPeerStateSentHandshake == peer->state &&
+      peer->recv_len >= TORRENT_PEER_HANDSHAKE_LEN) {
     const Slice_u8 recv =
         slice_u8_make(peer->recv_buf, TORRENT_PEER_HANDSHAKE_LEN);
 
     Slice_u8 peer_id = {0};
-    if (!torrent_check_handshake(recv, peer->info_hash, &peer_id)) {
+    const bool valid = torrent_check_handshake(recv, peer->info_hash, &peer_id);
+
+    if (valid) {
+      assert(TORRENT_PEER_ID_LEN == peer_id.len);
+      log(&peer->logger, LogLevelInfo, "received valid handshake");
+
+      // Dropped before the event goes out, moving whatever arrived behind it to
+      // the front: what the peer decides must never be about bytes that are
+      // still sitting here.
+      const usize remaining = peer->recv_len - TORRENT_PEER_HANDSHAKE_LEN;
+      assert(remaining < TORRENT_PEER_RECV_BUF_CAP);
+      memmove(peer->recv_buf, peer->recv_buf + TORRENT_PEER_HANDSHAKE_LEN,
+              remaining);
+      peer->recv_len = remaining;
+    } else {
       log(&peer->logger, LogLevelError, "received invalid handshake");
-      torrent_peer_close(peer);
+    }
+
+    const TorrentEvent event = {.kind = valid ? TorrentEventKindHandshake
+                                              : TorrentEventKindMalformed};
+    if (!torrent_peer_dispatch(peer, event, now_ns)) {
       return;
     }
-    assert(TORRENT_PEER_ID_LEN == peer_id.len);
-
-    log(&peer->logger, LogLevelInfo, "received valid handshake");
-
-    peer->state = TorrentPeerStateHandshaked;
-
-    // Drop the handshake, moving whatever arrived behind it to the front of
-    // the buffer.
-    assert(peer->recv_len >= TORRENT_PEER_HANDSHAKE_LEN);
-    const usize remaining = peer->recv_len - TORRENT_PEER_HANDSHAKE_LEN;
-    assert(remaining < TORRENT_PEER_RECV_BUF_CAP);
-    memmove(peer->recv_buf, peer->recv_buf + TORRENT_PEER_HANDSHAKE_LEN,
-            remaining);
-    peer->recv_len = remaining;
   }
 
-    // The handshake is consumed, so the next state runs on what is left over
-    // instead of waiting for a read it may not need.
-    __attribute__((fallthrough));
-  case TorrentPeerStateHandshaked: {
+  if (TorrentPeerStateHandshaked == peer->state) {
     // Every whole message in the buffer, not just the first: one read can carry
     // several, and a peer that sent three and then went quiet would otherwise
     // have two of them sitting unread for as long as it stayed quiet.
@@ -1965,7 +2451,11 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
       if (ErrKindNone != err.kind) {
         log(&peer->logger, LogLevelError, "received invalid message");
         error_print("failed to parse a peer message", err);
-        torrent_peer_close(peer);
+        // `Malformed` is a `Close` in every state, so there is nothing left
+        // to do here whatever comes back.
+        const bool alive = torrent_peer_dispatch(
+            peer, (TorrentEvent){.kind = TorrentEventKindMalformed}, now_ns);
+        assert(!alive);
         return;
       }
 
@@ -1981,7 +2471,8 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
       }
 
       // Drop what was parsed or skipped, keeping the rest at the front of the
-      // buffer.
+      // buffer, and before the event goes out for the same reason the handshake
+      // is dropped before its own.
       const usize consumed = recv_len_before - recv.len;
       memmove(peer->recv_buf, peer->recv_buf + consumed, recv.len);
       peer->recv_len = recv.len;
@@ -1991,7 +2482,13 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
       // them out of the buffer would run here for ever on the same bytes.
       assert(peer->recv_len < recv_len_before);
 
-      // Skipped, not received, and the next one is behind it.
+      // Skipped, and no event: stepping over it is the bridge's own business,
+      // which is what keeps a `Message` event a message the peer understood.
+      //
+      // Nor does it count as the peer being alive. Four minutes of nothing this
+      // build can read is a peer there is nothing to be had from, whatever it
+      // is saying, and the slot is better spent on one that speaks this
+      // protocol.
       if (TorrentMessageKindUnknown == msg.kind) {
         log(&peer->logger, LogLevelError,
             "skipped message with unknown tag: tag=%u len=%u",
@@ -2002,39 +2499,24 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
       log(&peer->logger, LogLevelDebug, "received %s",
           torrent_message_kind_to_cstr(msg.kind));
 
-      // TODO: act on the message.
+      // No message closes a connection yet, so this way out is not taken
+      // today. It is the contract all the same: the moment a message can be
+      // answered with a `Close` -- a `piece` that does not hash, a `request`
+      // for a piece this does not have -- carrying on round the loop here would
+      // be a use of a slot that is back in the pool.
+      const TorrentEvent event = {.kind = TorrentEventKindMessage,
+                                  .v.msg = msg};
+      if (!torrent_peer_dispatch(peer, event, now_ns)) {
+        return;
+      }
     }
 
     // Every pass took at least four bytes out, so the bound above cannot be
     // reached with a message still in the buffer.
     assert(drained);
-  } break;
   }
 
-  // The two operations, in the one place each is asked for. Both are guarded by
-  // what is already in flight, because a completion holds one operation at a
-  // time and the callbacks of both come back through here.
-  if (peer->send_len > 0 && !peer->write_in_flight) {
-    const Error err = torrent_peer_write(peer, io);
-    if (ErrKindNone != err.kind) {
-      error_print("failed to write to a peer", err);
-      torrent_peer_close(peer);
-      return;
-    }
-  }
-
-  // Nothing more to be had from what has arrived, so wait for more of it. The
-  // buffer cannot already be full: a message too big for it is refused as
-  // malformed, and everything smaller has been taken out of it above.
-  assert(peer->recv_len < TORRENT_PEER_RECV_BUF_CAP);
-  if (!peer->read_in_flight) {
-    const Error err = torrent_peer_read(peer, io);
-    if (ErrKindNone != err.kind) {
-      error_print("failed to read from a peer", err);
-      torrent_peer_close(peer);
-      return;
-    }
-  }
+  torrent_peer_pump(peer, io);
 }
 
 // Point a freshly acquired slot at a connection. Its own function because the
@@ -2064,6 +2546,13 @@ static void torrent_peer_init(TorrentPeer *peer, IO *io,
   // TODO: a real peer id, generated once for the process. Two peers sharing one
   // makes a remote think it has connected to itself.
   peer->id[0] = 1;
+
+  // No deadline until the first `torrent_peer_run`, which is the `Accepted` or
+  // `Connected` event right behind this call. A zeroed slot would read as a
+  // deadline in the distant past and be woken at once, for ever.
+  peer->idle_due_at = TORRENT_PEER_DEADLINE_NONE;
+  peer->keep_alive_due_at = TORRENT_PEER_DEADLINE_NONE;
+  peer->deadline_at = TORRENT_PEER_DEADLINE_NONE;
 
   char log_prefix[32] = {0};
   snprintf(log_prefix, sizeof(log_prefix), "[peer %u.%u.%u.%u:%hu] ",
@@ -2097,10 +2586,125 @@ static void torrent_peer_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
   torrent_peer_init(peer, io, network_ctx, accept_addr, accept_socket, ip);
   log(&peer->logger, LogLevelInfo, "accepted");
 
-  // Nothing buffered yet and the initial state, so the tick's first move is the
-  // read that waits for the handshake. It hangs up on the peer itself if that
-  // read cannot even be submitted, so there is nothing left to do here.
-  torrent_peer_tick(peer, io);
+  // The transport having a connection is the first thing the peer is told, and
+  // its answer is the handshake. The pump puts that on the wire and asks for
+  // the read that waits for theirs; it hangs up on the peer itself if either
+  // cannot even be submitted, so there is nothing left to do here.
+  //
+  // `Accepted` in the initial state is never answered with a `Close`, so this
+  // way out is not taken today either; it is here for the same reason as the
+  // one in the drain above.
+  if (!torrent_peer_dispatch(peer,
+                             (TorrentEvent){.kind = TorrentEventKindAccepted},
+                             io->monotonic_ns(io))) {
+    return;
+  }
+
+  torrent_peer_pump(peer, io);
+}
+
+// Give every peer whose deadline has passed a `Deadline` event, and answer with
+// the earliest deadline still outstanding across the pool, which is how long
+// the loop may wait before coming back here.
+//
+// This is the whole of what a timer library would be, and it is a walk over the
+// pool's occupied bitset rather than a heap: what it compares are integers, and
+// only a peer that is actually due is called, so a quiet turn costs a few
+// hundred comparisons and no calls at all. In exchange there is no structure to
+// keep in sync -- re-arming is one assignment inside `torrent_peer_run`, and a
+// closing peer leaves nothing behind.
+//
+// TODO: a 128-bucket one-second wheel (`u16 head[128]`, `u16 next_in_bucket` on
+// the peer) makes the whole of this O(1), and the deadlines here are coarse and
+// bounded enough that it needs no overflow list. What it costs is cancellation
+// coming back: a re-arm has to move buckets and a closing peer leaves an entry
+// behind. Worth it somewhere past a few thousand peers, and not before.
+__attribute__((warn_unused_result)) static u64
+torrent_peers_deadlines_run(TorrentNetworkCtx *network_ctx, IO *io,
+                            const u64 now_ns) {
+  assert(network_ctx);
+  assert(io);
+
+  TorrentpeerHandleCtxPool *const pool = &network_ctx->pool;
+
+  u64 earliest = TORRENT_PEER_DEADLINE_NONE;
+
+  for (usize group_idx = 0; group_idx < POOL_SLOT_GROUPS; group_idx++) {
+    // The group's word is re-read every pass rather than taken once, with the
+    // bits already visited masked off: this walk is what calls into the code
+    // that ends connections, so a slot can go while it is in progress. The mask
+    // is also what bounds the loop, every pass clearing one bit.
+    PoolSlotGroup visited = 0;
+
+    for (usize i = 0; i < POOL_SLOTS_PER_GROUP; i++) {
+      const PoolSlotGroup group = pool->occupied[group_idx] & ~visited;
+      // A group with nothing left in it costs this one test, which is the whole
+      // reason the pool's occupancy is a bitset.
+      if (0 == group) {
+        break;
+      }
+
+      const i32 first_set_bit = __builtin_ffsll((i64)group);
+      assert(0 != first_set_bit);
+
+      const u32 bit_idx = (u32)(first_set_bit - 1);
+      visited |= 1ULL << bit_idx;
+
+      TorrentPeer *const peer =
+          &pool->slots[group_idx * POOL_SLOTS_PER_GROUP + bit_idx];
+
+      // Its hang-up is waiting on an operation to report, so it is past being
+      // told anything and there is no point waiting on it either.
+      if (peer->closing) {
+        continue;
+      }
+
+      u64 due_at = peer->deadline_at;
+
+      if (now_ns >= due_at) {
+        if (!torrent_peer_dispatch(
+                peer, (TorrentEvent){.kind = TorrentEventKindDeadline},
+                now_ns)) {
+          continue;
+        }
+
+        // Nothing is left due: a deadline that fired was either re-armed or
+        // ended the connection, which is what keeps the wait above zero.
+        due_at = peer->deadline_at;
+        assert(due_at > now_ns);
+
+        // Read before the pump and not after, because the pump can end the
+        // connection too -- an operation that cannot even be submitted has no
+        // callback coming -- and a released slot is a zeroed one whose deadline
+        // reads as long past. Waking once more for a peer that has gone costs
+        // one walk; taking that zero as the minimum would spin.
+        torrent_peer_pump(peer, io);
+      }
+
+      if (due_at < earliest) {
+        earliest = due_at;
+      }
+    }
+  }
+
+  return earliest;
+}
+
+// How long the loop may wait before the nearest deadline, given what the walk
+// above answered. A ceiling and not a period: a turn ends early for whichever
+// deadline is nearest, and `TORRENT_PEER_LOOP_WAIT_NS_MAX` is only how long to
+// wait when there is no deadline at all.
+__attribute__((warn_unused_result)) static usize
+torrent_peers_wait_ns(const u64 earliest, const u64 now_ns) {
+  // The walk leaves nothing due behind it.
+  assert(earliest > now_ns);
+
+  const u64 until_ns = earliest - now_ns;
+  if (until_ns >= TORRENT_PEER_LOOP_WAIT_NS_MAX) {
+    return (usize)TORRENT_PEER_LOOP_WAIT_NS_MAX;
+  }
+
+  return (usize)until_ns;
 }
 
 __attribute__((warn_unused_result)) static Error

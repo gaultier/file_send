@@ -1,42 +1,48 @@
-- peer as an actor:
-    - Each peer has an array of max 8 commands
-    - Code bridges the io bytes -> events and commands -> io operations
-    - `peer_run` is easy to test (pure)
-    - a peer can send an event to other peers (e.g.: new block arrived). This could create feedback loops, perhaps could be avoided with shared state (since we are single threaded) e.g. a bitset per file to record which blocks we already have, shared by all peers.
-```
-// NOTE: `Command[]` allows for pipelining writes or queuing a several IO operations e.g.:  upon receiving a block, a socket read (for the next block) + a file write (for this block).
-// `Event` is a superset of 'peer messages' + 'network events' e.g. timeout, events from other peer connections (e.g.: new block received), 'file fully downloaded' (so perhaps close the connection), etc.
-Command[] peer_run(Event event) {
-    switch (peer->state) {
-  case TorrentPeerStateInitial: {
-      assert(EventKindNone == event.kind);
-
-      // TODO: Do we need 'sagas' e.g. 'queued handshake' + 'handshake sent (confirmed)' ?
-      peer->state = TorrentPeerStateSentHandshake;
-      return Command[]{SendHandshake};
-  }break;
-
-  case TorrentPeerStateSentHandshake: {
-      if(EventKindHandshake != event.kind) {
-          // Invalid.
-          return Command[]{Close};
-      }
-
-      // Fully handshaked.
-      peer->state = TorrentPeerStateHandshaked; 
-  
-      return Command[]{HaveAll}; // Or: Bitfield 0b111111111111...
-  }break;
-
-    
-//    [...]
-    }
-
-    // No other handler decided on commands to send so idle for a bit.
-
-    return Command[]{SendKeepAlive, IdleFor1Minute}; // After which we need to send a keep alive.
-}
-```
+- peer as an actor: built. `torrent_peer_run` in `torrent.c` is the whole of a
+  peer's decision making -- no io, no allocation, no clock, and so no way to
+  fail -- and everything around it is the bridge that turns bytes into events
+  and commands into io operations. The reasoning sketched here now lives in the
+  comments beside the code. What is left:
+    - `SendBitfield`, `SendRequests` and `WriteBlock` are not commands yet,
+      because each needs state that does not exist: the `have` and `requested`
+      bitsets, and a file to write into. `torrent_peer_run`'s `Handshaked` case
+      carries the `TODO` where the first of them goes.
+    - No peer-to-peer events, which is what would make feedback loops possible.
+      A block arriving elsewhere needs nothing from anyone right away, so it is
+      shared state and the next peer to get an event reads it:
+        - a `have` bitset per torrent, which replaces the broadcast
+        - a `requested` bitset, with the owning slot and a deadline, which is the
+          one genuinely cross-peer decision: two peers fetching the same block
+        - `file fully downloaded` as a flag peers read, not an event delivered to
+          each of them
+    - A third deadline, for a request timing out. It is a third pair of "what
+      resets it" and "what happens when it fires" and not a variant of the two
+      that exist: reset by sending a request, and answered by a block to ask
+      someone else for rather than by a peer to close.
+    - Backpressure is the one leak in "cannot fail": if a command says write and
+      the send buffer is full, either the bridge defers or `peer->can_send`
+      becomes an input. `SendKeepAlive` is the only command that can reach it
+      today, and it drops the keep-alive -- right for that one, a full buffer
+      being the opposite of the silence it breaks, and not a general answer.
+    - Request pacing. One command must mean "request up to N blocks", or a
+      `bitfield` from a peer that has everything outruns the array.
+    - The slot generation counter is not there, and is not needed while the
+      bridge closes the way it does: a hang-up waits for every outstanding
+      operation to report before the slot goes back, so no completion can land on
+      a slot that has been reused. It becomes necessary the moment a slot is
+      released with something still in flight.
+    - `test_peer_run` in `test.c` is the harness that drives a peer through the
+      fake io, and it now sits beside `test_torrent_peer_run`, which is the actor
+      itself. One of the two needs renaming.
+    - The walk in `torrent_peers_deadlines_run` is O(N) over the pool's occupied
+      bitset, and that is the starting point rather than the end of it. A
+      128-bucket one-second wheel (`u16 head[128]`, `u16 next_in_bucket` on the
+      peer) makes it O(1), and the deadlines are coarse and bounded enough --
+      nothing beyond a couple of minutes -- that no overflow list is needed. What
+      it costs is cancellation coming back: a re-arm has to move buckets and a
+      closing peer leaves an entry behind, dropped lazily against the slot
+      generation when it pops. Worth it somewhere past a few thousand peers, and
+      not before.
 - first bind the TCP socket, then broadcast the port over UDP
 - listen for UDP broadcasts
 - async io, no threads. Darwin (kqueue) and Linux (epoll) done. Still to do:
@@ -59,12 +65,25 @@ Command[] peer_run(Event event) {
     operation starts at submission and `GetQueuedCompletionStatusEx` collects
     what finished. A `WITH_TESTS` build stays Unix-only until then: the fakes
     in `test.c` call `unix_*` directly.
-  - a timer operation, so `ErrKindTooManyFiles` on accept can back off instead
-    of bringing the listener down
+  - the monotonic clock is done: `IO.monotonic_ns`, backed by
+    `clock_gettime(CLOCK_MONOTONIC)` in `unix.c` and shared by both readiness
+    backends. Not a timer operation -- no `IoActionKind` for it, nothing armed,
+    nothing to cancel -- and on `IO` rather than `Env` because the loop is the
+    only caller that wants it every turn. `main`'s loop sizes each `run_for_ns`
+    by the nearest deadline instead of a fixed tick, so `io_run_until`'s
+    parameter is a ceiling and not a period, and the fake in `test.c` answers
+    the clock from a field a test assigns. Win32 needs
+    `QueryPerformanceCounter` when it gets an `IO` at all. Still to do:
+    `ErrKindTooManyFiles` on accept should back off by setting
+    `server->retry_accept_at` rather than bringing the listener down, and the
+    walk that finds due peers would find it -- which means the walk has to take
+    the listener as well as the pool.
   - `accept4` with `SOCK_NONBLOCK` on Linux, and `EPOLL_CTL_ADD` without the
     `EEXIST` round trip, would each save a syscall per connection
   - `epoll_pwait2` takes a `timespec`, so `run_for_ns` would not have to round
-    its nanoseconds up to a millisecond
+    its nanoseconds up to a millisecond. This matters more once deadlines size
+    the wait: the rounding stops being a curiosity and becomes a wake up to a
+    millisecond late. Harmless for this protocol, but it is the same fix.
   - nothing drives `IO.connect` on either platform yet, so it is untested
   - once the peer protocol writes to sockets, measure whether `write` and
     `send_to` should make the syscall in the slot rather than on the next turn

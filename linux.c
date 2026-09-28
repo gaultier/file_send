@@ -277,7 +277,7 @@ __attribute__((warn_unused_result)) static Error linux_run_for_ns(IO *io,
   // TODO: `epoll_pwait2` takes a `timespec`, which would not need this.
   i32 timeout_ms = -1;
   {
-    const usize ms = (ns + 999999) / (1000 * 1000);
+    const usize ms = (ns + Millisecond - 1) / Millisecond;
     if (0 == ms) {
       timeout_ms = (0 == ns) ? 0 : 1;
     } else if (ms > (usize)INT32_MAX) {
@@ -493,6 +493,7 @@ linux_io_epoll_make(Arena *arena, const Env *env, IO **dst) {
   io->io = (IO){
       .env = env,
       .run_for_ns = linux_run_for_ns,
+      .monotonic_ns = unix_monotonic_ns,
       .open = linux_open,
       .close = linux_close,
       .read = linux_read,

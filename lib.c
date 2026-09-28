@@ -40,6 +40,20 @@ typedef ssize_t isize;
 static const usize KiB = 1024;
 static const usize MiB = 1024 * KiB;
 
+// Nanoseconds, which is the unit every duration in here is counted in: a `u64`
+// of them is nearly six hundred years, so no wait and no deadline has to think
+// about overflow. Named so that `2 * Minute` reads as what it is, where
+// `120 * 1000 * 1000 * 1000` reads as a digit count.
+//
+// `static const` and not `#define`, like `KiB` above, so they carry a type and
+// cannot be pasted into something that changes their meaning. The cost is that
+// they are not constant expressions: an array length or a `_Static_assert`
+// wanting one of these has to spell the number out.
+static const u64 Microsecond = 1000;
+static const u64 Millisecond = 1000 * 1000;
+static const u64 Second = 1000 * 1000 * 1000;
+static const u64 Minute = 60ULL * 1000 * 1000 * 1000;
+
 typedef enum {
   ErrKindNone,
   ErrKindOOM,
@@ -748,6 +762,22 @@ struct IO {
   // forever, and no callback ever runs nested inside another.
   Error (*run_for_ns)(IO *io, usize ns);
 
+  // Nanoseconds on a clock that only goes forward, from an epoch nobody is told
+  // about: good for a difference and for nothing else. This is the whole of what
+  // a deadline needs, and it is why there is no timer operation here -- nothing
+  // is armed, so there is nothing to cancel and nothing that can outlive what
+  // armed it.
+  //
+  // On `IO` and not on `Env`, though asking the platform the time is `Env`'s
+  // sort of job: the loop is what wants it every turn, to size the next
+  // `run_for_ns` against the nearest deadline, and it already has an `IO`.
+  //
+  // No `Error`, unlike every other slot: this cannot fail. `clock_gettime` on a
+  // monotonic clock with a good pointer has nothing to report, and a caller
+  // deciding whether a deadline has passed has nothing to do with a failure
+  // anyway.
+  u64 (*monotonic_ns)(IO *io);
+
   Error (*open)(IO *io, IoCompletion *completion, Slice_u8 path,
                 FileOpenOptions options, IoCallback cb);
   Error (*close)(IO *io, IoCompletion *completion, i32 fd, IoCallback cb);
@@ -851,7 +881,7 @@ io_run_until(IO *io, const bool *done, usize tick_ns) {
 // A tenth of a second: long enough that a wait for a peer is not a hundred
 // syscalls a second, short enough that a caller turning the loop by hand is
 // not left staring at it.
-#define IO_TICK_NS (100 * 1000 * 1000)
+#define IO_TICK_NS (100 * Millisecond)
 
 // One operation, waited out. The completion, what it answered, and the flag
 // that says it has, in one place, because a caller that waits for a single
