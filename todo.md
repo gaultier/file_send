@@ -1,5 +1,39 @@
+- peer as an actor:
+```
+// NOTE: `Command[]` allows for pipelining writes or queuing a several IO operations e.g.:  upon receiving a block, a socket read (for the next block) + a file write (for this block).
+// `Event` is a superset of 'peer messages' + 'network events' e.g. timeout, events from other peer connections (e.g.: new block received), etc.
+Command[] peer_run(Event event) {
+    switch (peer->state) {
+  case TorrentPeerStateInitial: {
+      assert(EventKindNone == event.kind);
+
+      // TODO: Do we need 'sagas' e.g. 'queued handshake' + 'handshake sent (confirmed)' ?
+      peer->state = TorrentPeerStateSentHandshake;
+      return Command[]{SendHandshake};
+  }break;
+
+  case TorrentPeerStateSentHandshake: {
+      if(EventKindHandshake != event.kind) {
+          // Invalid.
+          return Command[]{Close};
+      }
+
+      // Fully handshaked.
+      peer->state = TorrentPeerStateHandshaked; 
+  
+      return Command[]{HaveAll}; // Or: Bitfield 0b111111111111...
+  }break;
+
+    
+//    [...]
+default:
+    return Command[]{IdleFor1Minute}; // After which we need to send a keep alive.
+    }
+
+    // unreachable
+}
+```
 - first bind the TCP socket, then broadcast the port over UDP
-- peer protocol
 - listen for UDP broadcasts
 - async io, no threads. Darwin (kqueue) and Linux (epoll) done. Still to do:
   - io_uring, as `linux_io_uring_make` next to `linux_io_epoll_make`. It is a
