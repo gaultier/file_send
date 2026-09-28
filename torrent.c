@@ -1155,9 +1155,21 @@ typedef enum {
   TorrentMessageKindCancel = 8,
   // TODO: v2 adds more.
 
-  // Not a tag: a keep-alive is a length of zero with nothing behind it, so it
-  // has no byte on the wire and takes a value no tag can collide with.
+  // The three below are not tags and have no byte on the wire, so they take
+  // values from the top of the byte, where no tag reaches.
+
+  // A length of zero with nothing behind it.
   TorrentMessageKindKeepAlive = 0xff,
+  // A whole, well formed message whose tag this build does not know: a later
+  // version of the protocol, or an extension this does not speak.
+  TorrentMessageKindUnknown = 0xfe,
+  // No message: fewer bytes have arrived than one needs.
+  //
+  // Not zero, because zero is `choke` on the wire and the wire's numbering is
+  // what this enum is for. So a zeroed `TorrentPeerMessage` reads as `choke`,
+  // and the parser sets the kind before it can be read rather than leaving it
+  // to whoever declared it.
+  TorrentMessageKindNone = 0xfd,
 } TorrentMessageKind;
 
 // The name of `kind`, for diagnostics only. The protocol's own names, so a log
@@ -1185,6 +1197,10 @@ torrent_message_kind_to_cstr(TorrentMessageKind kind) {
     return "cancel";
   case TorrentMessageKindKeepAlive:
     return "keep-alive";
+  case TorrentMessageKindUnknown:
+    return "unknown";
+  case TorrentMessageKindNone:
+    return "none";
   }
 
   assert(0 && "unreachable");
@@ -1202,12 +1218,23 @@ typedef struct {
   // TODO: Data.
 } PeerMessagePiece;
 
+// What was skipped. Only a log line wants this, but a log line does want it: a
+// peer whose messages are all being stepped over is a build that is behind the
+// protocol, and the tag is the only thing that says which extension it is.
+typedef struct {
+  u8 tag;
+  // The message's length prefix, so the tag byte is counted: the bytes stepped
+  // over, as the wire gave them.
+  u32 size;
+} PeerMessageUnknown;
+
 typedef struct {
   TorrentMessageKind kind;
   union {
     u32 have;                                  // Have
     PeerMessageIndexBeginLength idx_begin_len; // Request | Cancel
     PeerMessagePiece piece;
+    PeerMessageUnknown unknown;                // Unknown
 
     // TODO: Bitfield.
   } v;
@@ -1329,21 +1356,33 @@ struct TorrentNetworkCtx {
 
 // One message off the front of `*data`, if a whole one is there.
 //
-// Three answers, and a caller needs all three. An error is a peer talking
-// nonsense, and the connection is over. `*present` false with no error is
-// "not yet": fewer bytes have arrived than the message needs, and `*data`
-// is left exactly as it was so that the same call works once more of it
-// turns up -- TCP cuts a stream wherever it likes, and half a message is
-// the ordinary case, not a broken peer. `*present` true is one message
-// parsed, with `*data` advanced past it and `*dst_msg` filled in.
+// An error is a peer talking nonsense, and the connection is over. Short of
+// that, `dst_msg->kind` is the whole answer and a caller needs every value of
+// it:
+//
+// - `TorrentMessageKindNone` is "not yet": fewer bytes have arrived than the
+//   message needs, and `*data` is left exactly as it was so that the same call
+//   works once more of it turns up. TCP cuts a stream wherever it likes, and
+//   half a message is the ordinary case, not a broken peer.
+// - `TorrentMessageKindUnknown` is a whole message with a tag this does not
+//   know, stepped over: `*data` has moved past it and there may well be another
+//   behind it. It is not waited on, since a message left in the buffer is one
+//   the caller comes back to for ever. `v.unknown` says what was skipped, which
+//   is the only reason a caller would care.
+// - Anything else is that message, with `*data` advanced past it and the rest of
+//   `*dst_msg` filled in.
+//
+// So the two answers that carry no message still differ in `*data`, and a
+// caller that stops on `None` as though it were `Unknown` stalls.
 __attribute__((warn_unused_result)) static Error
-torrent_peer_parse_message(const Logger *logger, Slice_u8 *data,
-                           TorrentPeerMessage *dst_msg, bool *present) {
+torrent_peer_parse_message(Slice_u8 *data, TorrentPeerMessage *dst_msg) {
   assert(data);
   assert(dst_msg);
-  assert(present);
 
-  *present = false;
+  // Set before anything can go wrong, so no path out of here leaves a kind the
+  // caller did not get from this call.
+  memset(dst_msg, 0, sizeof(*dst_msg));
+  dst_msg->kind = TorrentMessageKindNone;
 
   // A copy, and `*data` is only moved on at the very end: a message that turns
   // out to be half-arrived must leave the caller's slice untouched, or the
@@ -1363,9 +1402,7 @@ torrent_peer_parse_message(const Logger *logger, Slice_u8 *data,
 
   // A keep-alive is the length on its own, with no tag behind it.
   if (0 == msg_size) {
-    memset(dst_msg, 0, sizeof(*dst_msg));
     dst_msg->kind = TorrentMessageKindKeepAlive;
-    *present = true;
     *data = remaining;
     return (Error){.kind = ErrKindNone};
   }
@@ -1387,8 +1424,6 @@ torrent_peer_parse_message(const Logger *logger, Slice_u8 *data,
   // The length is at least 1 and the body is that long, so the tag is there.
   assert(slice_u8_consume_u8(&body, &msg_tag));
   assert(msg_size - 1 == body.len);
-
-  memset(dst_msg, 0, sizeof(*dst_msg));
 
   switch (msg_tag) {
   case TorrentMessageKindChoke:
@@ -1451,16 +1486,20 @@ torrent_peer_parse_message(const Logger *logger, Slice_u8 *data,
     // TODO: v2 messages;
 
   default:
-    log(logger, LogLevelError, "unknown message tag: tag=%u len=%u\n", msg_tag,
-        msg_size);
-
-    return (Error){.kind = ErrKindNone};
+    // The length says where it ends, so it is stepped over without losing the
+    // stream, which a guess at its shape would. The caller reports it: what was
+    // skipped is in the message, so this stays a function of its bytes alone.
+    dst_msg->kind = TorrentMessageKindUnknown;
+    dst_msg->v.unknown.tag = msg_tag;
+    dst_msg->v.unknown.size = msg_size;
+    break;
   }
 
-  // Every path out of the switch either set a kind or reported an error.
-  assert(msg_tag == (u8)dst_msg->kind);
+  // Every path out of the switch either set a kind or reported an error. A tag
+  // this knows keeps the wire's own number; anything else is `Unknown`.
+  assert(msg_tag == (u8)dst_msg->kind ||
+         TorrentMessageKindUnknown == dst_msg->kind);
 
-  *present = true;
   *data = remaining;
   // A message was taken, so the caller's slice is strictly shorter: that is
   // what keeps the loop that calls this from running for ever.
@@ -1921,37 +1960,47 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
 
       Slice_u8 recv = slice_u8_make(peer->recv_buf, peer->recv_len);
       TorrentPeerMessage msg = {0};
-      bool present = false;
 
-      const Error err =
-          torrent_peer_parse_message(&peer->logger, &recv, &msg, &present);
+      const Error err = torrent_peer_parse_message(&recv, &msg);
       if (ErrKindNone != err.kind) {
         log(&peer->logger, LogLevelError, "received invalid message");
         error_print("failed to parse a peer message", err);
         torrent_peer_close(peer);
         return;
       }
+
       // What is left is the start of a message that has not all arrived, and it
-      // stays where it is until the rest of it does.
-      if (!present) {
+      // stays where it is until the rest of it does. This is the only way out
+      // of the loop.
+      if (TorrentMessageKindNone == msg.kind) {
+        assert(recv.len == recv_len_before);
         log(&peer->logger, LogLevelDebug,
             "no whole message, %zu byte(s) buffered", peer->recv_len);
         drained = true;
         break;
       }
 
-      log(&peer->logger, LogLevelDebug, "received %s",
-          torrent_message_kind_to_cstr(msg.kind));
-
-      // Drop what was parsed, keeping the rest at the front of the buffer.
+      // Drop what was parsed or skipped, keeping the rest at the front of the
+      // buffer.
       const usize consumed = recv_len_before - recv.len;
       memmove(peer->recv_buf, peer->recv_buf + consumed, recv.len);
       peer->recv_len = recv.len;
 
-      // The buffer is strictly shorter than it was, which is this loop's only
-      // way out: a pass that reported a message without taking it out of the
-      // buffer would run here for ever on the same bytes.
+      // The buffer is strictly shorter than it was, which is what keeps this
+      // loop finite: a pass that took bytes out of the slice without taking
+      // them out of the buffer would run here for ever on the same bytes.
       assert(peer->recv_len < recv_len_before);
+
+      // Skipped, not received, and the next one is behind it.
+      if (TorrentMessageKindUnknown == msg.kind) {
+        log(&peer->logger, LogLevelError,
+            "skipped message with unknown tag: tag=%u len=%u",
+            msg.v.unknown.tag, msg.v.unknown.size);
+        continue;
+      }
+
+      log(&peer->logger, LogLevelDebug, "received %s",
+          torrent_message_kind_to_cstr(msg.kind));
 
       // TODO: act on the message.
     }

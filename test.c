@@ -1317,6 +1317,7 @@ static void test_torrent_peer_to_cstr(void) {
       TorrentMessageKindHave,       TorrentMessageKindBitfield,
       TorrentMessageKindRequest,    TorrentMessageKindPiece,
       TorrentMessageKindCancel,     TorrentMessageKindKeepAlive,
+      TorrentMessageKindUnknown,    TorrentMessageKindNone,
   };
 
   for (usize i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
@@ -1343,10 +1344,12 @@ static void test_torrent_peer_to_cstr(void) {
 // Every message is a big-endian length, then that many bytes: a tag and its
 // payload. The length does not count itself.
 //
-// Three answers come back and a test has to tell them apart: a whole message,
-// "not yet" with the slice untouched, and a peer talking nonsense. The middle
-// one is the one a real network produces constantly and the one a parser is
-// most likely to get wrong, so most of what follows is about it.
+// Four answers come back and a test has to tell them apart: a whole message,
+// "not yet" with the slice untouched, a whole message with a tag this does not
+// know that is stepped over, and a peer talking nonsense. The second is the one
+// a real network produces constantly and the one a parser is most likely to get
+// wrong, so most of what follows is about it. It and the third differ only in
+// whether the bytes are gone, which is why `data.len` is asserted on both.
 static void test_torrent_peer_parse_message(void) {
   // The wire bytes of each message this understands, tags included, so the tag
   // numbers are stated here and not taken from the enum under test.
@@ -1369,6 +1372,10 @@ static void test_torrent_peer_parse_message(void) {
                        0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x40, 0x00};
   // A keep-alive is a length of zero and nothing else: no tag, no payload.
   const u8 keep_alive[] = {0x00, 0x00, 0x00, 0x00};
+
+  // A zeroed `TorrentPeerMessage` reads as `choke`, tag zero being a real one,
+  // so every case below starts the kind at something it does not expect. A
+  // parser that returned without writing a kind would otherwise pass.
 
   // One whole message at a time, each read down to the last byte.
   {
@@ -1395,12 +1402,9 @@ static void test_torrent_peer_parse_message(void) {
 
     for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
       Slice_u8 data = slice_u8_make((u8 *)cases[i].bytes, cases[i].len);
-      TorrentPeerMessage msg = {0};
-      bool present = false;
+      TorrentPeerMessage msg = {.kind = TorrentMessageKindNone};
 
-      assert(ErrKindNone ==
-             torrent_peer_parse_message(NULL, &data, &msg, &present).kind);
-      assert(present);
+      assert(ErrKindNone == torrent_peer_parse_message(&data, &msg).kind);
       assert(cases[i].kind == msg.kind);
       // The whole message was taken, length prefix and all.
       assert(0 == data.len);
@@ -1410,31 +1414,25 @@ static void test_torrent_peer_parse_message(void) {
   // The payloads, which is what the tag is for.
   {
     Slice_u8 data = slice_u8_make((u8 *)have, sizeof(have));
-    TorrentPeerMessage msg = {0};
-    bool present = false;
-    assert(ErrKindNone ==
-           torrent_peer_parse_message(NULL, &data, &msg, &present).kind);
-    assert(present);
+    TorrentPeerMessage msg = {.kind = TorrentMessageKindNone};
+    assert(ErrKindNone == torrent_peer_parse_message(&data, &msg).kind);
+    assert(TorrentMessageKindHave == msg.kind);
     assert(300 == msg.v.have);
   }
   {
     Slice_u8 data = slice_u8_make((u8 *)request, sizeof(request));
-    TorrentPeerMessage msg = {0};
-    bool present = false;
-    assert(ErrKindNone ==
-           torrent_peer_parse_message(NULL, &data, &msg, &present).kind);
-    assert(present);
+    TorrentPeerMessage msg = {.kind = TorrentMessageKindNone};
+    assert(ErrKindNone == torrent_peer_parse_message(&data, &msg).kind);
+    assert(TorrentMessageKindRequest == msg.kind);
     assert(7 == msg.v.idx_begin_len.idx);
     assert(0x4000 == msg.v.idx_begin_len.begin);
     assert(0x4000 == msg.v.idx_begin_len.len);
   }
   {
     Slice_u8 data = slice_u8_make((u8 *)piece, sizeof(piece));
-    TorrentPeerMessage msg = {0};
-    bool present = false;
-    assert(ErrKindNone ==
-           torrent_peer_parse_message(NULL, &data, &msg, &present).kind);
-    assert(present);
+    TorrentPeerMessage msg = {.kind = TorrentMessageKindNone};
+    assert(ErrKindNone == torrent_peer_parse_message(&data, &msg).kind);
+    assert(TorrentMessageKindPiece == msg.kind);
     assert(2 == msg.v.piece.idx);
     assert(0x8000 == msg.v.piece.begin);
   }
@@ -1446,12 +1444,10 @@ static void test_torrent_peer_parse_message(void) {
   {
     for (usize n = 0; n < sizeof(request); n++) {
       Slice_u8 data = slice_u8_make((u8 *)request, n);
-      TorrentPeerMessage msg = {0};
-      bool present = false;
+      TorrentPeerMessage msg = {.kind = TorrentMessageKindUnknown};
 
-      assert(ErrKindNone ==
-             torrent_peer_parse_message(NULL, &data, &msg, &present).kind);
-      assert(!present);
+      assert(ErrKindNone == torrent_peer_parse_message(&data, &msg).kind);
+      assert(TorrentMessageKindNone == msg.kind);
       // Untouched: not one of the bytes it did look at was consumed.
       assert(n == data.len);
       assert(request == data.data);
@@ -1467,17 +1463,14 @@ static void test_torrent_peer_parse_message(void) {
       buf[n] = piece[n];
 
       Slice_u8 data = slice_u8_make(buf, n + 1);
-      TorrentPeerMessage msg = {0};
-      bool present = false;
+      TorrentPeerMessage msg = {.kind = TorrentMessageKindUnknown};
 
-      assert(ErrKindNone ==
-             torrent_peer_parse_message(NULL, &data, &msg, &present).kind);
+      assert(ErrKindNone == torrent_peer_parse_message(&data, &msg).kind);
 
       if (n + 1 < sizeof(piece)) {
-        assert(!present);
+        assert(TorrentMessageKindNone == msg.kind);
         assert(n + 1 == data.len);
       } else {
-        assert(present);
         assert(TorrentMessageKindPiece == msg.kind);
         assert(0 == data.len);
       }
@@ -1504,22 +1497,17 @@ static void test_torrent_peer_parse_message(void) {
 
     Slice_u8 data = slice_u8_make(run, sizeof(run));
     for (usize i = 0; i < sizeof(expected) / sizeof(expected[0]); i++) {
-      TorrentPeerMessage msg = {0};
-      bool present = false;
+      TorrentPeerMessage msg = {.kind = TorrentMessageKindNone};
 
-      assert(ErrKindNone ==
-             torrent_peer_parse_message(NULL, &data, &msg, &present).kind);
-      assert(present);
+      assert(ErrKindNone == torrent_peer_parse_message(&data, &msg).kind);
       assert(expected[i] == msg.kind);
     }
     // All four, and nothing over.
     assert(0 == data.len);
 
-    TorrentPeerMessage msg = {0};
-    bool present = false;
-    assert(ErrKindNone ==
-           torrent_peer_parse_message(NULL, &data, &msg, &present).kind);
-    assert(!present);
+    TorrentPeerMessage msg = {.kind = TorrentMessageKindUnknown};
+    assert(ErrKindNone == torrent_peer_parse_message(&data, &msg).kind);
+    assert(TorrentMessageKindNone == msg.kind);
   }
 
   // A peer talking nonsense, which ends the connection rather than being waited
@@ -1531,8 +1519,6 @@ static void test_torrent_peer_parse_message(void) {
       u8 bytes[16];
       usize len;
     } bad[] = {
-        // A tag this does not know.
-        {"unknown tag", {0x00, 0x00, 0x00, 0x01, 0x63}, 5},
         // `choke` is the tag and nothing else, so a payload behind it is wrong.
         {"choke with a payload", {0x00, 0x00, 0x00, 0x02, 0x00, 0xff}, 6},
         // `have` carries exactly one index.
@@ -1557,13 +1543,81 @@ static void test_torrent_peer_parse_message(void) {
 
     for (usize i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
       Slice_u8 data = slice_u8_make((u8 *)bad[i].bytes, bad[i].len);
-      TorrentPeerMessage msg = {0};
-      bool present = false;
+      TorrentPeerMessage msg = {.kind = TorrentMessageKindUnknown};
 
       assert(ErrKindInvalidData ==
-             torrent_peer_parse_message(NULL, &data, &msg, &present).kind);
-      assert(!present);
+             torrent_peer_parse_message(&data, &msg).kind);
+      // No message on an error, whatever the caller passed in.
+      assert(TorrentMessageKindNone == msg.kind);
     }
+  }
+
+  // A tag this does not know is not nonsense: the length says where the message
+  // ends, so it is stepped over. Waiting for it instead would leave it in the
+  // buffer and the caller would come back to it for ever. It says which tag and
+  // how many bytes, which is all a log line needs.
+  {
+    const u8 unknown[] = {0x00, 0x00, 0x00, 0x03, 0x63, 0xaa, 0xbb};
+    Slice_u8 data = slice_u8_make((u8 *)unknown, sizeof(unknown));
+    TorrentPeerMessage msg = {.kind = TorrentMessageKindNone};
+
+    assert(ErrKindNone == torrent_peer_parse_message(&data, &msg).kind);
+    assert(TorrentMessageKindUnknown == msg.kind);
+    assert(0x63 == msg.v.unknown.tag);
+    // The length prefix, so the tag byte counts and the payload's two bytes do.
+    assert(3 == msg.v.unknown.size);
+    // The whole of it, payload included, so the next message starts where it
+    // should.
+    assert(0 == data.len);
+  }
+
+  // Half of an unknown message is still "not yet": the length arrives before
+  // the tag does, so the skip waits for the whole thing like any other message.
+  // This is the pair that `*data` used to be the only way to tell apart.
+  {
+    const u8 unknown[] = {0x00, 0x00, 0x00, 0x03, 0x63, 0xaa, 0xbb};
+    for (usize n = 0; n < sizeof(unknown); n++) {
+      Slice_u8 data = slice_u8_make((u8 *)unknown, n);
+      TorrentPeerMessage msg = {.kind = TorrentMessageKindUnknown};
+
+      assert(ErrKindNone == torrent_peer_parse_message(&data, &msg).kind);
+      assert(TorrentMessageKindNone == msg.kind);
+      // Untouched, which is what `None` promises and `Unknown` does not.
+      assert(n == data.len);
+    }
+  }
+
+  // One between two known ones, which is the case that matters: skipping the
+  // wrong number of bytes loses the stream, and the message behind it is how a
+  // test can tell.
+  {
+    const u8 unknown[] = {0x00, 0x00, 0x00, 0x03, 0x63, 0xaa, 0xbb};
+    u8 run[sizeof(choke) + sizeof(unknown) + sizeof(have)] = {0};
+    usize at = 0;
+    memcpy(run + at, choke, sizeof(choke));
+    at += sizeof(choke);
+    memcpy(run + at, unknown, sizeof(unknown));
+    at += sizeof(unknown);
+    memcpy(run + at, have, sizeof(have));
+
+    Slice_u8 data = slice_u8_make(run, sizeof(run));
+
+    TorrentPeerMessage msg = {.kind = TorrentMessageKindNone};
+    assert(ErrKindNone == torrent_peer_parse_message(&data, &msg).kind);
+    assert(TorrentMessageKindChoke == msg.kind);
+
+    // The unknown one: exactly its own bytes gone, and no more.
+    const usize before = data.len;
+    assert(ErrKindNone == torrent_peer_parse_message(&data, &msg).kind);
+    assert(TorrentMessageKindUnknown == msg.kind);
+    assert(sizeof(unknown) == before - data.len);
+
+    // So the `have` behind it is found, payload and all, rather than the stream
+    // being read from the middle of the skipped message.
+    assert(ErrKindNone == torrent_peer_parse_message(&data, &msg).kind);
+    assert(TorrentMessageKindHave == msg.kind);
+    assert(300 == msg.v.have);
+    assert(0 == data.len);
   }
 
   // The largest length the receive buffer can hold is not malformed, it just
@@ -1576,11 +1630,9 @@ static void test_torrent_peer_parse_message(void) {
     u8 head[4] = {(u8)(biggest >> 24), (u8)(biggest >> 16), (u8)(biggest >> 8),
                   (u8)biggest};
     Slice_u8 data = slice_u8_make(head, sizeof(head));
-    TorrentPeerMessage msg = {0};
-    bool present = false;
-    assert(ErrKindNone ==
-           torrent_peer_parse_message(NULL, &data, &msg, &present).kind);
-    assert(!present);
+    TorrentPeerMessage msg = {.kind = TorrentMessageKindUnknown};
+    assert(ErrKindNone == torrent_peer_parse_message(&data, &msg).kind);
+    assert(TorrentMessageKindNone == msg.kind);
 
     // One more than that can never be buffered, so it is refused.
     const u32 too_big = biggest + 1;
@@ -1588,18 +1640,16 @@ static void test_torrent_peer_parse_message(void) {
                    (u8)too_big};
     Slice_u8 data2 = slice_u8_make(head2, sizeof(head2));
     assert(ErrKindInvalidData ==
-           torrent_peer_parse_message(NULL, &data2, &msg, &present).kind);
+           torrent_peer_parse_message(&data2, &msg).kind);
   }
 
   // Nothing at all is "not yet", not an error: an empty buffer is where every
   // connection starts.
   {
     Slice_u8 data = {0};
-    TorrentPeerMessage msg = {0};
-    bool present = false;
-    assert(ErrKindNone ==
-           torrent_peer_parse_message(NULL, &data, &msg, &present).kind);
-    assert(!present);
+    TorrentPeerMessage msg = {.kind = TorrentMessageKindUnknown};
+    assert(ErrKindNone == torrent_peer_parse_message(&data, &msg).kind);
+    assert(TorrentMessageKindNone == msg.kind);
   }
 }
 
@@ -2149,11 +2199,13 @@ static void test_torrent_peer_messages(void) {
   // guarantee of what follows, and the connection ends rather than the parser
   // being asked again for ever.
   {
-    u8 bad[TEST_HANDSHAKE_LEN + 5] = {0};
+    u8 bad[TEST_HANDSHAKE_LEN + 6] = {0};
     test_handshake_fill(bad, network_ctx.info_hash,
                         slice_u8_make(peer_id_bytes, sizeof(peer_id_bytes)));
-    // A tag no version of the protocol has.
-    const u8 nonsense[] = {0x00, 0x00, 0x00, 0x01, 0x63};
+    // `choke` is the tag on its own, so a payload behind it cannot be read as
+    // anything. An unknown tag is not this: its length still says where it
+    // ends, and it is skipped below.
+    const u8 nonsense[] = {0x00, 0x00, 0x00, 0x02, 0x00, 0xff};
     memcpy(bad + TEST_HANDSHAKE_LEN, nonsense, sizeof(nonsense));
 
     TestPeerCtx ctx = {.says = slice_u8_make(bad, sizeof(bad))};
@@ -2167,6 +2219,63 @@ static void test_torrent_peer_messages(void) {
     assert(1 == ctx.read_calls);
     assert(1 == ctx.close_calls);
     assert(test_peer_pool_is_empty(&network_ctx));
+  }
+
+  // A tag this build does not know, with a known message behind it. The
+  // connection carries on to end of file instead of ending on the tag, and the
+  // message behind it is reached: an unknown message left in the buffer would
+  // hide everything after it and be re-read until the buffer filled.
+  {
+    const u8 unknown_then_unchoke[] = {// A tag no version of the protocol has.
+                                       0x00, 0x00, 0x00, 0x03, 0x63, 0xaa, 0xbb,
+                                       // unchoke.
+                                       0x00, 0x00, 0x00, 0x01, 0x01};
+
+    u8 skipped[TEST_HANDSHAKE_LEN + sizeof(unknown_then_unchoke)] = {0};
+    test_handshake_fill(skipped, network_ctx.info_hash,
+                        slice_u8_make(peer_id_bytes, sizeof(peer_id_bytes)));
+    memcpy(skipped + TEST_HANDSHAKE_LEN, unknown_then_unchoke,
+           sizeof(unknown_then_unchoke));
+
+    TestPeerCtx ctx = {.says = slice_u8_make(skipped, sizeof(skipped))};
+    const Env env = test_env_peer_make(&ctx);
+
+    assert(TorrentPeerStateHandshaked ==
+           test_peer_run(&test_io, &ctx, &env, &network_ctx));
+
+    // One read for all of it and one that reaches end of file, which is the
+    // good path: the unknown tag cost no extra read and ended nothing.
+    assert(2 == ctx.read_calls);
+    assert(1 == ctx.close_calls);
+    assert(0 == ctx.close_socket_calls);
+    assert(test_peer_pool_is_empty(&network_ctx));
+  }
+
+  // The same stream cut every possible way, so the skip is not something that
+  // only works when the whole message lands in one read.
+  {
+    const u8 unknown_then_unchoke[] = {
+        0x00, 0x00, 0x00, 0x03, 0x63, 0xaa, 0xbb, 0x00, 0x00, 0x00, 0x01, 0x01};
+
+    u8 skipped[TEST_HANDSHAKE_LEN + sizeof(unknown_then_unchoke)] = {0};
+    test_handshake_fill(skipped, network_ctx.info_hash,
+                        slice_u8_make(peer_id_bytes, sizeof(peer_id_bytes)));
+    memcpy(skipped + TEST_HANDSHAKE_LEN, unknown_then_unchoke,
+           sizeof(unknown_then_unchoke));
+    const Slice_u8 skipped_says = slice_u8_make(skipped, sizeof(skipped));
+
+    const usize chunks[] = {1, 2, 3, 5, 8, 13, 67, 68, 69, 70, 1024};
+    for (usize i = 0; i < sizeof(chunks) / sizeof(chunks[0]); i++) {
+      TestPeerCtx ctx = {.says = skipped_says, .chunk = chunks[i]};
+      const Env env = test_env_peer_make(&ctx);
+
+      assert(TorrentPeerStateHandshaked ==
+             test_peer_run(&test_io, &ctx, &env, &network_ctx));
+
+      assert(1 == ctx.close_calls);
+      assert(0 == ctx.close_socket_calls);
+      assert(test_peer_pool_is_empty(&network_ctx));
+    }
   }
 }
 

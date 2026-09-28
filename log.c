@@ -28,9 +28,7 @@ static void log(const Logger *logger, LogLevel level, const char *fmt, ...)
     __attribute__((format(printf, 3, 4)));
 
 static void log(const Logger *logger, LogLevel level, const char *fmt, ...) {
-  if (!logger) {
-    return;
-  }
+  assert(logger);
   assert(fmt);
 
   if (0 == (level & logger->level_mask)) {
