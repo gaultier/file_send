@@ -1730,6 +1730,11 @@ struct TorrentNetworkCtx {
 // The payload of a `have`: one `u32`.
 #define TORRENT_PEER_MSG_HAVE_SIZE (1 + sizeof(u32))
 
+// A message that is a tag and no payload, so its length prefix says one byte.
+#define TORRENT_PEER_MSG_EMPTY_SIZE 1
+// What that costs in the send buffer: the prefix as well as the tag.
+#define TORRENT_PEER_MSG_EMPTY_LEN (sizeof(u32) + TORRENT_PEER_MSG_EMPTY_SIZE)
+
 // The `idx` and `begin` in front of a `piece`'s data.
 #define TORRENT_PEER_MSG_PIECE_HEADER_SIZE (1 + 2 * sizeof(u32))
 
@@ -2303,63 +2308,44 @@ static void torrent_peer_queue_keep_alive(TorrentPeer *peer) {
   log(&peer->logger, LogLevelDebug, "queued keep-alive");
 }
 
-static void torrent_peer_queue_interested(TorrentPeer *peer) {
+// Put a message that is a tag and nothing else in the send buffer: the length
+// prefix saying one byte, then the tag. `choke`, `unchoke`, `interested` and
+// `uninterested` are all this shape, so they are all this function.
+static void torrent_peer_queue_msg_empty(TorrentPeer *peer,
+                                         const TorrentMessageKind kind) {
   torrent_peer_assert_invariants(peer);
-  const u32 msg_size = 1;
+  // Only the four tags that carry nothing. Every other message has a payload
+  // and a length that has to count it.
+  assert(TorrentMessageKindChoke == kind || TorrentMessageKindUnchoke == kind ||
+         TorrentMessageKindInterested == kind ||
+         TorrentMessageKindUninterested == kind);
+  _Static_assert(TORRENT_PEER_MSG_EMPTY_LEN <= TORRENT_PEER_SEND_BUF_CAP,
+                 "an empty message has to fit");
+
   const usize send_len_before = peer->send_len;
 
-  _Static_assert(msg_size <= TORRENT_PEER_SEND_BUF_CAP, "has to fit");
-
-  // A send buffer this full means there are already bytes waiting to go out,
-  // which is the opposite of the silence a keep-alive is there to break: not
-  // sending one says nothing untrue, and the deadline has moved on either way.
-  if (TORRENT_PEER_SEND_BUF_CAP - peer->send_len < msg_size) {
+  // The whole message or none of it: half a message on the wire is a length
+  // prefix the peer would read the next message as the body of.
+  if (TORRENT_PEER_SEND_BUF_CAP - peer->send_len < TORRENT_PEER_MSG_EMPTY_LEN) {
     log(&peer->logger, LogLevelDebug,
-        "dropped an interested message: %zu byte(s) already queued",
-        peer->send_len);
+        "dropped a message: kind=%s send_len=%zu",
+        torrent_message_kind_to_cstr(kind), peer->send_len);
     return;
   }
 
-  memset(peer->send_buf + peer->send_len, (u32)ntohl((i32)msg_size),
-         sizeof(u32));
+  // The length counts the tag, and the tag is all there is.
+  u8_write_u32_be(peer->send_buf + peer->send_len, TORRENT_PEER_MSG_EMPTY_SIZE);
   peer->send_len += sizeof(u32);
 
-  peer->send_buf[peer->send_len++] = TorrentMessageKindInterested;
+  peer->send_buf[peer->send_len++] = (u8)kind;
 
-  log(&peer->logger, LogLevelDebug, "queued interested");
+  log(&peer->logger, LogLevelDebug, "queued a message: kind=%s send_len=%zu",
+      torrent_message_kind_to_cstr(kind), peer->send_len);
 
-  assert(send_len_before < peer->send_len);
-  assert(send_len_before + 5 == peer->send_len);
+  assert(send_len_before + TORRENT_PEER_MSG_EMPTY_LEN == peer->send_len);
+  assert(peer->send_len <= TORRENT_PEER_SEND_BUF_CAP);
 }
 
-static void torrent_peer_queue_unchoke(TorrentPeer *peer) {
-  torrent_peer_assert_invariants(peer);
-  const u32 msg_size = 1;
-  const usize send_len_before = peer->send_len;
-
-  _Static_assert(msg_size <= TORRENT_PEER_SEND_BUF_CAP, "has to fit");
-
-  // A send buffer this full means there are already bytes waiting to go out,
-  // which is the opposite of the silence a keep-alive is there to break: not
-  // sending one says nothing untrue, and the deadline has moved on either way.
-  if (TORRENT_PEER_SEND_BUF_CAP - peer->send_len < msg_size) {
-    log(&peer->logger, LogLevelDebug,
-        "dropped an interested message: %zu byte(s) already queued",
-        peer->send_len);
-    return;
-  }
-
-  memset(peer->send_buf + peer->send_len, (u32)ntohl((i32)msg_size),
-         sizeof(u32));
-  peer->send_len += sizeof(u32);
-
-  peer->send_buf[peer->send_len++] = TorrentMessageKindUnchoke;
-
-  log(&peer->logger, LogLevelDebug, "queued unchoke");
-
-  assert(send_len_before < peer->send_len);
-  assert(send_len_before + 5 == peer->send_len);
-}
 
 // Hand one event to the peer and carry out whatever it asks for. This is the
 // whole of the bridge's write side: every command turns into bytes in the send
@@ -2401,11 +2387,11 @@ torrent_peer_dispatch(TorrentPeer *peer, const TorrentEvent event,
       break;
 
     case TorrentCommandKindInterested:
-      torrent_peer_queue_interested(peer);
+      torrent_peer_queue_msg_empty(peer, TorrentMessageKindInterested);
       break;
 
     case TorrentCommandKindUnchoke:
-      torrent_peer_queue_unchoke(peer);
+      torrent_peer_queue_msg_empty(peer, TorrentMessageKindUnchoke);
       break;
 
     case TorrentCommandKindClose:

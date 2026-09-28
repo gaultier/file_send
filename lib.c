@@ -382,6 +382,19 @@ slice_u8_consume_u32_be(Slice_u8 *slice, u32 *dst) {
   return true;
 }
 
+// The other half of `slice_u8_consume_u32_be`: four bytes, the most
+// significant first. Shifts and not `htonl`, so what lands in `dst` is the
+// same whatever order the host keeps its own integers in, and so that nothing
+// here depends on a socket header.
+static void u8_write_u32_be(u8 dst[static 4], const u32 value) {
+  assert(dst);
+
+  dst[0] = (u8)(value >> 24);
+  dst[1] = (u8)(value >> 16);
+  dst[2] = (u8)(value >> 8);
+  dst[3] = (u8)(value >> 0);
+}
+
 // The extension of the last component of `path`, dot included, or an empty
 // slice when there is none. The result borrows from `path`: nothing is
 // copied, and it is always a suffix of the input.

@@ -149,6 +149,58 @@ static void test_usize_round_up_multiple_of(void) {
   }
 }
 
+// The length prefix every peer message carries. Its counterpart on the read
+// side is `slice_u8_consume_u32_be`, so the two are checked against each other
+// as well as against bytes written out by hand.
+static void test_u8_write_u32_be(void) {
+  // The most significant byte first, whatever the host thinks of that order.
+  {
+    u8 dst[4] = {0xaa, 0xaa, 0xaa, 0xaa};
+    u8_write_u32_be(dst, 0x01020304);
+    assert(0x01 == dst[0]);
+    assert(0x02 == dst[1]);
+    assert(0x03 == dst[2]);
+    assert(0x04 == dst[3]);
+  }
+
+  // A length of one, which is what `interested`, `unchoke` and their two
+  // neighbours carry. Three zero bytes and then the one: written the other way
+  // round it is a keep-alive followed by a length in the tens of millions, and
+  // a peer answers that with `packet too large`.
+  {
+    u8 dst[4] = {0xaa, 0xaa, 0xaa, 0xaa};
+    u8_write_u32_be(dst, TORRENT_PEER_MSG_EMPTY_SIZE);
+    assert(0x00 == dst[0]);
+    assert(0x00 == dst[1]);
+    assert(0x00 == dst[2]);
+    assert(0x01 == dst[3]);
+  }
+
+  // The ends of the range, and nothing written past the four bytes.
+  {
+    const u32 values[] = {0,          1,          0xff,       0x100,
+                          0xffff,     0x10000,    0x00ff00ff, 0xffffff00,
+                          0xfffffffe, 0xffffffff};
+
+    for (usize i = 0; i < sizeof(values) / sizeof(values[0]); i++) {
+      u8 dst[6] = {0xaa, 0, 0, 0, 0, 0xaa};
+      u8_write_u32_be(dst + 1, values[i]);
+
+      // Read back by the parser's own helper: the two have to be inverses, or
+      // this process cannot read what it just sent.
+      Slice_u8 read = slice_u8_make(dst + 1, 4);
+      u32 got = 0;
+      assert(slice_u8_consume_u32_be(&read, &got));
+      assert(values[i] == got);
+      assert(0 == read.len);
+
+      // The guard bytes on either side.
+      assert(0xaa == dst[0]);
+      assert(0xaa == dst[5]);
+    }
+  }
+}
+
 static void test_next_power_of_two(void) {
   assert(1 == next_power_of_two(0));
   assert(1 == next_power_of_two(1));
@@ -779,6 +831,21 @@ _Static_assert(TEST_HANDSHAKE_LEN == TORRENT_PEER_HANDSHAKE_LEN,
                "the code and the wire format have to agree");
 
 // The bytes of a well-formed handshake for `info_hash`, sent by `peer_id`.
+// What a connection says the moment the other side's handshake lands: ours
+// went out first, then `interested` and `unchoke`, each a length prefix of one
+// and its tag. Spelled out rather than taken from the code that writes them,
+// because the bug this guards against was a length prefix written with
+// `memset`, which put four zero bytes there and turned the tag that followed
+// into the top byte of the next message's length.
+static const u8 test_peer_greeting[] = {0x00, 0x00, 0x00, 0x01,
+                                        TorrentMessageKindInterested,
+                                        0x00, 0x00, 0x00, 0x01,
+                                        TorrentMessageKindUnchoke};
+#define TEST_PEER_GREETING_LEN (TEST_HANDSHAKE_LEN + 10)
+_Static_assert(TEST_PEER_GREETING_LEN ==
+                   TEST_HANDSHAKE_LEN + sizeof(test_peer_greeting),
+               "the two have to agree");
+
 static void test_handshake_fill(u8 dst[TEST_HANDSHAKE_LEN], Slice_u8 info_hash,
                                 Slice_u8 peer_id) {
   assert(dst);
@@ -1946,7 +2013,8 @@ static void test_torrent_peer_state_machine(void) {
 
     // Theirs, then the one that finds nothing behind it.
     assert(2 == ctx.read_calls);
-    assert(1 == ctx.write_calls);
+    // Ours, then the greeting their handshake set off.
+    assert(2 == ctx.write_calls);
     assert(1 == ctx.close_calls);
     assert(0 == ctx.close_socket_calls);
     assert(test_peer_pool_is_empty(&network_ctx));
@@ -1964,8 +2032,8 @@ static void test_torrent_peer_state_machine(void) {
     assert(TorrentPeerStateHandshaked ==
            test_peer_run(&test_io, &ctx, &env, &network_ctx));
 
-    // 68 bytes and no more: the handshake is the only thing sent so far.
-    assert(TEST_HANDSHAKE_LEN == ctx.written_len);
+    // The handshake first, and the greeting behind it.
+    assert(TEST_PEER_GREETING_LEN == ctx.written_len);
     memcpy(sent, ctx.written, sizeof(sent));
 
     // It has to pass the same check we apply to a peer's, against the info hash
@@ -1988,18 +2056,32 @@ static void test_torrent_peer_state_machine(void) {
   // to while the write drains: one that hung up first would end the connection
   // before the interesting part.
   {
+    // Their handshake, then four keep-alives: a peer that is still there while
+    // the greeting drains. At one byte a write, the greeting needs ten turns to
+    // go, and end of file in any of them would hang up with it half sent.
+    u8 quiet[TEST_HANDSHAKE_LEN + 16] = {0};
+    memcpy(quiet, handshake, sizeof(handshake));
+    const Slice_u8 unhurried = slice_u8_make(quiet, sizeof(quiet));
+
     const usize chunks[] = {1, 7, 33, 67, 68};
     for (usize i = 0; i < sizeof(chunks) / sizeof(chunks[0]); i++) {
-      TestPeerCtx ctx = {.says = whole, .chunk = 1, .write_chunk = chunks[i]};
+      TestPeerCtx ctx = {
+          .says = unhurried, .chunk = 1, .write_chunk = chunks[i]};
       const Env env = test_env_peer_make(&ctx);
 
       assert(TorrentPeerStateHandshaked ==
              test_peer_run(&test_io, &ctx, &env, &network_ctx));
 
-      assert(TEST_HANDSHAKE_LEN == ctx.written_len);
+      assert(TEST_PEER_GREETING_LEN == ctx.written_len);
       assert(0 == memcmp(ctx.written, sent, sizeof(sent)));
-      // As many writes as the chunk size needs, and not one more.
-      assert((TEST_HANDSHAKE_LEN + chunks[i] - 1) / chunks[i] ==
+      assert(0 == memcmp(ctx.written + TEST_HANDSHAKE_LEN, test_peer_greeting,
+                         sizeof(test_peer_greeting)));
+      // As many writes as the chunk size needs, and not one more. The handshake
+      // and the greeting are counted apart because the second is only queued
+      // once the first has gone and their answer has come back, so no write
+      // ever carries bytes of both.
+      assert((TEST_HANDSHAKE_LEN + chunks[i] - 1) / chunks[i] +
+                 (sizeof(test_peer_greeting) + chunks[i] - 1) / chunks[i] ==
              ctx.write_calls);
       assert(1 == ctx.close_calls);
       assert(test_peer_pool_is_empty(&network_ctx));
@@ -2524,9 +2606,12 @@ static void test_torrent_peer_run(void) {
 
     const u64 later = now + 5 * Second;
 
-    // Nothing goes out. A bitfield will, once there are pieces to announce it
-    // with.
-    assert(0 == test_peer_actor_run(&peer, TorrentEventKindHandshake, later));
+    // `interested` says we want what they have, `unchoke` says they may ask
+    // for what we have. A bitfield will join them, once there are pieces to
+    // announce.
+    assert(2 == test_peer_actor_run(&peer, TorrentEventKindHandshake, later));
+    assert(TorrentCommandKindInterested == peer.commands[0].kind);
+    assert(TorrentCommandKindUnchoke == peer.commands[1].kind);
     assert(TorrentPeerStateHandshaked == peer.state);
 
     // Silence is allowed from here on, so the interval opens up.
@@ -2655,7 +2740,10 @@ test_peer_handshaked(TestIo *test_io, TestPeerCtx *ctx, const Env *env,
   assert(network_ctx);
   assert(test_peer_pool_is_empty(network_ctx));
 
-  *ctx = (TestPeerCtx){.says = handshake};
+  // One read per turn gets one thing: their handshake, then their keep-alive.
+  // Without the cap a single read takes both, and the second turn below would
+  // find end of file where a live peer's silence should be.
+  *ctx = (TestPeerCtx){.says = handshake, .chunk = TEST_HANDSHAKE_LEN};
   test_io_make(test_io, env, test_peer_perform, ctx);
   test_io->now_ns = TEST_PEER_NOW_NS;
 
@@ -2668,7 +2756,6 @@ test_peer_handshaked(TestIo *test_io, TestPeerCtx *ctx, const Env *env,
   // waiting for a first message that never comes.
   const Error err = test_io->io.run_for_ns(&test_io->io, 1);
   assert(ErrKindNone == err.kind);
-  test_stdout_restore(saved);
 
   TorrentPeer *const peer = &network_ctx->pool.slots[0];
   assert(TorrentPeerStateHandshaked == peer->state);
@@ -2676,6 +2763,27 @@ test_peer_handshaked(TestIo *test_io, TestPeerCtx *ctx, const Env *env,
   assert(!peer->closing);
   assert(1 == ctx->write_calls);
   assert(1 == ctx->read_calls);
+
+  // The greeting was queued in that same turn and submitted by the pump, so it
+  // takes one more turn to reach the wire. Turning it here leaves the send
+  // buffer empty, so that every byte the deadline tests see afterwards is one a
+  // deadline put there. The read armed beside it runs in that turn too, which
+  // is why the script has one keep-alive left to answer it with: at end of file
+  // the connection would end here instead.
+  const Error err_greeting = test_io->io.run_for_ns(&test_io->io, 1);
+  assert(ErrKindNone == err_greeting.kind);
+  test_stdout_restore(saved);
+
+  assert(2 == ctx->write_calls);
+  assert(2 == ctx->read_calls);
+  assert(0 == peer->send_len);
+  assert(!peer->write_in_flight);
+  assert(peer->read_in_flight);
+
+  // The bytes themselves, in order.
+  assert(TEST_PEER_GREETING_LEN == ctx->written_len);
+  assert(0 == memcmp(ctx->written + TEST_HANDSHAKE_LEN, test_peer_greeting,
+                     sizeof(test_peer_greeting)));
 
   // Both were set the moment the handshake arrived, and no time has passed
   // since.
@@ -2717,14 +2825,19 @@ static void test_torrent_peer_deadlines(void) {
 
   test_network_ctx_init(&network_ctx);
 
-  u8 handshake[TEST_HANDSHAKE_LEN] = {0};
-  test_handshake_fill(handshake, network_ctx.info_hash,
-                      slice_u8_make(peer_id_bytes, sizeof(peer_id_bytes)));
-  const Slice_u8 whole = slice_u8_make(handshake, sizeof(handshake));
-
   // The four zero bytes a keep-alive is: a length prefix of nothing, with no tag
   // behind it. Spelled out rather than taken from the code that writes them.
   const u8 keep_alive[] = {0x00, 0x00, 0x00, 0x00};
+
+  // Their handshake and one keep-alive behind it, then nothing: what a peer
+  // that is there but has nothing to say sounds like. The keep-alive is what
+  // `test_peer_handshaked`'s second turn reads; every turn after it is end of
+  // file, which is how each block below gets its slot back.
+  u8 handshake[TEST_HANDSHAKE_LEN + sizeof(keep_alive)] = {0};
+  test_handshake_fill(handshake, network_ctx.info_hash,
+                      slice_u8_make(peer_id_bytes, sizeof(peer_id_bytes)));
+  memcpy(handshake + TEST_HANDSHAKE_LEN, keep_alive, sizeof(keep_alive));
+  const Slice_u8 whole = slice_u8_make(handshake, sizeof(handshake));
 
   // The wait, on its own: the nearest deadline when it is nearer than the
   // ceiling, the ceiling when it is not, and the ceiling again when there is no
@@ -2770,7 +2883,8 @@ static void test_torrent_peer_deadlines(void) {
                                        test_io.now_ns));
 
     // Nothing went out and nothing moved.
-    assert(1 == ctx.write_calls);
+    assert(2 == ctx.write_calls);
+    assert(TEST_PEER_GREETING_LEN == ctx.written_len);
     assert(TEST_PEER_NOW_NS + TORRENT_PEER_KEEP_ALIVE_NS ==
            peer->keep_alive_due_at);
     assert(!peer->closing);
@@ -2800,13 +2914,13 @@ static void test_torrent_peer_deadlines(void) {
 
     // Queued and submitted by the walk; performed by the loop, and not before.
     assert(peer->write_in_flight);
-    assert(1 == ctx.write_calls);
+    assert(2 == ctx.write_calls);
 
     test_peer_drain_empty(&test_io, &network_ctx);
 
-    assert(2 == ctx.write_calls);
-    assert(TEST_HANDSHAKE_LEN + sizeof(keep_alive) == ctx.written_len);
-    assert(0 == memcmp(ctx.written + TEST_HANDSHAKE_LEN, keep_alive,
+    assert(3 == ctx.write_calls);
+    assert(TEST_PEER_GREETING_LEN + sizeof(keep_alive) == ctx.written_len);
+    assert(0 == memcmp(ctx.written + TEST_PEER_GREETING_LEN, keep_alive,
                        sizeof(keep_alive)));
     assert(1 == ctx.close_calls);
   }
@@ -2842,9 +2956,9 @@ static void test_torrent_peer_deadlines(void) {
     test_peer_drain_empty(&test_io, &network_ctx);
 
     assert(1 == ctx.close_calls);
-    // Only the handshake ever went out: no keep-alive on the way to the close.
-    assert(1 == ctx.write_calls);
-    assert(TEST_HANDSHAKE_LEN == ctx.written_len);
+    // Only the greeting ever went out: no keep-alive on the way to the close.
+    assert(2 == ctx.write_calls);
+    assert(TEST_PEER_GREETING_LEN == ctx.written_len);
   }
 
   // The whole life of a silent peer: one keep-alive at two minutes, a close at
@@ -2872,7 +2986,7 @@ static void test_torrent_peer_deadlines(void) {
     test_peer_drain_empty(&test_io, &network_ctx);
 
     // The one keep-alive, and nothing after it.
-    assert(TEST_HANDSHAKE_LEN + sizeof(keep_alive) == ctx.written_len);
+    assert(TEST_PEER_GREETING_LEN + sizeof(keep_alive) == ctx.written_len);
     assert(1 == ctx.close_calls);
   }
 
@@ -2913,6 +3027,66 @@ static void test_torrent_peer_deadlines(void) {
 
     // Nothing was ever submitted for this one, so the slot goes back by hand
     // rather than through a hang-up there is nothing to hang up on.
+    torrent_peer_ctx_pool_release(&network_ctx.pool, peer);
+    assert(test_peer_pool_is_empty(&network_ctx));
+  }
+
+  // The four messages that are a tag and nothing else, byte for byte, and the
+  // edge of the send buffer they are written at. The room check has to count
+  // the length prefix as well as the tag: counting only the tag leaves four
+  // bytes looking like enough, and the fifth then lands past the buffer.
+  {
+    TestPeerCtx ctx = {0};
+    const Env env = test_env_peer_make(&ctx);
+    test_io_make(&test_io, &env, test_peer_perform, &ctx);
+
+    assert(test_peer_pool_is_empty(&network_ctx));
+    TorrentPeer *const peer = torrent_peer_ctx_pool_acquire(&network_ctx.pool);
+    assert(peer);
+
+    const Ipv4Addr addr = {.ip = 0x7f000001, .port = 6881};
+    const i32 saved = test_stdout_silence();
+    torrent_peer_init(peer, &test_io.io, &network_ctx, addr, TEST_PEER_FD,
+                      addr.ip);
+    peer->state = TorrentPeerStateHandshaked;
+
+    const TorrentMessageKind kinds[] = {
+        TorrentMessageKindChoke, TorrentMessageKindUnchoke,
+        TorrentMessageKindInterested, TorrentMessageKindUninterested};
+
+    // One after another, so that the second is written where the first left off
+    // and not over it.
+    for (usize i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+      torrent_peer_queue_msg_empty(peer, kinds[i]);
+
+      const u8 *const written =
+          peer->send_buf + i * TORRENT_PEER_MSG_EMPTY_LEN;
+      // Three zero bytes and a one: the length, counting the tag behind it.
+      assert(0x00 == written[0]);
+      assert(0x00 == written[1]);
+      assert(0x00 == written[2]);
+      assert(0x01 == written[3]);
+      assert(kinds[i] == written[4]);
+      assert((i + 1) * TORRENT_PEER_MSG_EMPTY_LEN == peer->send_len);
+    }
+
+    // One byte short of enough: nothing is written, not even the part that
+    // would have fit. Half a message on the wire is worse than none, the peer
+    // reading whatever follows as its body.
+    peer->send_len = TORRENT_PEER_SEND_BUF_CAP - TORRENT_PEER_MSG_EMPTY_LEN + 1;
+    torrent_peer_queue_msg_empty(peer, TorrentMessageKindUnchoke);
+    assert(TORRENT_PEER_SEND_BUF_CAP - TORRENT_PEER_MSG_EMPTY_LEN + 1 ==
+           peer->send_len);
+
+    // And exactly enough, which fills the buffer to the brim.
+    peer->send_len = TORRENT_PEER_SEND_BUF_CAP - TORRENT_PEER_MSG_EMPTY_LEN;
+    torrent_peer_queue_msg_empty(peer, TorrentMessageKindInterested);
+    test_stdout_restore(saved);
+
+    assert(TORRENT_PEER_SEND_BUF_CAP == peer->send_len);
+    assert(TorrentMessageKindInterested ==
+           peer->send_buf[TORRENT_PEER_SEND_BUF_CAP - 1]);
+
     torrent_peer_ctx_pool_release(&network_ctx.pool, peer);
     assert(test_peer_pool_is_empty(&network_ctx));
   }
@@ -7413,6 +7587,7 @@ static void test(const char *filter) {
       {"isize_from_usize", test_isize_from_usize},
       {"usize_round_up_multiple_of", test_usize_round_up_multiple_of},
       {"next_power_of_two", test_next_power_of_two},
+      {"u8_write_u32_be", test_u8_write_u32_be},
       {"arena_alloc", test_arena_alloc},
 #if defined(PLATFORM_UNIX)
       {"unix_error_from_errno", test_unix_error_from_errno},
