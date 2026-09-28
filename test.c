@@ -1288,6 +1288,55 @@ static void test_torrent_peer_pool_exhaustion(void) {
   assert(1 == ctx.close_calls);
 }
 
+// The two names that go into a peer's log lines. Every enumerator is listed here
+// by hand rather than walked over a range, because the point is that a new state
+// or a new tag has to be given a name: `-Wswitch-enum` makes the converter fail
+// to build, and this makes the name distinct once it is there.
+static void test_torrent_peer_to_cstr(void) {
+  const TorrentPeerState states[] = {
+      TorrentPeerStateInitial,
+      TorrentPeerStateSentHandshake,
+      TorrentPeerStateHandshaked,
+  };
+
+  for (usize i = 0; i < sizeof(states) / sizeof(states[0]); i++) {
+    const char *const got = torrent_peer_state_to_cstr(states[i]);
+    assert(got);
+    assert(strlen(got) > 0);
+
+    // No two states read the same, or a log line could not tell them apart.
+    for (usize j = 0; j < i; j++) {
+      assert(0 != strcmp(got, torrent_peer_state_to_cstr(states[j])));
+    }
+  }
+
+  const TorrentMessageKind kinds[] = {
+      TorrentMessageKindChoke,      TorrentMessageKindUnchoke,
+      TorrentMessageKindInterested, TorrentMessageKindUninterested,
+      TorrentMessageKindHave,       TorrentMessageKindBitfield,
+      TorrentMessageKindRequest,    TorrentMessageKindPiece,
+      TorrentMessageKindCancel,     TorrentMessageKindKeepAlive,
+  };
+
+  for (usize i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+    const char *const got = torrent_message_kind_to_cstr(kinds[i]);
+    assert(got);
+    assert(strlen(got) > 0);
+
+    for (usize j = 0; j < i; j++) {
+      assert(0 != strcmp(got, torrent_message_kind_to_cstr(kinds[j])));
+    }
+  }
+
+  // The names are the protocol's, so a log line reads against a packet capture.
+  assert(0 == strcmp("have", torrent_message_kind_to_cstr(
+                                 TorrentMessageKindHave)));
+  assert(0 == strcmp("bitfield", torrent_message_kind_to_cstr(
+                                     TorrentMessageKindBitfield)));
+  assert(0 == strcmp("keep-alive", torrent_message_kind_to_cstr(
+                                       TorrentMessageKindKeepAlive)));
+}
+
 // ---------- Peer messages ----------
 
 // Every message is a big-endian length, then that many bytes: a tag and its
@@ -2149,8 +2198,9 @@ static void test_torrent_peer_recv_buf_compacted(void) {
 
   TorrentPeer *const peer = torrent_peer_ctx_pool_acquire(&network_ctx.pool);
   assert(peer);
-  torrent_peer_init(peer, &test_io.io, &network_ctx,
-                    (Ipv4Addr){.ip = 0x7f000001, .port = 6881}, TEST_PEER_FD);
+  const Ipv4Addr peer_addr = {.ip = 0x7f000001, .port = 6881};
+  torrent_peer_init(peer, &test_io.io, &network_ctx, peer_addr, TEST_PEER_FD,
+                    peer_addr.ip);
 
   // Our own handshake has gone out already, which is the state a connection is in
   // from its first tick onwards: the initial state is the one before anything has
@@ -6625,6 +6675,7 @@ static void test(const char *filter) {
        test_io_listen_and_serve_setup_failures},
       {"io_listen_and_serve_accept", test_io_listen_and_serve_accept},
       {"torrent_peer_pool_exhaustion", test_torrent_peer_pool_exhaustion},
+      {"torrent_peer_to_cstr", test_torrent_peer_to_cstr},
       {"torrent_peer_parse_message", test_torrent_peer_parse_message},
       {"torrent_peer_state_machine", test_torrent_peer_state_machine},
       {"torrent_peer_messages", test_torrent_peer_messages},

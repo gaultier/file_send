@@ -1160,6 +1160,36 @@ typedef enum {
   TorrentMessageKindKeepAlive = 0xff,
 } TorrentMessageKind;
 
+// The name of `kind`, for diagnostics only. The protocol's own names, so a log
+// line can be read against a packet capture.
+__attribute__((warn_unused_result)) static const char *
+torrent_message_kind_to_cstr(TorrentMessageKind kind) {
+  switch (kind) {
+  case TorrentMessageKindChoke:
+    return "choke";
+  case TorrentMessageKindUnchoke:
+    return "unchoke";
+  case TorrentMessageKindInterested:
+    return "interested";
+  case TorrentMessageKindUninterested:
+    return "not interested";
+  case TorrentMessageKindHave:
+    return "have";
+  case TorrentMessageKindBitfield:
+    return "bitfield";
+  case TorrentMessageKindRequest:
+    return "request";
+  case TorrentMessageKindPiece:
+    return "piece";
+  case TorrentMessageKindCancel:
+    return "cancel";
+  case TorrentMessageKindKeepAlive:
+    return "keep-alive";
+  }
+
+  assert(0 && "unreachable");
+}
+
 typedef struct {
   u32 idx;
   u32 begin;
@@ -1188,6 +1218,21 @@ typedef enum {
   TorrentPeerStateSentHandshake,
   TorrentPeerStateHandshaked,
 } TorrentPeerState;
+
+// The name of `state`, for diagnostics only.
+__attribute__((warn_unused_result)) static const char *
+torrent_peer_state_to_cstr(TorrentPeerState state) {
+  switch (state) {
+  case TorrentPeerStateInitial:
+    return "initial";
+  case TorrentPeerStateSentHandshake:
+    return "sent-handshake";
+  case TorrentPeerStateHandshaked:
+    return "handshaked";
+  }
+
+  assert(0 && "unreachable");
+}
 
 typedef struct TorrentNetworkCtx TorrentNetworkCtx;
 
@@ -1811,7 +1856,8 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
   assert(io == peer->io);
   assert(!peer->closing);
 
-  log(peer->logger, LogLevelDebug, "tick %d", peer->state);
+  log(peer->logger, LogLevelDebug, "tick in %s",
+      torrent_peer_state_to_cstr(peer->state));
 
   switch (peer->state) {
   case TorrentPeerStateInitial: {
@@ -1881,15 +1927,17 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
         torrent_peer_close(peer);
         return;
       }
-      log(peer->logger, LogLevelDebug, "received message: present=%d kind=%d",
-          present, msg.kind);
-
       // What is left is the start of a message that has not all arrived, and it
       // stays where it is until the rest of it does.
       if (!present) {
+        log(peer->logger, LogLevelDebug,
+            "no whole message, %zu byte(s) buffered", peer->recv_len);
         drained = true;
         break;
       }
+
+      log(peer->logger, LogLevelDebug, "received %s",
+          torrent_message_kind_to_cstr(msg.kind));
 
       // Drop what was parsed, keeping the rest at the front of the buffer.
       const usize consumed = recv_len_before - recv.len;
@@ -1965,9 +2013,9 @@ static void torrent_peer_init(TorrentPeer *peer, IO *io,
   peer->id[0] = 1;
 
   char log_prefix[32] = {0};
-  snprintf((char *)log_prefix, sizeof(log_prefix) - 1,
-           "[peer %u.%u.%u.%u:%hu] ", ip >> 24 & 0xff, ip >> 16 & 0xff,
-           ip >> 8 & 0xff, ip >> 0 & 0xff, ip);
+  snprintf(log_prefix, sizeof(log_prefix), "[peer %u.%u.%u.%u:%hu] ",
+           ip >> 24 & 0xff, ip >> 16 & 0xff, ip >> 8 & 0xff, ip >> 0 & 0xff,
+           addr.port);
 
   peer->logger =
       log_make(network_ctx->log_level_mask, slice_u8_from_cstr(log_prefix));
