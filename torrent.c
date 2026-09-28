@@ -1586,7 +1586,7 @@ static void torrent_peer_on_close(IoCompletion *completion, Error err,
   assert(!peer->read_in_flight);
   assert(!peer->write_in_flight);
 
-  log(peer->logger, LogLevelInfo, "closed");
+  log(&peer->logger, LogLevelInfo, "closed");
 
   // Whatever hanging up reported is of no use to anyone: the connection is
   // over, and there is nothing left to do differently.
@@ -1602,7 +1602,7 @@ static void torrent_peer_on_close(IoCompletion *completion, Error err,
 // report comes back here and finishes the job.
 static void torrent_peer_close(TorrentPeer *peer) {
   torrent_peer_assert_invariants(peer);
-  log(peer->logger, LogLevelInfo, "queuing close");
+  log(&peer->logger, LogLevelInfo, "queuing close");
 
   peer->closing = true;
 
@@ -1683,7 +1683,7 @@ torrent_peer_read(TorrentPeer *peer, IO *io) {
   assert(!peer->read_in_flight);
   assert(!peer->closing);
 
-  log(peer->logger, LogLevelDebug, "queuing read: space=%zu",
+  log(&peer->logger, LogLevelDebug, "queuing read: space=%zu",
       TORRENT_PEER_RECV_BUF_CAP - peer->recv_len);
 
   const Slice_u8 dst =
@@ -1710,7 +1710,7 @@ torrent_peer_write(TorrentPeer *peer, IO *io) {
   assert(!peer->write_in_flight);
   assert(!peer->closing);
 
-  log(peer->logger, LogLevelDebug, "queuing write: space=%zu", peer->send_len);
+  log(&peer->logger, LogLevelDebug, "queuing write: space=%zu", peer->send_len);
 
   const Slice_u8 src = slice_u8_make(peer->send_buf, peer->send_len);
 
@@ -1735,7 +1735,7 @@ static void torrent_peer_on_write(IoCompletion *completion, Error err,
   assert(peer->send_len > 0);
   assert(res <= peer->send_len);
 
-  log(peer->logger, LogLevelDebug, "on_write");
+  log(&peer->logger, LogLevelDebug, "on_write");
 
   peer->write_in_flight = false;
 
@@ -1781,7 +1781,7 @@ static void torrent_peer_on_read(IoCompletion *completion, Error err,
   // does too.
   assert(res <= TORRENT_PEER_RECV_BUF_CAP - peer->recv_len);
 
-  log(peer->logger, LogLevelDebug, "on_read");
+  log(&peer->logger, LogLevelDebug, "on_read");
 
   peer->read_in_flight = false;
 
@@ -1841,7 +1841,7 @@ static void torrent_peer_queue_handshake(TorrentPeer *peer) {
       slice_u8_make(peer->send_buf, TORRENT_PEER_HANDSHAKE_LEN),
       peer->info_hash, &queued_peer_id));
 
-  log(peer->logger, LogLevelDebug, "queued handshake");
+  log(&peer->logger, LogLevelDebug, "queued handshake");
 }
 
 // One pass of the state machine, run from whichever callback has just reported.
@@ -1856,7 +1856,7 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
   assert(io == peer->io);
   assert(!peer->closing);
 
-  log(peer->logger, LogLevelDebug, "tick in %s",
+  log(&peer->logger, LogLevelDebug, "tick in %s",
       torrent_peer_state_to_cstr(peer->state));
 
   switch (peer->state) {
@@ -1881,13 +1881,13 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
 
     Slice_u8 peer_id = {0};
     if (!torrent_check_handshake(recv, peer->info_hash, &peer_id)) {
-      log(peer->logger, LogLevelError, "received invalid handshake");
+      log(&peer->logger, LogLevelError, "received invalid handshake");
       torrent_peer_close(peer);
       return;
     }
     assert(TORRENT_PEER_ID_LEN == peer_id.len);
 
-    log(peer->logger, LogLevelInfo, "received valid handshake");
+    log(&peer->logger, LogLevelInfo, "received valid handshake");
 
     peer->state = TorrentPeerStateHandshaked;
 
@@ -1922,7 +1922,7 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
 
       const Error err = torrent_peer_parse_message(&recv, &msg, &present);
       if (ErrKindNone != err.kind) {
-        log(peer->logger, LogLevelError, "received invalid message");
+        log(&peer->logger, LogLevelError, "received invalid message");
         error_print("failed to parse a peer message", err);
         torrent_peer_close(peer);
         return;
@@ -1930,13 +1930,13 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
       // What is left is the start of a message that has not all arrived, and it
       // stays where it is until the rest of it does.
       if (!present) {
-        log(peer->logger, LogLevelDebug,
+        log(&peer->logger, LogLevelDebug,
             "no whole message, %zu byte(s) buffered", peer->recv_len);
         drained = true;
         break;
       }
 
-      log(peer->logger, LogLevelDebug, "received %s",
+      log(&peer->logger, LogLevelDebug, "received %s",
           torrent_message_kind_to_cstr(msg.kind));
 
       // Drop what was parsed, keeping the rest at the front of the buffer.
@@ -2020,7 +2020,7 @@ static void torrent_peer_init(TorrentPeer *peer, IO *io,
   peer->logger =
       log_make(network_ctx->log_level_mask, slice_u8_from_cstr(log_prefix));
 
-  log(peer->logger, LogLevelDebug, "init");
+  log(&peer->logger, LogLevelDebug, "init");
 }
 
 static void torrent_peer_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
@@ -2042,7 +2042,7 @@ static void torrent_peer_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
   }
 
   torrent_peer_init(peer, io, network_ctx, accept_addr, accept_socket, ip);
-  log(peer->logger, LogLevelInfo, "accepted");
+  log(&peer->logger, LogLevelInfo, "accepted");
 
   // Nothing buffered yet and the initial state, so the tick's first move is the
   // read that waits for the handshake. It hangs up on the peer itself if that
