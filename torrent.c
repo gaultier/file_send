@@ -2034,7 +2034,7 @@ static void torrent_peer_close(TorrentPeer *peer) {
     // The close was never submitted, so `torrent_peer_on_close` will not run:
     // hang up here instead, and hand the slot back, or the connection would
     // cost a slot for the life of the process.
-    error_print("failed to hang up on a peer", err);
+    log_err(&peer->logger, "failed to hang up on a peer", err);
     (void)io->env->close_socket(io->env, peer->socket);
     torrent_peer_ctx_pool_release(&peer->network_ctx->pool, peer);
   }
@@ -2169,7 +2169,7 @@ static void torrent_peer_on_write(IoCompletion *completion, Error err,
   // to do here whatever comes back.
   if (ErrKindNone != err.kind || 0 == res) {
     if (ErrKindNone != err.kind) {
-      error_print("failed to write to a peer", err);
+      log_err(&peer->logger, "failed to write to a peer", err);
     }
 
     const bool alive = torrent_peer_dispatch(
@@ -2218,7 +2218,7 @@ static void torrent_peer_on_read(IoCompletion *completion, Error err,
   // there is nothing left to do here whatever comes back.
   if (ErrKindNone != err.kind || 0 == res) {
     if (ErrKindNone != err.kind) {
-      error_print("failed to read from a peer", err);
+      log_err(&peer->logger, "failed to read from a peer", err);
     }
 
     const bool alive = torrent_peer_dispatch(
@@ -2367,7 +2367,7 @@ static void torrent_peer_pump(TorrentPeer *peer, IO *io) {
   if (peer->send_len > 0 && !peer->write_in_flight) {
     const Error err = torrent_peer_write(peer, io);
     if (ErrKindNone != err.kind) {
-      error_print("failed to write to a peer", err);
+      log_err(&peer->logger, "failed to write to a peer", err);
       torrent_peer_close(peer);
       return;
     }
@@ -2380,7 +2380,7 @@ static void torrent_peer_pump(TorrentPeer *peer, IO *io) {
   if (!peer->read_in_flight) {
     const Error err = torrent_peer_read(peer, io);
     if (ErrKindNone != err.kind) {
-      error_print("failed to read from a peer", err);
+      log_err(&peer->logger, "failed to read from a peer", err);
       torrent_peer_close(peer);
       return;
     }
@@ -2450,7 +2450,7 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io, const u64 now_ns) {
       const Error err = torrent_peer_parse_message(&recv, &msg);
       if (ErrKindNone != err.kind) {
         log(&peer->logger, LogLevelError, "received invalid message");
-        error_print("failed to parse a peer message", err);
+        log_err(&peer->logger, "failed to parse a peer message", err);
         // `Malformed` is a `Close` in every state, so there is nothing left
         // to do here whatever comes back.
         const bool alive = torrent_peer_dispatch(
@@ -2560,7 +2560,7 @@ static void torrent_peer_init(TorrentPeer *peer, IO *io,
            addr.port);
 
   peer->logger =
-      log_make(network_ctx->log_level_mask, slice_u8_from_cstr(log_prefix));
+      logger_make(network_ctx->log_level_mask, slice_u8_from_cstr(log_prefix));
 
   log(&peer->logger, LogLevelDebug, "init");
 }

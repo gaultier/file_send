@@ -6,7 +6,8 @@
 typedef enum {
   LogLevelDebug = 1,
   LogLevelInfo = 2,
-  LogLevelError = 4
+  LogLevelError = 4,
+  LogLevelAll = LogLevelDebug | LogLevelInfo | LogLevelError,
 } LogLevel;
 
 typedef struct {
@@ -14,8 +15,8 @@ typedef struct {
   u8 prefix[32];
 } Logger;
 
-__attribute__((warn_unused_result)) static Logger log_make(u32 level_mask,
-                                                           Slice_u8 prefix) {
+__attribute__((warn_unused_result)) static Logger logger_make(u32 level_mask,
+                                                              Slice_u8 prefix) {
   Logger logger = {.level_mask = level_mask};
   memcpy(&logger.prefix, prefix.data,
          prefix.len < sizeof(logger.prefix) ? prefix.len
@@ -43,4 +44,27 @@ static void log(const Logger *logger, LogLevel level, const char *fmt, ...) {
   va_end(args);
 
   printf("\n");
+}
+//
+static void log_err(const Logger *logger, const char *context, Error err) {
+  assert(context);
+
+  if (0 == err.data) {
+    log(logger, LogLevelError, "%s: %s\n", context,
+        error_kind_to_cstr(err.kind));
+    return;
+  }
+
+  char os_msg[256] = {0};
+
+  if (!platform_error_describe(err.data, os_msg, sizeof(os_msg))) {
+    // The description did not fit or the number is not one the system knows;
+    // the number itself is still worth printing.
+    log(logger, LogLevelError, "%s: %s (errno %" PRIu64 ")\n", context,
+        error_kind_to_cstr(err.kind), err.data);
+    return;
+  }
+
+  log(logger, LogLevelError, "%s: %s (errno %" PRIu64 ": %s)\n", context,
+      error_kind_to_cstr(err.kind), err.data, os_msg);
 }

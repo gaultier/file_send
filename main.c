@@ -23,6 +23,7 @@ int main(i32 argc, char *argv[]) {
   assert(argv);
 
   const Env *const env = env_platform_make();
+  const Logger logger = logger_make(LogLevelAll, slice_u8_from_cstr("[main]"));
 
   const char *const cmd = argc >= 2 ? argv[1] : "";
   const usize arena_cap = 32 * MiB;
@@ -56,7 +57,8 @@ int main(i32 argc, char *argv[]) {
   Error err = io_platform_make(&arena, env, backend, &io);
   if (ErrKindNone != err.kind) {
     fprintf(stderr, "IO backend: %s\n", io_backend_to_cstr(backend));
-    error_print("failed to create the IO implementation for the platform", err);
+    log_err(&logger, "failed to create the IO implementation for the platform",
+            err);
     return 1;
   }
 
@@ -76,7 +78,7 @@ int main(i32 argc, char *argv[]) {
 
     err = io_map_file_blocking(io, file_path, FileOpenOptionsReadOnly, &input);
     if (ErrKindNone != err.kind) {
-      error_print("failed to open file", err);
+      log_err(&logger, "failed to open file", err);
       return 1;
     }
 
@@ -90,7 +92,7 @@ int main(i32 argc, char *argv[]) {
                                         &torrent_file_data, info_hash, scratch,
                                         &arena);
     if (ErrKindNone != err.kind) {
-      error_print("failed to generate torrent file data", err);
+      log_err(&logger, "failed to generate torrent file data", err);
       return 1;
     }
 
@@ -98,14 +100,14 @@ int main(i32 argc, char *argv[]) {
     err = path_with_ext(file_path, slice_u8_from_cstr((char *)"torrent"),
                         PATH_SEPARATOR_UNIX, &torrent_file_path, &arena);
     if (ErrKindNone != err.kind) {
-      error_print("failed to compute the torrent path", err);
+      log_err(&logger, "failed to compute the torrent path", err);
       return 1;
     }
 
     err =
         io_write_all_to_file_blocking(io, torrent_file_path, torrent_file_data);
     if (ErrKindNone != err.kind) {
-      error_print("failed to write torrent file", err);
+      log_err(&logger, "failed to write torrent file", err);
       return 1;
     }
   } else if (0 == strcmp(cmd, "share")) {
@@ -125,14 +127,14 @@ int main(i32 argc, char *argv[]) {
 
     err = io_map_file_blocking(io, file_path, FileOpenOptionsReadOnly, &input);
     if (ErrKindNone != err.kind) {
-      error_print("failed to open file", err);
+      log_err(&logger, "failed to open file", err);
       return 1;
     }
 
     BencodeValue metainfo_dict = {0};
     err = bencode_parse(&input, &arena, scratch, &metainfo_dict);
     if (ErrKindNone != err.kind) {
-      error_print("failed to parse .torrent data", err);
+      log_err(&logger, "failed to parse .torrent data", err);
       return 1;
     }
     if (input.len > 0) {
@@ -157,14 +159,14 @@ int main(i32 argc, char *argv[]) {
 
     err = torrent_validate_info_dict(*info_dict);
     if (ErrKindNone != err.kind) {
-      error_print("invalid info dictionary from .torrent data", err);
+      log_err(&logger, "invalid info dictionary from .torrent data", err);
       return 1;
     }
 
     Slice_u8 info_encoded = {0};
     err = bencode_encode(*info_dict, &info_encoded, &scratch);
     if (ErrKindNone != err.kind) {
-      error_print("failed to encode info", err);
+      log_err(&logger, "failed to encode info", err);
       return 1;
     }
 
@@ -183,7 +185,7 @@ int main(i32 argc, char *argv[]) {
     {
       Error err_udp = env->udp_multicast_open_ipv4(env, 0, &udp_socket);
       if (ErrKindNone != err_udp.kind) {
-        error_print("failed to open UDP multicast socket", err_udp);
+        log_err(&logger, "failed to open UDP multicast socket", err_udp);
         return 1;
       }
     }
@@ -195,7 +197,7 @@ int main(i32 argc, char *argv[]) {
         slice_u8_from_cstr("239.192.152.143:6771"), peer_port,
         info_hash_hex_trunc_slice, &arena, &udp_msg);
     if (ErrKindNone != err.kind) {
-      error_print("failed to craft UDP multicast message", err);
+      log_err(&logger, "failed to craft UDP multicast message", err);
       return 1;
     }
 
@@ -218,7 +220,7 @@ int main(i32 argc, char *argv[]) {
         err_sendto = io_once_wait(io, &once);
       }
       if (ErrKindNone != err_sendto.kind) {
-        error_print("failed to send UDP multicast message", err_sendto);
+        log_err(&logger, "failed to send UDP multicast message", err_sendto);
         return 1;
       }
       assert(once.res <= udp_msg.len);
@@ -237,7 +239,7 @@ int main(i32 argc, char *argv[]) {
     Error err_listen = io_listen_and_serve_tcp_ipv4(
         io, &server, &ctx, listen_addr, torrent_peer_on_accept);
     if (ErrKindNone != err_listen.kind) {
-      error_print("failed to listen and serve", err_listen);
+      log_err(&logger, "failed to listen and serve", err_listen);
       return 1;
     }
 
@@ -261,11 +263,11 @@ int main(i32 argc, char *argv[]) {
       }
     }
     if (ErrKindNone != err_run.kind) {
-      error_print("the event loop stopped", err_run);
+      log_err(&logger, "the event loop stopped", err_run);
       return 1;
     }
     if (ErrKindNone != server.err.kind) {
-      error_print("the listener stopped", server.err);
+      log_err(&logger, "the listener stopped", server.err);
       return 1;
     }
 

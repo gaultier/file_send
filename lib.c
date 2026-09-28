@@ -131,30 +131,6 @@ error_kind_to_cstr(ErrorKind kind) {
 __attribute__((warn_unused_result)) static bool
 platform_error_describe(u64 os_error, char *dst, usize dst_len);
 
-// Renders `err` to stderr, appending the operating system's own description
-// when the error carries an `errno`.
-static void error_print(const char *context, Error err) {
-  assert(context);
-
-  if (0 == err.data) {
-    fprintf(stderr, "%s: %s\n", context, error_kind_to_cstr(err.kind));
-    return;
-  }
-
-  char os_msg[256] = {0};
-
-  if (!platform_error_describe(err.data, os_msg, sizeof(os_msg))) {
-    // The description did not fit or the number is not one the system knows;
-    // the number itself is still worth printing.
-    fprintf(stderr, "%s: %s (errno %" PRIu64 ")\n", context,
-            error_kind_to_cstr(err.kind), err.data);
-    return;
-  }
-
-  fprintf(stderr, "%s: %s (errno %" PRIu64 ": %s)\n", context,
-          error_kind_to_cstr(err.kind), err.data, os_msg);
-}
-
 __attribute__((warn_unused_result)) static bool char_is_digit_ascii(u8 c) {
   return '0' <= c && c <= '9';
 }
@@ -763,10 +739,10 @@ struct IO {
   Error (*run_for_ns)(IO *io, usize ns);
 
   // Nanoseconds on a clock that only goes forward, from an epoch nobody is told
-  // about: good for a difference and for nothing else. This is the whole of what
-  // a deadline needs, and it is why there is no timer operation here -- nothing
-  // is armed, so there is nothing to cancel and nothing that can outlive what
-  // armed it.
+  // about: good for a difference and for nothing else. This is the whole of
+  // what a deadline needs, and it is why there is no timer operation here --
+  // nothing is armed, so there is nothing to cancel and nothing that can
+  // outlive what armed it.
   //
   // On `IO` and not on `Env`, though asking the platform the time is `Env`'s
   // sort of job: the loop is what wants it every turn, to size the next
