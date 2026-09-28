@@ -1337,8 +1337,8 @@ struct TorrentNetworkCtx {
 // the ordinary case, not a broken peer. `*present` true is one message
 // parsed, with `*data` advanced past it and `*dst_msg` filled in.
 __attribute__((warn_unused_result)) static Error
-torrent_peer_parse_message(Slice_u8 *data, TorrentPeerMessage *dst_msg,
-                           bool *present) {
+torrent_peer_parse_message(const Logger *logger, Slice_u8 *data,
+                           TorrentPeerMessage *dst_msg, bool *present) {
   assert(data);
   assert(dst_msg);
   assert(present);
@@ -1451,7 +1451,10 @@ torrent_peer_parse_message(Slice_u8 *data, TorrentPeerMessage *dst_msg,
     // TODO: v2 messages;
 
   default:
-    return (Error){.kind = ErrKindInvalidData};
+    log(logger, LogLevelError, "unknown message tag: tag=%u len=%u\n", msg_tag,
+        msg_size);
+
+    return (Error){.kind = ErrKindNone};
   }
 
   // Every path out of the switch either set a kind or reported an error.
@@ -1920,7 +1923,8 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io) {
       TorrentPeerMessage msg = {0};
       bool present = false;
 
-      const Error err = torrent_peer_parse_message(&recv, &msg, &present);
+      const Error err =
+          torrent_peer_parse_message(&peer->logger, &recv, &msg, &present);
       if (ErrKindNone != err.kind) {
         log(&peer->logger, LogLevelError, "received invalid message");
         error_print("failed to parse a peer message", err);

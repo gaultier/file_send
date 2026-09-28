@@ -728,9 +728,10 @@ static void test_io_make(TestIo *test_io, const Env *env, TestIoPerform perform,
   };
 }
 
-// More turns than draining anything here can need. A turn answers every operation
-// the fake is holding, so the only reason to need another is a callback that
-// submitted one, and nothing under test chains deeper than the pool is wide.
+// More turns than draining anything here can need. A turn answers every
+// operation the fake is holding, so the only reason to need another is a
+// callback that submitted one, and nothing under test chains deeper than the
+// pool is wide.
 #define TEST_IO_DRAIN_TURNS_MAX (4 * TEST_IO_IN_FLIGHT_MAX)
 
 // Turn the loop until nothing is outstanding. A parked operation is dropped
@@ -1085,8 +1086,8 @@ static void test_io_listen_and_serve_setup_failures(void) {
     const Env env = test_env_server_make(&ctx);
     TestIo test_io = {0};
     IoServer server = {0};
-    // `static`: the pool is a couple of megabytes of slots, which is more than a
-    // stack frame should hold, and a send buffer per slot doubled it.
+    // `static`: the pool is a couple of megabytes of slots, which is more than
+    // a stack frame should hold, and a send buffer per slot doubled it.
     static TorrentNetworkCtx network_ctx;
     test_network_ctx_init(&network_ctx);
 
@@ -1105,8 +1106,8 @@ static void test_io_listen_and_serve_setup_failures(void) {
     const Env env = test_env_server_make(&ctx);
     TestIo test_io = {0};
     IoServer server = {0};
-    // `static`: the pool is a couple of megabytes of slots, which is more than a
-    // stack frame should hold, and a send buffer per slot doubled it.
+    // `static`: the pool is a couple of megabytes of slots, which is more than
+    // a stack frame should hold, and a send buffer per slot doubled it.
     static TorrentNetworkCtx network_ctx;
     test_network_ctx_init(&network_ctx);
 
@@ -1136,8 +1137,8 @@ static void test_io_listen_and_serve_accept(void) {
     const Env env = test_env_server_make(&ctx);
     TestIo test_io = {0};
     IoServer server = {0};
-    // `static`: the pool is a couple of megabytes of slots, which is more than a
-    // stack frame should hold, and a send buffer per slot doubled it.
+    // `static`: the pool is a couple of megabytes of slots, which is more than
+    // a stack frame should hold, and a send buffer per slot doubled it.
     static TorrentNetworkCtx network_ctx;
     test_network_ctx_init(&network_ctx);
 
@@ -1167,8 +1168,8 @@ static void test_io_listen_and_serve_accept(void) {
     const Env env = test_env_server_make(&ctx);
     TestIo test_io = {0};
     IoServer server = {0};
-    // `static`: the pool is a couple of megabytes of slots, which is more than a
-    // stack frame should hold, and a send buffer per slot doubled it.
+    // `static`: the pool is a couple of megabytes of slots, which is more than
+    // a stack frame should hold, and a send buffer per slot doubled it.
     static TorrentNetworkCtx network_ctx;
     test_network_ctx_init(&network_ctx);
 
@@ -1205,8 +1206,8 @@ static void test_io_listen_and_serve_accept(void) {
     const Env env = test_env_server_make(&ctx);
     TestIo test_io = {0};
     IoServer server = {0};
-    // `static`: the pool is a couple of megabytes of slots, which is more than a
-    // stack frame should hold, and a send buffer per slot doubled it.
+    // `static`: the pool is a couple of megabytes of slots, which is more than
+    // a stack frame should hold, and a send buffer per slot doubled it.
     static TorrentNetworkCtx network_ctx;
     test_network_ctx_init(&network_ctx);
 
@@ -1229,8 +1230,8 @@ static void test_io_listen_and_serve_accept(void) {
     const Env env = test_env_server_make(&ctx);
     TestIo test_io = {0};
     IoServer server = {0};
-    // `static`: the pool is a couple of megabytes of slots, which is more than a
-    // stack frame should hold, and a send buffer per slot doubled it.
+    // `static`: the pool is a couple of megabytes of slots, which is more than
+    // a stack frame should hold, and a send buffer per slot doubled it.
     static TorrentNetworkCtx network_ctx;
     test_network_ctx_init(&network_ctx);
 
@@ -1288,10 +1289,10 @@ static void test_torrent_peer_pool_exhaustion(void) {
   assert(1 == ctx.close_calls);
 }
 
-// The two names that go into a peer's log lines. Every enumerator is listed here
-// by hand rather than walked over a range, because the point is that a new state
-// or a new tag has to be given a name: `-Wswitch-enum` makes the converter fail
-// to build, and this makes the name distinct once it is there.
+// The two names that go into a peer's log lines. Every enumerator is listed
+// here by hand rather than walked over a range, because the point is that a new
+// state or a new tag has to be given a name: `-Wswitch-enum` makes the
+// converter fail to build, and this makes the name distinct once it is there.
 static void test_torrent_peer_to_cstr(void) {
   const TorrentPeerState states[] = {
       TorrentPeerStateInitial,
@@ -1329,10 +1330,10 @@ static void test_torrent_peer_to_cstr(void) {
   }
 
   // The names are the protocol's, so a log line reads against a packet capture.
-  assert(0 == strcmp("have", torrent_message_kind_to_cstr(
-                                 TorrentMessageKindHave)));
-  assert(0 == strcmp("bitfield", torrent_message_kind_to_cstr(
-                                     TorrentMessageKindBitfield)));
+  assert(0 ==
+         strcmp("have", torrent_message_kind_to_cstr(TorrentMessageKindHave)));
+  assert(0 == strcmp("bitfield",
+                     torrent_message_kind_to_cstr(TorrentMessageKindBitfield)));
   assert(0 == strcmp("keep-alive", torrent_message_kind_to_cstr(
                                        TorrentMessageKindKeepAlive)));
 }
@@ -1343,9 +1344,9 @@ static void test_torrent_peer_to_cstr(void) {
 // payload. The length does not count itself.
 //
 // Three answers come back and a test has to tell them apart: a whole message,
-// "not yet" with the slice untouched, and a peer talking nonsense. The middle one
-// is the one a real network produces constantly and the one a parser is most
-// likely to get wrong, so most of what follows is about it.
+// "not yet" with the slice untouched, and a peer talking nonsense. The middle
+// one is the one a real network produces constantly and the one a parser is
+// most likely to get wrong, so most of what follows is about it.
 static void test_torrent_peer_parse_message(void) {
   // The wire bytes of each message this understands, tags included, so the tag
   // numbers are stated here and not taken from the enum under test.
@@ -1358,16 +1359,14 @@ static void test_torrent_peer_parse_message(void) {
   // `bitfield` is tag 5, and its length is however many bytes the bits need.
   const u8 bitfield[] = {0x00, 0x00, 0x00, 0x04, 0x05, 0xff, 0x80, 0x01};
   // `request` is tag 6: index, offset, length.
-  const u8 request[] = {0x00, 0x00, 0x00, 0x0d, 0x06, 0x00, 0x00, 0x00,
-                        0x07, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x40,
-                        0x00};
+  const u8 request[] = {0x00, 0x00, 0x00, 0x0d, 0x06, 0x00, 0x00, 0x00, 0x07,
+                        0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x40, 0x00};
   // `piece` is tag 7: index, offset, then the block.
   const u8 piece[] = {0x00, 0x00, 0x00, 0x0c, 0x07, 0x00, 0x00, 0x00,
                       0x02, 0x00, 0x00, 0x80, 0x00, 0xaa, 0xbb, 0xcc};
   // `cancel` is tag 8, shaped like a `request`.
-  const u8 cancel[] = {0x00, 0x00, 0x00, 0x0d, 0x08, 0x00, 0x00, 0x00,
-                       0x07, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x40,
-                       0x00};
+  const u8 cancel[] = {0x00, 0x00, 0x00, 0x0d, 0x08, 0x00, 0x00, 0x00, 0x07,
+                       0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x40, 0x00};
   // A keep-alive is a length of zero and nothing else: no tag, no payload.
   const u8 keep_alive[] = {0x00, 0x00, 0x00, 0x00};
 
@@ -1400,7 +1399,7 @@ static void test_torrent_peer_parse_message(void) {
       bool present = false;
 
       assert(ErrKindNone ==
-             torrent_peer_parse_message(&data, &msg, &present).kind);
+             torrent_peer_parse_message(NULL, &data, &msg, &present).kind);
       assert(present);
       assert(cases[i].kind == msg.kind);
       // The whole message was taken, length prefix and all.
@@ -1414,7 +1413,7 @@ static void test_torrent_peer_parse_message(void) {
     TorrentPeerMessage msg = {0};
     bool present = false;
     assert(ErrKindNone ==
-           torrent_peer_parse_message(&data, &msg, &present).kind);
+           torrent_peer_parse_message(NULL, &data, &msg, &present).kind);
     assert(present);
     assert(300 == msg.v.have);
   }
@@ -1423,7 +1422,7 @@ static void test_torrent_peer_parse_message(void) {
     TorrentPeerMessage msg = {0};
     bool present = false;
     assert(ErrKindNone ==
-           torrent_peer_parse_message(&data, &msg, &present).kind);
+           torrent_peer_parse_message(NULL, &data, &msg, &present).kind);
     assert(present);
     assert(7 == msg.v.idx_begin_len.idx);
     assert(0x4000 == msg.v.idx_begin_len.begin);
@@ -1434,7 +1433,7 @@ static void test_torrent_peer_parse_message(void) {
     TorrentPeerMessage msg = {0};
     bool present = false;
     assert(ErrKindNone ==
-           torrent_peer_parse_message(&data, &msg, &present).kind);
+           torrent_peer_parse_message(NULL, &data, &msg, &present).kind);
     assert(present);
     assert(2 == msg.v.piece.idx);
     assert(0x8000 == msg.v.piece.begin);
@@ -1451,7 +1450,7 @@ static void test_torrent_peer_parse_message(void) {
       bool present = false;
 
       assert(ErrKindNone ==
-             torrent_peer_parse_message(&data, &msg, &present).kind);
+             torrent_peer_parse_message(NULL, &data, &msg, &present).kind);
       assert(!present);
       // Untouched: not one of the bytes it did look at was consumed.
       assert(n == data.len);
@@ -1460,8 +1459,8 @@ static void test_torrent_peer_parse_message(void) {
   }
 
   // The same, byte by byte: a peer feeding a `piece` one byte at a time is
-  // answered "not yet" every time until the last one, and then the whole message
-  // comes out at once.
+  // answered "not yet" every time until the last one, and then the whole
+  // message comes out at once.
   {
     u8 buf[sizeof(piece)] = {0};
     for (usize n = 0; n < sizeof(piece); n++) {
@@ -1472,7 +1471,7 @@ static void test_torrent_peer_parse_message(void) {
       bool present = false;
 
       assert(ErrKindNone ==
-             torrent_peer_parse_message(&data, &msg, &present).kind);
+             torrent_peer_parse_message(NULL, &data, &msg, &present).kind);
 
       if (n + 1 < sizeof(piece)) {
         assert(!present);
@@ -1485,8 +1484,8 @@ static void test_torrent_peer_parse_message(void) {
     }
   }
 
-  // Several in one packet, which is what a peer that has been waiting sends: each
-  // call takes exactly one and leaves the rest.
+  // Several in one packet, which is what a peer that has been waiting sends:
+  // each call takes exactly one and leaves the rest.
   {
     u8 run[sizeof(bitfield) + sizeof(unchoke) + sizeof(have) +
            sizeof(keep_alive)] = {0};
@@ -1509,7 +1508,7 @@ static void test_torrent_peer_parse_message(void) {
       bool present = false;
 
       assert(ErrKindNone ==
-             torrent_peer_parse_message(&data, &msg, &present).kind);
+             torrent_peer_parse_message(NULL, &data, &msg, &present).kind);
       assert(present);
       assert(expected[i] == msg.kind);
     }
@@ -1519,7 +1518,7 @@ static void test_torrent_peer_parse_message(void) {
     TorrentPeerMessage msg = {0};
     bool present = false;
     assert(ErrKindNone ==
-           torrent_peer_parse_message(&data, &msg, &present).kind);
+           torrent_peer_parse_message(NULL, &data, &msg, &present).kind);
     assert(!present);
   }
 
@@ -1562,14 +1561,15 @@ static void test_torrent_peer_parse_message(void) {
       bool present = false;
 
       assert(ErrKindInvalidData ==
-             torrent_peer_parse_message(&data, &msg, &present).kind);
+             torrent_peer_parse_message(NULL, &data, &msg, &present).kind);
       assert(!present);
     }
   }
 
-  // The largest length the receive buffer can hold is not malformed, it just has
-  // not all arrived: the line between "too big" and "not yet" sits here, and an
-  // off-by-one either way is a peer dropped or a peer waited on for ever.
+  // The largest length the receive buffer can hold is not malformed, it just
+  // has not all arrived: the line between "too big" and "not yet" sits here,
+  // and an off-by-one either way is a peer dropped or a peer waited on for
+  // ever.
   {
     const u32 biggest = TORRENT_PEER_RECV_BUF_CAP - (u32)sizeof(u32);
 
@@ -1579,16 +1579,16 @@ static void test_torrent_peer_parse_message(void) {
     TorrentPeerMessage msg = {0};
     bool present = false;
     assert(ErrKindNone ==
-           torrent_peer_parse_message(&data, &msg, &present).kind);
+           torrent_peer_parse_message(NULL, &data, &msg, &present).kind);
     assert(!present);
 
     // One more than that can never be buffered, so it is refused.
     const u32 too_big = biggest + 1;
-    u8 head2[4] = {(u8)(too_big >> 24), (u8)(too_big >> 16),
-                   (u8)(too_big >> 8), (u8)too_big};
+    u8 head2[4] = {(u8)(too_big >> 24), (u8)(too_big >> 16), (u8)(too_big >> 8),
+                   (u8)too_big};
     Slice_u8 data2 = slice_u8_make(head2, sizeof(head2));
     assert(ErrKindInvalidData ==
-           torrent_peer_parse_message(&data2, &msg, &present).kind);
+           torrent_peer_parse_message(NULL, &data2, &msg, &present).kind);
   }
 
   // Nothing at all is "not yet", not an error: an empty buffer is where every
@@ -1598,7 +1598,7 @@ static void test_torrent_peer_parse_message(void) {
     TorrentPeerMessage msg = {0};
     bool present = false;
     assert(ErrKindNone ==
-           torrent_peer_parse_message(&data, &msg, &present).kind);
+           torrent_peer_parse_message(NULL, &data, &msg, &present).kind);
     assert(!present);
   }
 }
@@ -1655,9 +1655,9 @@ __attribute__((warn_unused_result)) static Env
 test_env_peer_make(TestPeerCtx *ctx) {
   assert(ctx);
 
-  // A peer reaches `Env` for one thing only, the hang-up it falls back on; every
-  // other slot stays null, so reaching for one crashes rather than quietly
-  // doing something real.
+  // A peer reaches `Env` for one thing only, the hang-up it falls back on;
+  // every other slot stays null, so reaching for one crashes rather than
+  // quietly doing something real.
   return (Env){.close_socket = test_peer_close_socket, .ctx = ctx};
 }
 
@@ -1760,11 +1760,11 @@ test_peer_pool_is_empty(const TorrentNetworkCtx *network_ctx) {
 // was seen in. The listener is not involved: `torrent_peer_on_accept` is called
 // with the descriptor a listener would have handed over.
 //
-// The state is what the call counts cannot show, and it takes turning the loop a
-// step at a time to see: a connection ends inside a tick, so whatever state it
-// reached is only readable while its hang-up is still in flight. A released slot
-// is zeroed, which reads back as the initial state, so only what was seen while
-// the slot was still held counts.
+// The state is what the call counts cannot show, and it takes turning the loop
+// a step at a time to see: a connection ends inside a tick, so whatever state
+// it reached is only readable while its hang-up is still in flight. A released
+// slot is zeroed, which reads back as the initial state, so only what was seen
+// while the slot was still held counts.
 __attribute__((warn_unused_result)) static TorrentPeerState
 test_peer_run(TestIo *test_io, TestPeerCtx *ctx, const Env *env,
               TorrentNetworkCtx *network_ctx) {
@@ -1815,17 +1815,17 @@ test_peer_run(TestIo *test_io, TestPeerCtx *ctx, const Env *env,
 
 // The handshake, in both directions, and how a connection ends. The buffer
 // bookkeeping is the whole difficulty: a handshake arrives in as many pieces as
-// the network feels like and leaves in as many as the socket will take, possibly
-// with the next message already behind it.
+// the network feels like and leaves in as many as the socket will take,
+// possibly with the next message already behind it.
 static void test_torrent_peer_state_machine(void) {
   // The pool is a couple of megabytes of slots and the fake has room for an
   // operation per slot: too much for the stack, either of them.
   static TorrentNetworkCtx network_ctx;
   static TestIo test_io;
 
-  u8 peer_id_bytes[TORRENT_PEER_ID_LEN] = {
-      '-', 'F', 'S', '0', '0', '0', '1', 0x00, 0xff, 0x2a,
-      1,   2,   3,   4,   5,   6,   7,   8,    9,    10};
+  u8 peer_id_bytes[TORRENT_PEER_ID_LEN] = {'-',  'F',  'S',  '0', '0', '0', '1',
+                                           0x00, 0xff, 0x2a, 1,   2,   3,   4,
+                                           5,    6,    7,    8,   9,   10};
   const Slice_u8 peer_id = slice_u8_make(peer_id_bytes, sizeof(peer_id_bytes));
 
   test_network_ctx_init(&network_ctx);
@@ -1835,8 +1835,8 @@ static void test_torrent_peer_state_machine(void) {
   const Slice_u8 whole = slice_u8_make(handshake, sizeof(handshake));
 
   // The handshake in one packet. Ours goes out, theirs comes in, and the
-  // connection then stays up waiting for messages: it ends only because the fake
-  // peer has nothing else to say and the next read reaches end of file.
+  // connection then stays up waiting for messages: it ends only because the
+  // fake peer has nothing else to say and the next read reaches end of file.
   {
     TestPeerCtx ctx = {.says = whole};
     const Env env = test_env_peer_make(&ctx);
@@ -1853,9 +1853,9 @@ static void test_torrent_peer_state_machine(void) {
   }
 
   // What we sent. A peer will not talk to us unless our handshake is as
-  // well-formed as we demand theirs to be, and carries the torrent we are asking
-  // about. Kept, so the cases below can insist on the same bytes however the
-  // socket cuts them.
+  // well-formed as we demand theirs to be, and carries the torrent we are
+  // asking about. Kept, so the cases below can insist on the same bytes however
+  // the socket cuts them.
   u8 sent[TEST_HANDSHAKE_LEN] = {0};
   {
     TestPeerCtx ctx = {.says = whole};
@@ -1878,10 +1878,11 @@ static void test_torrent_peer_state_machine(void) {
     assert(test_peer_pool_is_empty(&network_ctx));
   }
 
-  // A socket that takes only a few bytes at a time. What goes out is the same 68
-  // bytes in the same order, however many writes that takes, which is what the
-  // send buffer's bookkeeping is for: what a write did not take moves to the
-  // front, and the count behind it has to be what is left rather than what went.
+  // A socket that takes only a few bytes at a time. What goes out is the same
+  // 68 bytes in the same order, however many writes that takes, which is what
+  // the send buffer's bookkeeping is for: what a write did not take moves to
+  // the front, and the count behind it has to be what is left rather than what
+  // went.
   //
   // The peer is fed in a byte at a time too, so it is still there to be written
   // to while the write drains: one that hung up first would end the connection
@@ -1938,10 +1939,10 @@ static void test_torrent_peer_state_machine(void) {
     }
   }
 
-  // A peer that hangs up halfway through the handshake. The read answers 0 bytes
-  // with nothing wrong, and a descriptor at end of file stays readable, so asking
-  // again would answer 0 for ever: `TEST_PEER_TURNS_MAX` is what says so here,
-  // rather than the test running until someone stops it.
+  // A peer that hangs up halfway through the handshake. The read answers 0
+  // bytes with nothing wrong, and a descriptor at end of file stays readable,
+  // so asking again would answer 0 for ever: `TEST_PEER_TURNS_MAX` is what says
+  // so here, rather than the test running until someone stops it.
   {
     TestPeerCtx ctx = {.says = slice_u8_take(whole, 20)};
     const Env env = test_env_peer_make(&ctx);
@@ -2006,8 +2007,8 @@ static void test_torrent_peer_state_machine(void) {
   }
 
   // The read that cannot even be submitted. Its callback never runs, so the
-  // connection has to be given up on there and then -- and the write that did go
-  // out is still in flight, so the hang-up waits for it.
+  // connection has to be given up on there and then -- and the write that did
+  // go out is still in flight, so the hang-up waits for it.
   {
     TestPeerCtx ctx = {.says = whole};
     const Env env = test_env_peer_make(&ctx);
@@ -2053,9 +2054,9 @@ static void test_torrent_peer_state_machine(void) {
   }
 
   // The hang-up that cannot be submitted either. Nothing is going to call back,
-  // so the connection goes through `Env`, which answers on the spot, and the slot
-  // is handed back there and then: one kept for a connection nobody will ever
-  // hear from again is lost for the life of the process.
+  // so the connection goes through `Env`, which answers on the spot, and the
+  // slot is handed back there and then: one kept for a connection nobody will
+  // ever hear from again is lost for the life of the process.
   {
     TestPeerCtx ctx = {.says = whole};
     const Env env = test_env_peer_make(&ctx);
@@ -2078,9 +2079,10 @@ static void test_torrent_peer_state_machine(void) {
   }
 }
 
-// The messages behind the handshake, which is what libtorrent sends: it announces
-// the pieces it has straight after the handshake, in the same packet or the next
-// one, and a peer that drops them or mistakes one for another gets nowhere.
+// The messages behind the handshake, which is what libtorrent sends: it
+// announces the pieces it has straight after the handshake, in the same packet
+// or the next one, and a peer that drops them or mistakes one for another gets
+// nowhere.
 static void test_torrent_peer_messages(void) {
   static TorrentNetworkCtx network_ctx;
   static TestIo test_io;
@@ -2090,17 +2092,16 @@ static void test_torrent_peer_messages(void) {
 
   test_network_ctx_init(&network_ctx);
 
-  // A handshake, then the opening pair libtorrent sends: what it has, and that it
-  // is not choking us.
-  const u8 msgs[] = {
-      // bitfield, 3 bytes of bits.
-      0x00, 0x00, 0x00, 0x04, 0x05, 0xff, 0x80, 0x01,
-      // unchoke.
-      0x00, 0x00, 0x00, 0x01, 0x01,
-      // have, piece 300.
-      0x00, 0x00, 0x00, 0x05, 0x04, 0x00, 0x00, 0x01, 0x2c,
-      // keep-alive.
-      0x00, 0x00, 0x00, 0x00};
+  // A handshake, then the opening pair libtorrent sends: what it has, and that
+  // it is not choking us.
+  const u8 msgs[] = {// bitfield, 3 bytes of bits.
+                     0x00, 0x00, 0x00, 0x04, 0x05, 0xff, 0x80, 0x01,
+                     // unchoke.
+                     0x00, 0x00, 0x00, 0x01, 0x01,
+                     // have, piece 300.
+                     0x00, 0x00, 0x00, 0x05, 0x04, 0x00, 0x00, 0x01, 0x2c,
+                     // keep-alive.
+                     0x00, 0x00, 0x00, 0x00};
 
   u8 says[TEST_HANDSHAKE_LEN + sizeof(msgs)] = {0};
   test_handshake_fill(says, network_ctx.info_hash,
@@ -2136,17 +2137,17 @@ static void test_torrent_peer_messages(void) {
       assert(TorrentPeerStateHandshaked ==
              test_peer_run(&test_io, &ctx, &env, &network_ctx));
 
-      // It got to the end of the stream and hung up there, rather than giving up
-      // on a half-arrived message.
+      // It got to the end of the stream and hung up there, rather than giving
+      // up on a half-arrived message.
       assert(1 == ctx.close_calls);
       assert(0 == ctx.close_socket_calls);
       assert(test_peer_pool_is_empty(&network_ctx));
     }
   }
 
-  // A peer talking nonsense after a good handshake: the handshake is no guarantee
-  // of what follows, and the connection ends rather than the parser being asked
-  // again for ever.
+  // A peer talking nonsense after a good handshake: the handshake is no
+  // guarantee of what follows, and the connection ends rather than the parser
+  // being asked again for ever.
   {
     u8 bad[TEST_HANDSHAKE_LEN + 5] = {0};
     test_handshake_fill(bad, network_ctx.info_hash,
@@ -2169,10 +2170,10 @@ static void test_torrent_peer_messages(void) {
   }
 }
 
-// What the receive buffer looks like as messages come out of it. The call counts
-// above cannot see this, and it is where a parser that forgets to compact the
-// buffer goes wrong: the messages it has already handled stay in front of the
-// ones it has not, and it reads the same one for ever.
+// What the receive buffer looks like as messages come out of it. The call
+// counts above cannot see this, and it is where a parser that forgets to
+// compact the buffer goes wrong: the messages it has already handled stay in
+// front of the ones it has not, and it reads the same one for ever.
 static void test_torrent_peer_recv_buf_compacted(void) {
   static TorrentNetworkCtx network_ctx;
   static TestIo test_io;
@@ -2181,11 +2182,10 @@ static void test_torrent_peer_recv_buf_compacted(void) {
   memset(peer_id_bytes, 'P', sizeof(peer_id_bytes));
   const Slice_u8 peer_id = slice_u8_make(peer_id_bytes, sizeof(peer_id_bytes));
 
-  // Two whole messages and the first three bytes of a third length prefix, which
-  // is a cut no peer can be asked for but every network makes.
-  const u8 trailing[] = {0x00, 0x00, 0x00, 0x01, 0x01,
-                         0x00, 0x00, 0x00, 0x01, 0x00,
-                         0x00, 0x00, 0x00};
+  // Two whole messages and the first three bytes of a third length prefix,
+  // which is a cut no peer can be asked for but every network makes.
+  const u8 trailing[] = {0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00,
+                         0x00, 0x01, 0x00, 0x00, 0x00, 0x00};
 
   test_network_ctx_init(&network_ctx);
 
@@ -2202,9 +2202,9 @@ static void test_torrent_peer_recv_buf_compacted(void) {
   torrent_peer_init(peer, &test_io.io, &network_ctx, peer_addr, TEST_PEER_FD,
                     peer_addr.ip);
 
-  // Our own handshake has gone out already, which is the state a connection is in
-  // from its first tick onwards: the initial state is the one before anything has
-  // been sent, and it never holds bytes.
+  // Our own handshake has gone out already, which is the state a connection is
+  // in from its first tick onwards: the initial state is the one before
+  // anything has been sent, and it never holds bytes.
   peer->state = TorrentPeerStateSentHandshake;
 
   // The handshake, two messages and a fragment, as one read would have left
@@ -2302,8 +2302,8 @@ static void test_slice_u8_consume_u32_be(void) {
   // Back to back, which is how a `request` is read: three of these in a row off
   // the one slice.
   {
-    u8 bytes[] = {0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x40, 0x00,
-                  0x00, 0x00, 0x40, 0x00};
+    u8 bytes[] = {0x00, 0x00, 0x00, 0x07, 0x00, 0x00,
+                  0x40, 0x00, 0x00, 0x00, 0x40, 0x00};
     Slice_u8 slice = slice_u8_make(bytes, sizeof(bytes));
 
     u32 idx = 0;
@@ -2336,7 +2336,8 @@ static void test_slice_u8_consume_u8(void) {
   u8 tag = 0;
   assert(slice_u8_consume_u8(&slice, &tag));
   assert(TorrentMessageKindHave == tag);
-  // One byte, so the four behind it are still there and start where they should.
+  // One byte, so the four behind it are still there and start where they
+  // should.
   assert(4 == slice.len);
 
   u32 piece = 0;
@@ -6679,8 +6680,7 @@ static void test(const char *filter) {
       {"torrent_peer_parse_message", test_torrent_peer_parse_message},
       {"torrent_peer_state_machine", test_torrent_peer_state_machine},
       {"torrent_peer_messages", test_torrent_peer_messages},
-      {"torrent_peer_recv_buf_compacted",
-       test_torrent_peer_recv_buf_compacted},
+      {"torrent_peer_recv_buf_compacted", test_torrent_peer_recv_buf_compacted},
       {"io_syscall_failures", test_io_syscall_failures},
       {"torrent_make_dicts_oom", test_torrent_make_dicts_oom},
       {"io_composites_mocked", test_io_composites_mocked},
