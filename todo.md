@@ -1,7 +1,11 @@
 - peer as an actor:
+    - Each peer has an array of max 8 commands
+    - Code bridges the io bytes -> events and commands -> io operations
+    - `peer_run` is easy to test (pure)
+    - a peer can send an event to other peers (e.g.: new block arrived). This could create feedback loops, perhaps could be avoided with shared state (since we are single threaded) e.g. a bitset per file to record which blocks we already have, shared by all peers.
 ```
 // NOTE: `Command[]` allows for pipelining writes or queuing a several IO operations e.g.:  upon receiving a block, a socket read (for the next block) + a file write (for this block).
-// `Event` is a superset of 'peer messages' + 'network events' e.g. timeout, events from other peer connections (e.g.: new block received), etc.
+// `Event` is a superset of 'peer messages' + 'network events' e.g. timeout, events from other peer connections (e.g.: new block received), 'file fully downloaded' (so perhaps close the connection), etc.
 Command[] peer_run(Event event) {
     switch (peer->state) {
   case TorrentPeerStateInitial: {
@@ -26,11 +30,11 @@ Command[] peer_run(Event event) {
 
     
 //    [...]
-default:
-    return Command[]{IdleFor1Minute}; // After which we need to send a keep alive.
     }
 
-    // unreachable
+    // No other handler decided on commands to send so idle for a bit.
+
+    return Command[]{SendKeepAlive, IdleFor1Minute}; // After which we need to send a keep alive.
 }
 ```
 - first bind the TCP socket, then broadcast the port over UDP
