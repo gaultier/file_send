@@ -7,6 +7,16 @@
       because each needs state that does not exist: the `have` and `requested`
       bitsets, and a file to write into. `torrent_peer_run`'s `Handshaked` case
       carries the `TODO` where the first of them goes.
+    - `interested` goes out unconditionally on reaching `Handshaked`, and it is
+      a claim that is not checked: it says the peer has something we want, and
+      `share` is a seed with nothing to want. It stays until there is a `have`
+      bitset to compare against theirs, at which point it becomes conditional
+      and `uninterested` becomes reachable. Harmless meanwhile -- a peer that is
+      unchoked and asked for nothing costs the other end one slot.
+    - The `TODO` for `SendBitfield` sits above the `interested` and `unchoke`
+      pushes on purpose: BEP 3 has the bitfield as the *first* message after the
+      handshake or not at all, so anything queued before it forecloses ever
+      sending one. Order matters in that block in a way it does not elsewhere.
     - No peer-to-peer events, which is what would make feedback loops possible.
       A block arriving elsewhere needs nothing from anyone right away, so it is
       shared state and the next peer to get an event reads it:
