@@ -1715,10 +1715,22 @@ slice_u8_find_slice(Slice_u8 haystack, Slice_u8 needle, FindOptions options) {
     return (Find){0};
   }
 
-  for (usize i = 0; i < haystack.len - needle.len; i++) {
-    if (0 == memcmp(&haystack.data[i], &needle.data[i], needle.len)) {
+  if (0 == needle.len) {
+    return (Find){.found = true, .idx = 0};
+  }
+
+  assert(haystack.data);
+  assert(needle.data);
+
+  for (usize i = 0; i <= haystack.len - needle.len; i++) {
+    if (0 == memcmp(&haystack.data[i], needle.data, needle.len)) {
       const usize idx =
           (options & FindOptionsIndexAfterNeedleEnd) ? i + needle.len : i;
+
+      // Sanity check.
+      assert(haystack.data[i] == needle.data[0]);
+      assert(haystack.data[i + needle.len - 1] == needle.data[needle.len - 1]);
+
       return (Find){
           .found = true,
           .idx = idx,

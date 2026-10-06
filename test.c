@@ -4387,6 +4387,97 @@ static void test_slice_u8_cmp(void) {
   }
 }
 
+static void test_slice_u8_find_slice(void) {
+  const struct {
+    const char *haystack;
+    const char *needle;
+    bool found;
+    usize idx;
+  } cases[] = {
+      {"", "", true, 0},
+      {"abc", "", true, 0},
+      {"", "a", false, 0},
+      {"a", "ab", false, 0},
+      {"abc", "abc", true, 0},
+      {"abc", "abd", false, 0},
+      {"abc", "a", true, 0},
+      {"abc", "b", true, 1},
+      {"abc", "c", true, 2},
+      {"abc", "bc", true, 1},
+      {"abc", "d", false, 0},
+      // First match wins.
+      {"abab", "ab", true, 0},
+      {"xabab", "ab", true, 1},
+      // Overlapping partial match before the real one.
+      {"aaab", "aab", true, 1},
+      {"\r\n\r\n", "\r\n\r\n", true, 0},
+      {"GET / HTTP/1.1\r\nHost: x\r\n\r\nbody", "\r\n\r\n", true, 23},
+  };
+
+  for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    const Slice_u8 haystack = test_slice(cases[i].haystack);
+    const Slice_u8 needle = test_slice(cases[i].needle);
+
+    const Find start =
+        slice_u8_find_slice(haystack, needle, FindOptionsIndexAtNeedleStart);
+    assert(cases[i].found == start.found);
+    assert(cases[i].idx == start.idx);
+
+    const Find end =
+        slice_u8_find_slice(haystack, needle, FindOptionsIndexAfterNeedleEnd);
+    assert(cases[i].found == end.found);
+    if (cases[i].found) {
+      assert(cases[i].idx + needle.len == end.idx);
+      assert(end.idx <= haystack.len);
+    } else {
+      assert(0 == end.idx);
+    }
+  }
+
+  // Embedded zeroes: `strstr` would stop at the first one.
+  {
+    const u8 haystack_data[] = {'a', 0, 'b', 0, 'c'};
+    const u8 needle_data[] = {0, 'c'};
+    const Slice_u8 haystack =
+        slice_u8_make((u8 *)haystack_data, sizeof(haystack_data));
+    const Slice_u8 needle =
+        slice_u8_make((u8 *)needle_data, sizeof(needle_data));
+
+    const Find find =
+        slice_u8_find_slice(haystack, needle, FindOptionsIndexAtNeedleStart);
+    assert(find.found);
+    assert(3 == find.idx);
+  }
+
+  // A NULL pointer is legal as long as the length is zero.
+  {
+    const Slice_u8 null_empty = slice_u8_make(NULL, 0);
+
+    const Find in_null = slice_u8_find_slice(null_empty, null_empty,
+                                             FindOptionsIndexAtNeedleStart);
+    assert(in_null.found);
+    assert(0 == in_null.idx);
+
+    const Find not_in_null = slice_u8_find_slice(null_empty, test_slice("a"),
+                                                 FindOptionsIndexAtNeedleStart);
+    assert(!not_in_null.found);
+  }
+
+  // The needle sits at the very end of a longer haystack.
+  {
+    u8 haystack_data[64];
+    memset(haystack_data, 'z', sizeof(haystack_data));
+    haystack_data[sizeof(haystack_data) - 1] = 'y';
+    const Slice_u8 haystack =
+        slice_u8_make(haystack_data, sizeof(haystack_data));
+
+    const Find find = slice_u8_find_slice(haystack, test_slice("zy"),
+                                          FindOptionsIndexAfterNeedleEnd);
+    assert(find.found);
+    assert(sizeof(haystack_data) == find.idx);
+  }
+}
+
 static void test_bencode_validate_dict(void) {
   const BencodeValue num = {.kind = BencodeKindInteger, .v.num = 42};
 
@@ -7627,6 +7718,7 @@ static void test(const char *filter) {
       {"bencode_parse_dict_keys", test_bencode_parse_dict_keys},
       {"bencode_parse_deep_dicts", test_bencode_parse_deep_dicts},
       {"slice_u8_cmp", test_slice_u8_cmp},
+      {"slice_u8_find_slice", test_slice_u8_find_slice},
       {"bencode_validate_dict", test_bencode_validate_dict},
       {"sha256_vectors", test_sha256_vectors},
       {"sha256_million_a", test_sha256_million_a},
