@@ -4733,7 +4733,6 @@ static void test_http_parse_req_status_line(void) {
       const char *line;
       HttpMethod method;
     } cases[] = {
-        {"UNKNOWN / HTTP/1.1\r\n", HTTP_METHOD_UNKNOWN},
         {"OPTIONS / HTTP/1.1\r\n", HTTP_METHOD_OPTIONS},
         {"GET / HTTP/1.1\r\n", HTTP_METHOD_GET},
         {"HEAD / HTTP/1.1\r\n", HTTP_METHOD_HEAD},
@@ -4742,7 +4741,6 @@ static void test_http_parse_req_status_line(void) {
         {"DELETE / HTTP/1.1\r\n", HTTP_METHOD_DELETE},
         {"TRACE / HTTP/1.1\r\n", HTTP_METHOD_TRACE},
         {"CONNECT / HTTP/1.1\r\n", HTTP_METHOD_CONNECT},
-        {"EXTENSION / HTTP/1.1\r\n", HTTP_METHOD_EXTENSION},
     };
     for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
       HttpRequestStatusLine sl = {.method = HTTP_METHOD_GET};
@@ -4787,6 +4785,8 @@ static void test_http_parse_req_status_line(void) {
         "GET",
         // Unknown method, and methods are case-sensitive.
         "BREW / HTTP/1.1\r\n",
+        "UNKNOWN / HTTP/1.1\r\n",
+        "EXTENSION / HTTP/1.1\r\n",
         "get / HTTP/1.1\r\n",
         // No space after the URL.
         "GET /",

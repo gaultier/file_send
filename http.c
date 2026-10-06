@@ -9,7 +9,6 @@ typedef struct {
 } HttpHeader;
 
 typedef enum {
-  HTTP_METHOD_UNKNOWN,
   HTTP_METHOD_OPTIONS,
   HTTP_METHOD_GET,
   HTTP_METHOD_HEAD,
@@ -18,7 +17,6 @@ typedef enum {
   HTTP_METHOD_DELETE,
   HTTP_METHOD_TRACE,
   HTTP_METHOD_CONNECT,
-  HTTP_METHOD_EXTENSION,
 } HttpMethod;
 
 // `GET /en-US/docs/Web/HTTP/Messages HTTP/1.1`.
@@ -298,9 +296,7 @@ http_parse_req_status_line(Bytes src, HttpRequestStatusLine *res,
     return (Error){.kind = ErrKindInvalidData};
   }
   const Bytes method = split.left;
-  if (bytes_eq_cstr(method, "UNKNOWN")) {
-    res->method = HTTP_METHOD_UNKNOWN;
-  } else if (bytes_eq_cstr(method, "OPTIONS")) {
+  if (bytes_eq_cstr(method, "OPTIONS")) {
     res->method = HTTP_METHOD_OPTIONS;
   } else if (bytes_eq_cstr(method, "GET")) {
     res->method = HTTP_METHOD_GET;
@@ -316,8 +312,6 @@ http_parse_req_status_line(Bytes src, HttpRequestStatusLine *res,
     res->method = HTTP_METHOD_TRACE;
   } else if (bytes_eq_cstr(method, "CONNECT")) {
     res->method = HTTP_METHOD_CONNECT;
-  } else if (bytes_eq_cstr(method, "EXTENSION")) {
-    res->method = HTTP_METHOD_EXTENSION;
   } else {
     return (Error){.kind = ErrKindInvalidData};
   }
