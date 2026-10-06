@@ -16,9 +16,26 @@ static void http_handler_on_close(IoCompletion *completion, Error err,
 
   log(&handler->logger, LogLevelInfo, "closed");
 
-  pool_release(&handler->server->memory_blocks_pool,
-               handler->arena.end - HTTP_HANDLER_ARENA_SIZE);
-  pool_release(&handler->server->handler_pool, handler);
+  http_handler_release(handler);
+}
+
+// Ends the connection. `handler` is not to be used after.
+static void otel_handler_close(HttpHandler *handler) {
+  assert(handler);
+  IO *const io = handler->io;
+  assert(io);
+
+  const Error err = io->close(io, &handler->completion, handler->socket,
+                              http_handler_on_close);
+  if (ErrKindNone == err.kind) {
+    return;
+  }
+
+  // The only release outside `http_handler_on_close`: no callback is coming,
+  // so clean up now.
+  log_err(&handler->logger, "failed to submit close", err);
+  (void)io->env->close_socket(io->env, handler->socket);
+  http_handler_release(handler);
 }
 
 static void otel_on_write(IoCompletion *completion, Error write_err,
@@ -27,14 +44,13 @@ static void otel_on_write(IoCompletion *completion, Error write_err,
   assert(completion->ctx);
 
   HttpHandler *const handler = completion->ctx;
-  IO *const io = handler->io;
-  assert(io);
 
-  (void)write_err;
+  if (ErrKindNone != write_err.kind) {
+    log_err(&handler->logger, "write error", write_err);
+  }
   (void)write_count;
 
-  (void)io->close(io, &handler->completion, handler->socket,
-                  http_handler_on_close);
+  otel_handler_close(handler);
 }
 
 static void otel_on_read(IoCompletion *completion, Error read_err,
@@ -49,20 +65,19 @@ static void otel_on_read(IoCompletion *completion, Error read_err,
   if (ErrKindNone != read_err.kind) {
     log(&handler->logger, LogLevelError, "read error: %s",
         error_kind_to_cstr(read_err.kind));
-    (void)handler->io->close(handler->io, &handler->completion, handler->socket,
-                             http_handler_on_close);
+    otel_handler_close(handler);
     return;
   }
 
   if (0 == read_count) {
     log(&handler->logger, LogLevelDebug, "closing connection: 0 bytes read");
-    (void)handler->io->close(handler->io, &handler->completion, handler->socket,
-                             http_handler_on_close);
+    otel_handler_close(handler);
     return;
   }
 
   assert(!__builtin_add_overflow(handler->recv.len, read_count,
                                  &handler->recv.len));
+  assert(handler->recv.len <= handler->recv.container.len);
   log(&handler->logger, LogLevelDebug, "read %zu bytes", read_count);
   fwrite(handler->recv.container.data, 1, handler->recv.len, stdout);
   puts("");
@@ -70,14 +85,23 @@ static void otel_on_read(IoCompletion *completion, Error read_err,
   const Bytes recv = bytes_buffer_to_bytes(handler->recv);
   const Find find = http_find_headers_end(recv);
   if (!find.found) {
-    Error err = io->read(io, &handler->completion, handler->socket,
-                         bytes_buffer_space_bytes(handler->recv), otel_on_read);
-    if (ErrKindNone != err.kind) {
-      log_err(&handler->logger, "failed to read", err);
-      (void)io->env->close_socket(io->env, handler->socket);
+    // The headers do not fit.
+    if (0 == bytes_buffer_space(handler->recv)) {
+      log(&handler->logger, LogLevelError, "headers too big");
+      otel_handler_close(handler);
       return;
     }
+
+    const Error err =
+        io->read(io, &handler->completion, handler->socket,
+                 bytes_buffer_space_bytes(handler->recv), otel_on_read);
+    if (ErrKindNone != err.kind) {
+      log_err(&handler->logger, "failed to read", err);
+      otel_handler_close(handler);
+    }
+    return;
   }
+  assert(find.idx <= recv.len);
 
   Bytes headers = bytes_take(recv, find.idx);
   HttpRequestStatusLine sl = {0};
@@ -85,9 +109,10 @@ static void otel_on_read(IoCompletion *completion, Error read_err,
   Error err = http_parse_req_status_line(headers, &sl, &advanced);
   if (ErrKindNone != err.kind) {
     log_err(&handler->logger, "failed to parse http status line", err);
-    (void)io->env->close_socket(io->env, handler->socket);
+    otel_handler_close(handler);
     return;
   }
+  assert(advanced <= headers.len);
 
   bytes_advance(&headers, advanced);
   fwrite(headers.data, 1, headers.len, stdout);
@@ -95,11 +120,12 @@ static void otel_on_read(IoCompletion *completion, Error read_err,
 
   err = http_parse_headers(headers, handler->headers, &handler->headers_len,
                            handler->headers_cap);
-  if (ErrKindNone != read_err.kind) {
+  if (ErrKindNone != err.kind) {
     log_err(&handler->logger, "failed to parse http headers", err);
-    (void)io->env->close_socket(io->env, handler->socket);
+    otel_handler_close(handler);
     return;
   }
+  assert(handler->headers_len <= handler->headers_cap);
 
   log(&handler->logger, LogLevelDebug, "parsed %zu HTTP headers",
       handler->headers_len);
@@ -113,9 +139,9 @@ static void otel_on_read(IoCompletion *completion, Error read_err,
 
   err = io->write(io, &handler->completion, handler->socket,
                   bytes_buffer_to_bytes(handler->resp), otel_on_write);
-  if (ErrKindNone != read_err.kind) {
+  if (ErrKindNone != err.kind) {
     log_err(&handler->logger, "failed to write", err);
-    (void)io->env->close_socket(io->env, handler->socket);
+    otel_handler_close(handler);
     return;
   }
 }
@@ -138,11 +164,12 @@ static void otel_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
 
   log(&handler->logger, LogLevelInfo, "accepted");
 
-  Error err = io->read(io, &handler->completion, accept_socket,
-                       bytes_buffer_space_bytes(handler->recv), otel_on_read);
+  const Error err =
+      io->read(io, &handler->completion, accept_socket,
+               bytes_buffer_space_bytes(handler->recv), otel_on_read);
   if (ErrKindNone != err.kind) {
-    log_err(&server->logger, "failed to read", err);
-    (void)io->env->close_socket(io->env, accept_socket);
+    log_err(&handler->logger, "failed to read", err);
+    otel_handler_close(handler);
     return;
   }
 }

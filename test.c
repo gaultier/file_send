@@ -4726,6 +4726,93 @@ static void test_http_find_headers_end(void) {
 }
 
 // Cases follow RFC 9110 section 5 and RFC 9112 section 5.
+static void test_http_parse_req_status_line(void) {
+  // Every known method.
+  {
+    const struct {
+      const char *line;
+      HttpMethod method;
+    } cases[] = {
+        {"UNKNOWN / HTTP/1.1\r\n", HTTP_METHOD_UNKNOWN},
+        {"OPTIONS / HTTP/1.1\r\n", HTTP_METHOD_OPTIONS},
+        {"GET / HTTP/1.1\r\n", HTTP_METHOD_GET},
+        {"HEAD / HTTP/1.1\r\n", HTTP_METHOD_HEAD},
+        {"POST / HTTP/1.1\r\n", HTTP_METHOD_POST},
+        {"PUT / HTTP/1.1\r\n", HTTP_METHOD_PUT},
+        {"DELETE / HTTP/1.1\r\n", HTTP_METHOD_DELETE},
+        {"TRACE / HTTP/1.1\r\n", HTTP_METHOD_TRACE},
+        {"CONNECT / HTTP/1.1\r\n", HTTP_METHOD_CONNECT},
+        {"EXTENSION / HTTP/1.1\r\n", HTTP_METHOD_EXTENSION},
+    };
+    for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+      HttpRequestStatusLine sl = {.method = HTTP_METHOD_GET};
+      usize advanced = 0;
+      const Bytes src = bytes_from_cstr(cases[i].line);
+      assert(ErrKindNone ==
+             http_parse_req_status_line(src, &sl, &advanced).kind);
+      assert(cases[i].method == sl.method);
+      assert(src.len == advanced);
+    }
+  }
+
+  // The URL is kept, and only the start line is consumed.
+  {
+    HttpRequestStatusLine sl = {0};
+    usize advanced = 0;
+    const Bytes src =
+        bytes_from_cstr("GET /v1/traces?a=b HTTP/1.1\r\nHost: x\r\n\r\n");
+    assert(ErrKindNone == http_parse_req_status_line(src, &sl, &advanced).kind);
+    assert(HTTP_METHOD_GET == sl.method);
+    assert(bytes_eq_cstr(sl.url, "/v1/traces?a=b"));
+    assert(1 == sl.version_major);
+    assert(1 == sl.version_minor);
+    assert(strlen("GET /v1/traces?a=b HTTP/1.1\r\n") == advanced);
+    // Borrows from the input.
+    assert(src.data + 4 == sl.url.data);
+  }
+
+  // Nothing to parse is not an error, and nothing is consumed.
+  {
+    HttpRequestStatusLine sl = {0};
+    usize advanced = 0;
+    assert(ErrKindNone ==
+           http_parse_req_status_line((Bytes){0}, &sl, &advanced).kind);
+    assert(0 == advanced);
+  }
+
+  // Malformed lines.
+  {
+    const char *const cases[] = {
+        // No space after the method.
+        "GET",
+        // Unknown method, and methods are case-sensitive.
+        "BREW / HTTP/1.1\r\n",
+        "get / HTTP/1.1\r\n",
+        // No space after the URL.
+        "GET /",
+        // Empty URL.
+        "GET  HTTP/1.1\r\n",
+        // No CRLF.
+        "GET / HTTP/1.1",
+        // Empty version.
+        "GET / \r\n",
+        // No slash in the version.
+        "GET / HTTP\r\n",
+        // Not HTTP.
+        "GET / HTTPS/1.1\r\n",
+    };
+    for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+      HttpRequestStatusLine sl = {0};
+      usize advanced = 0;
+      assert(ErrKindInvalidData ==
+             http_parse_req_status_line(bytes_from_cstr(cases[i]), &sl,
+                                        &advanced)
+                 .kind);
+      assert(0 == advanced);
+    }
+  }
+}
+
 static void test_http_parse_headers(void) {
   const struct {
     const char *src;
@@ -4870,14 +4957,30 @@ static void test_http_parse_headers(void) {
   }
 }
 
+// What `otel_on_accept` does with a fresh connection.
+__attribute__((warn_unused_result)) static HttpHandler *
+test_http_accept(HttpServer *server, i32 socket) {
+  HttpHandler *const handler = pool_acquire(&server->handler_pool);
+  if (!handler) {
+    return NULL;
+  }
+  http_handler_init(handler, server, NULL, (Ipv4Addr){0}, socket);
+  return handler;
+}
+
+// What the IO layer does once the socket is closed.
+static void test_http_close(HttpHandler *handler) {
+  http_handler_on_close(&handler->completion, (Error){.kind = ErrKindNone}, 0);
+}
+
 static void test_http_server_pool(void) {
   const Env *const env = env_platform_make();
 
   // A slot taken from the pool is set up for one connection.
   {
     HttpServer server = {0};
-    assert(ErrKindNone == http_server_init(&server, test_arena(64 * MiB), 1,
-                                           LogLevelAll, env)
+    assert(ErrKindNone == http_server_init(&server, test_arena(1 * MiB), 1,
+                                           LogLevelError, env)
                               .kind);
 
     HttpHandler *const handler = pool_acquire(&server.handler_pool);
@@ -4889,19 +4992,449 @@ static void test_http_server_pool(void) {
     assert(7 == handler->socket);
     assert(&server == handler->server);
     assert(handler == handler->completion.ctx);
-    assert(LogLevelAll == handler->logger.level_mask);
+    assert(LogLevelError == handler->logger.level_mask);
     assert(0 ==
            strcmp("[peer 127.0.0.1:8080] ", (char *)handler->logger.prefix));
 
-    pool_release(&server.handler_pool, handler);
+    // The arena is one whole memory block, partly used by `recv` and
+    // `headers`.
+    u8 *const block = handler->arena.end - HTTP_HANDLER_ARENA_SIZE;
+    assert(pool_owns(&server.memory_blocks_pool, block));
+    assert(handler->arena.start > block);
+    assert(handler->arena.start <= handler->arena.end);
+
+    test_http_close(handler);
   }
 
-  // The pool does not fit in a small arena.
+  // Live connections never share a memory block.
+  {
+    HttpServer server = {0};
+    assert(ErrKindNone == http_server_init(&server, test_arena(1 * MiB), 3,
+                                           LogLevelError, env)
+                              .kind);
+
+    HttpHandler *handlers[3] = {0};
+    for (usize i = 0; i < 3; i++) {
+      handlers[i] = test_http_accept(&server, (i32)i);
+      assert(handlers[i]);
+    }
+    // The handler pool runs out first, the block pool has the same size.
+    assert(NULL == pool_acquire(&server.handler_pool));
+    assert(NULL == server.memory_blocks_pool.head);
+
+    for (usize i = 0; i < 3; i++) {
+      for (usize j = i + 1; j < 3; j++) {
+        assert(handlers[i]->arena.end != handlers[j]->arena.end);
+      }
+    }
+
+    // Writing a whole arena does not touch the other connections.
+    u8 *const block = handlers[1]->arena.end - HTTP_HANDLER_ARENA_SIZE;
+    memset(block, 0xFF, HTTP_HANDLER_ARENA_SIZE);
+    assert(0 == handlers[0]->socket);
+    assert(2 == handlers[2]->socket);
+    assert(handlers[0]->headers_cap == handlers[2]->headers_cap);
+
+    for (usize i = 0; i < 3; i++) {
+      test_http_close(handlers[i]);
+    }
+    assert(server.handler_pool.head);
+    assert(server.memory_blocks_pool.head);
+  }
+
+  // Closing gives both the slot and the memory block back, so far more
+  // connections than the maximum can come and go.
+  {
+    HttpServer server = {0};
+    assert(ErrKindNone == http_server_init(&server, test_arena(1 * MiB), 2,
+                                           LogLevelError, env)
+                              .kind);
+
+    for (usize i = 0; i < 100; i++) {
+      HttpHandler *const a = test_http_accept(&server, 1);
+      HttpHandler *const b = test_http_accept(&server, 2);
+      assert(a);
+      assert(b);
+      assert(NULL == pool_acquire(&server.handler_pool));
+      // Some use of the arena, like `otel_on_read` building the response.
+      assert(ErrKindNone ==
+             bytes_buffer_make(128, &a->arena, &a->resp).kind);
+      test_http_close(b);
+      test_http_close(a);
+    }
+
+    // Both pools are full again.
+    for (usize i = 0; i < 2; i++) {
+      assert(pool_acquire(&server.handler_pool));
+      assert(pool_acquire(&server.memory_blocks_pool));
+    }
+    assert(NULL == pool_acquire(&server.handler_pool));
+    assert(NULL == pool_acquire(&server.memory_blocks_pool));
+  }
+
+  // Not even the handler pool fits.
   {
     HttpServer server = {0};
     assert(ErrKindOOM ==
-           http_server_init(&server, test_arena(4 * KiB), 1, LogLevelAll, env)
+           http_server_init(&server, test_arena(8), 1, LogLevelError, env)
                .kind);
+  }
+
+  // The handler pool fits, the memory blocks do not.
+  {
+    HttpServer server = {0};
+    assert(ErrKindOOM == http_server_init(&server,
+                                          test_arena(sizeof(HttpHandler)), 1,
+                                          LogLevelError, env)
+                             .kind);
+  }
+
+  // Exactly enough room for both pools.
+  {
+    const usize handler_chunk =
+        usize_round_up_multiple_of(sizeof(HttpHandler), POOL_ALIGN);
+    const usize needed = 2 * handler_chunk + 2 * HTTP_HANDLER_ARENA_SIZE;
+    Arena arena = test_arena(needed);
+    // Make it exact: `test_arena` may hand out a few bytes more.
+    arena.start = arena.end - needed;
+    assert(0 == (usize)arena.start % POOL_ALIGN);
+
+    HttpServer server = {0};
+    assert(ErrKindNone ==
+           http_server_init(&server, arena, 2, LogLevelError, env).kind);
+    assert(server.memory_blocks_pool.buffer + 2 * HTTP_HANDLER_ARENA_SIZE ==
+           arena.end);
+  }
+}
+
+// ---------- The OTEL server ----------
+
+#define TEST_OTEL_FD 9
+#define TEST_OTEL_CHUNKS_MAX 4
+#define TEST_OTEL_RESPONSE "HTTP/1.1 200\r\nConnection:Close\r\n\r\nHello"
+
+typedef struct {
+  // Each read is answered with the next chunk, then with 0 bytes (EOF).
+  Bytes chunks[TEST_OTEL_CHUNKS_MAX];
+  usize chunks_len;
+  usize chunks_read;
+  ErrorKind read_fails_with;
+  ErrorKind write_fails_with;
+  // Leave every read unanswered, to hold connections open.
+  bool read_parks;
+  // Once the first read is answered, submitting this kind fails.
+  IoActionKind then_submit_fails_for;
+
+  u8 written[256];
+  usize written_len;
+
+  usize read_calls;
+  usize write_calls;
+  // `IO`'s close.
+  usize close_calls;
+  // `Env`'s, taken when no `IO` close is coming.
+  usize close_socket_calls;
+} TestOtelCtx;
+
+__attribute__((warn_unused_result)) static Error
+test_otel_close_socket(const Env *env, i32 fd) {
+  TestOtelCtx *const c = env->ctx;
+  assert(c);
+  assert(TEST_OTEL_FD == fd);
+
+  c->close_socket_calls += 1;
+  return (Error){.kind = ErrKindNone};
+}
+
+static TestIoPerformResult test_otel_perform(TestIo *test_io,
+                                             IoCompletion *completion, i32 fd,
+                                             Error *dst_err, usize *dst_res) {
+  TestOtelCtx *const c = test_io->script;
+  assert(c);
+  assert(TEST_OTEL_FD == fd);
+
+  switch (completion->action.kind) {
+  case IoActionKindRead: {
+    c->read_calls += 1;
+    if (c->read_parks) {
+      return TestIoPerformParked;
+    }
+    if (IoActionKindNone != c->then_submit_fails_for) {
+      test_io->submit_fails_for = c->then_submit_fails_for;
+      test_io->submit_fails_with = ErrKindAgain;
+    }
+    if (ErrKindNone != c->read_fails_with) {
+      *dst_err = (Error){.kind = c->read_fails_with};
+      return TestIoPerformDone;
+    }
+    if (c->chunks_read == c->chunks_len) {
+      *dst_res = 0;
+      return TestIoPerformDone;
+    }
+    const Bytes chunk = c->chunks[c->chunks_read];
+    const Bytes dst = completion->action.v.read.data;
+    assert(chunk.len <= dst.len);
+    memcpy(dst.data, chunk.data, chunk.len);
+    c->chunks_read += 1;
+    *dst_res = chunk.len;
+    return TestIoPerformDone;
+  }
+  case IoActionKindWrite: {
+    c->write_calls += 1;
+    if (ErrKindNone != c->write_fails_with) {
+      *dst_err = (Error){.kind = c->write_fails_with};
+      return TestIoPerformDone;
+    }
+    const Bytes data = completion->action.v.write.data;
+    assert(c->written_len + data.len <= sizeof(c->written));
+    memcpy(c->written + c->written_len, data.data, data.len);
+    c->written_len += data.len;
+    *dst_res = data.len;
+    return TestIoPerformDone;
+  }
+  case IoActionKindClose:
+    c->close_calls += 1;
+    return TestIoPerformDone;
+  case IoActionKindNone:
+  case IoActionKindOpen:
+  case IoActionKindAccept:
+  case IoActionKindConnect:
+  case IoActionKindSendTo:
+  case IoActionKindFileSize:
+  case IoActionKindRemoveFile:
+  default:
+    assert(0 && "unexpected operation");
+  }
+  return TestIoPerformDone;
+}
+
+// How many chunks are free, by walking the free list.
+__attribute__((warn_unused_result)) static usize
+test_pool_free_count(const Pool *pool) {
+  assert(pool);
+  assert(pool->chunk_size);
+
+  const usize chunks_count = pool->buffer_len / pool->chunk_size;
+  usize res = 0;
+  const PoolNode *node = pool->head;
+  for (usize i = 0; i <= chunks_count; i++) {
+    if (!node) {
+      break;
+    }
+    assert(pool_owns(pool, node));
+    res += 1;
+    node = node->next;
+  }
+  assert(NULL == node);
+  assert(res <= chunks_count);
+  return res;
+}
+
+#define TEST_OTEL_INFLIGHT_MAX 2
+
+// One connection, from accept to the end. Every path must give back both its
+// handler and its memory block.
+static void test_otel_connection(TestOtelCtx *c) {
+  assert(c);
+
+  Env env = {.close_socket = test_otel_close_socket, .ctx = c};
+  TestIo test_io = {0};
+  test_io_make(&test_io, &env, test_otel_perform, c);
+
+  HttpServer server = {0};
+  assert(ErrKindNone == http_server_init(&server, test_arena(1 * MiB),
+                                         TEST_OTEL_INFLIGHT_MAX, LogLevelAll,
+                                         &env)
+                            .kind);
+
+  const i32 saved = test_stdout_silence();
+  otel_on_accept(&test_io.io, &server, (Ipv4Addr){0}, TEST_OTEL_FD);
+  test_io_drain(&test_io);
+  test_stdout_restore(saved);
+
+  // One way or another, the socket is closed exactly once.
+  assert(1 == c->close_calls + c->close_socket_calls);
+  assert(TEST_OTEL_INFLIGHT_MAX == test_pool_free_count(&server.handler_pool));
+  assert(TEST_OTEL_INFLIGHT_MAX ==
+         test_pool_free_count(&server.memory_blocks_pool));
+}
+
+__attribute__((warn_unused_result)) static bool
+test_otel_responded(const TestOtelCtx *c) {
+  assert(c);
+  return bytes_eq_cstr(bytes_make((u8 *)c->written, c->written_len),
+                       TEST_OTEL_RESPONSE);
+}
+
+static void test_otel(void) {
+  // A whole request in one read is answered, then the connection closes.
+  {
+    TestOtelCtx c = {
+        .chunks = {bytes_from_cstr("GET / HTTP/1.1\r\nHost: x\r\n\r\n")},
+        .chunks_len = 1,
+    };
+    test_otel_connection(&c);
+    assert(1 == c.read_calls);
+    assert(1 == c.write_calls);
+    assert(test_otel_responded(&c));
+    assert(1 == c.close_calls);
+  }
+
+  // A request split over reads is put back together.
+  {
+    TestOtelCtx c = {
+        .chunks = {bytes_from_cstr("POST /v1/tra"),
+                   bytes_from_cstr("ces HTTP/1.1\r\nHost: x\r\n"),
+                   bytes_from_cstr("Content-Length: 0\r\n\r\n")},
+        .chunks_len = 3,
+    };
+    test_otel_connection(&c);
+    assert(3 == c.read_calls);
+    assert(test_otel_responded(&c));
+    assert(1 == c.close_calls);
+  }
+
+  // The peer hangs up before the headers end, or right away.
+  {
+    TestOtelCtx c = {.chunks = {bytes_from_cstr("GET / HTTP/1.1\r\n")},
+                     .chunks_len = 1};
+    test_otel_connection(&c);
+    assert(2 == c.read_calls);
+    assert(0 == c.write_calls);
+    assert(1 == c.close_calls);
+
+    TestOtelCtx empty = {0};
+    test_otel_connection(&empty);
+    assert(1 == empty.read_calls);
+    assert(0 == empty.write_calls);
+    assert(1 == empty.close_calls);
+  }
+
+  // A read fails.
+  {
+    TestOtelCtx c = {.read_fails_with = ErrKindConnReset};
+    test_otel_connection(&c);
+    assert(0 == c.write_calls);
+    assert(1 == c.close_calls);
+  }
+
+  // A malformed status line or header gets no answer.
+  {
+    TestOtelCtx bad_sl = {
+        .chunks = {bytes_from_cstr("BREW / HTTP/1.1\r\nHost: x\r\n\r\n")},
+        .chunks_len = 1,
+    };
+    test_otel_connection(&bad_sl);
+    assert(0 == bad_sl.write_calls);
+    assert(1 == bad_sl.close_calls);
+
+    TestOtelCtx bad_header = {
+        .chunks = {bytes_from_cstr("GET / HTTP/1.1\r\nno colon\r\n\r\n")},
+        .chunks_len = 1,
+    };
+    test_otel_connection(&bad_header);
+    assert(0 == bad_header.write_calls);
+    assert(1 == bad_header.close_calls);
+  }
+
+  // Headers that fill the receive buffer without ending.
+  {
+    static u8 big[8192];
+    memset(big, 'a', sizeof(big));
+    TestOtelCtx c = {.chunks = {bytes_make(big, sizeof(big))},
+                     .chunks_len = 1};
+    test_otel_connection(&c);
+    assert(1 == c.read_calls);
+    assert(0 == c.write_calls);
+    assert(1 == c.close_calls);
+  }
+
+  // The write fails: the connection still closes.
+  {
+    TestOtelCtx c = {
+        .chunks = {bytes_from_cstr("GET / HTTP/1.1\r\n\r\n")},
+        .chunks_len = 1,
+        .write_fails_with = ErrKindConnReset,
+    };
+    test_otel_connection(&c);
+    assert(1 == c.write_calls);
+    assert(0 == c.written_len);
+    assert(1 == c.close_calls);
+  }
+
+  // Operations that cannot even be submitted.
+  {
+    // The first read.
+    TestOtelCtx first_read = {0};
+    {
+      Env env = {.close_socket = test_otel_close_socket, .ctx = &first_read};
+      TestIo test_io = {0};
+      test_io_make(&test_io, &env, test_otel_perform, &first_read);
+      test_io.submit_fails_for = IoActionKindRead;
+      test_io.submit_fails_with = ErrKindAgain;
+
+      HttpServer server = {0};
+      assert(ErrKindNone == http_server_init(&server, test_arena(1 * MiB), 1,
+                                             LogLevelAll, &env)
+                                .kind);
+      const i32 saved = test_stdout_silence();
+      otel_on_accept(&test_io.io, &server, (Ipv4Addr){0}, TEST_OTEL_FD);
+      test_io_drain(&test_io);
+      test_stdout_restore(saved);
+
+      assert(0 == first_read.read_calls);
+      assert(1 == first_read.close_calls);
+      assert(1 == test_pool_free_count(&server.handler_pool));
+      assert(1 == test_pool_free_count(&server.memory_blocks_pool));
+    }
+
+    // A later read.
+    TestOtelCtx next_read = {
+        .chunks = {bytes_from_cstr("GET / HT")},
+        .chunks_len = 1,
+        .then_submit_fails_for = IoActionKindRead,
+    };
+    test_otel_connection(&next_read);
+    assert(1 == next_read.read_calls);
+    assert(1 == next_read.close_calls);
+
+    // The write.
+    TestOtelCtx write = {
+        .chunks = {bytes_from_cstr("GET / HTTP/1.1\r\n\r\n")},
+        .chunks_len = 1,
+        .then_submit_fails_for = IoActionKindWrite,
+    };
+    test_otel_connection(&write);
+    assert(0 == write.write_calls);
+    assert(1 == write.close_calls);
+
+    // The close: no callback is coming, so the socket is closed directly.
+    TestOtelCtx close = {.then_submit_fails_for = IoActionKindClose};
+    test_otel_connection(&close);
+    assert(0 == close.close_calls);
+    assert(1 == close.close_socket_calls);
+  }
+
+  // With every slot taken, a new connection is turned away at once.
+  {
+    TestOtelCtx c = {.read_parks = true};
+    Env env = {.close_socket = test_otel_close_socket, .ctx = &c};
+    TestIo test_io = {0};
+    test_io_make(&test_io, &env, test_otel_perform, &c);
+
+    HttpServer server = {0};
+    assert(ErrKindNone == http_server_init(&server, test_arena(1 * MiB), 1,
+                                           LogLevelAll, &env)
+                              .kind);
+    const i32 saved = test_stdout_silence();
+    otel_on_accept(&test_io.io, &server, (Ipv4Addr){0}, TEST_OTEL_FD);
+    otel_on_accept(&test_io.io, &server, (Ipv4Addr){0}, TEST_OTEL_FD);
+    test_io_drain(&test_io);
+    test_stdout_restore(saved);
+
+    assert(1 == c.read_calls);
+    assert(1 == c.close_socket_calls);
+    assert(0 == test_pool_free_count(&server.handler_pool));
   }
 }
 
@@ -8152,8 +8685,10 @@ static void test(const char *filter) {
       {"bytes_find", test_bytes_find},
       {"bytes_split", test_bytes_split},
       {"http_find_headers_end", test_http_find_headers_end},
+      {"http_parse_req_status_line", test_http_parse_req_status_line},
       {"http_parse_headers", test_http_parse_headers},
       {"http_server_pool", test_http_server_pool},
+      {"otel", test_otel},
       {"bencode_validate_dict", test_bencode_validate_dict},
       {"sha256_vectors", test_sha256_vectors},
       {"sha256_million_a", test_sha256_million_a},

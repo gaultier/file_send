@@ -268,6 +268,18 @@ static void http_handler_init(HttpHandler *handler, HttpServer *server, IO *io,
   assert(handler->headers);
 }
 
+// Gives back what `http_handler_init` took. `handler` is not to be used after.
+static void http_handler_release(HttpHandler *handler) {
+  assert(handler);
+  HttpServer *const server = handler->server;
+  assert(server);
+
+  // `arena.start` moves as the arena is used, `arena.end` does not.
+  pool_release(&server->memory_blocks_pool,
+               handler->arena.end - HTTP_HANDLER_ARENA_SIZE);
+  pool_release(&server->handler_pool, handler);
+}
+
 __attribute__((warn_unused_result)) static Error
 http_parse_req_status_line(Bytes src, HttpRequestStatusLine *res,
                            usize *advanced) {
