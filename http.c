@@ -8,7 +8,7 @@ typedef struct {
   Bytes value;
 } HttpHeader;
 
-__attribute__((unused)) __attribute__((warn_unused_result)) static Find
+__attribute__((warn_unused_result)) static Find
 http_find_headers_end(Bytes haystack) {
   return bytes_find(haystack, bytes_from_cstr("\r\n\r\n"),
                     FindOptionsIndexAfterNeedleEnd);
@@ -114,7 +114,7 @@ http_parse_field_line(Bytes line, HttpHeader *dst) {
 // empty line that ends them (RFC 9112 section 2.1). `src` starts right after
 // the start line. What follows the empty line is the body and is not read.
 // The headers borrow from `src`.
-__attribute__((unused)) __attribute__((warn_unused_result)) static Error
+__attribute__((warn_unused_result)) static Error
 http_parse_headers(Bytes src, HttpHeader *headers, usize *headers_len,
                    usize headers_cap) {
   assert(headers);
