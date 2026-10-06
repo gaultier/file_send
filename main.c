@@ -12,6 +12,7 @@
 #include "win32.c"
 #endif
 
+#include "http.c"
 #include "log.c"
 #include "torrent.c"
 

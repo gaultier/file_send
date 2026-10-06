@@ -4556,6 +4556,173 @@ static void test_bytes_split(void) {
   }
 }
 
+static void test_http_find_headers_end(void) {
+  const struct {
+    const char *src;
+    bool found;
+    usize idx;
+  } cases[] = {
+      {"", false, 0},
+      {"\r\n", false, 0},
+      {"\r\n\r", false, 0},
+      {"\r\n\r\n", true, 4},
+      {"GET / HTTP/1.1\r\nHost: x\r\n\r\nbody", true, 27},
+      // Only the first blank line counts: the rest is body.
+      {"A: b\r\n\r\n\r\n\r\n", true, 8},
+  };
+
+  for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    const Find find = http_find_headers_end(bytes_from_cstr(cases[i].src));
+    assert(cases[i].found == find.found);
+    assert(cases[i].idx == find.idx);
+  }
+}
+
+// Cases follow RFC 9110 section 5 and RFC 9112 section 5.
+static void test_http_parse_headers(void) {
+  const struct {
+    const char *src;
+    ErrorKind err;
+    usize headers_len;
+    struct {
+      const char *key;
+      const char *value;
+    } headers[3];
+  } cases[] = {
+      // No headers at all.
+      {"\r\n", ErrKindNone, 0, {{0}}},
+      // The body is not read.
+      {"\r\nbody", ErrKindNone, 0, {{0}}},
+      {"A: b\r\n\r\nC: d\r\n\r\n", ErrKindNone, 1, {{"A", "b"}}},
+      {"Host: x\r\n\r\n", ErrKindNone, 1, {{"Host", "x"}}},
+      // OWS around the value is optional and not part of it.
+      {"Host:x\r\n\r\n", ErrKindNone, 1, {{"Host", "x"}}},
+      {"Host: \t x \t\r\n\r\n", ErrKindNone, 1, {{"Host", "x"}}},
+      // An empty value is valid.
+      {"A:\r\n\r\n", ErrKindNone, 1, {{"A", ""}}},
+      {"A: \t \r\n\r\n", ErrKindNone, 1, {{"A", ""}}},
+      // Whitespace inside the value is kept.
+      {"A: b \t c\r\n\r\n", ErrKindNone, 1, {{"A", "b \t c"}}},
+      // Only the first colon separates.
+      {"A: b:c\r\n\r\n", ErrKindNone, 1, {{"A", "b:c"}}},
+      // Every tchar.
+      {"!#$%&'*+-.^_`|~09azAZ: v\r\n\r\n",
+       ErrKindNone,
+       1,
+       {{"!#$%&'*+-.^_`|~09azAZ", "v"}}},
+      // obs-text.
+      {"A: \x80\xff\r\n\r\n", ErrKindNone, 1, {{"A", "\x80\xff"}}},
+      {"A: b\r\nA: c\r\nD: e\r\n\r\n",
+       ErrKindNone,
+       3,
+       {{"A", "b"}, {"A", "c"}, {"D", "e"}}},
+
+      // Cut short.
+      {"", ErrKindInvalidData, 0, {{0}}},
+      {"Host: x", ErrKindInvalidData, 0, {{0}}},
+      {"Host: x\r\n", ErrKindInvalidData, 1, {{"Host", "x"}}},
+      {"Host: x\r\n\r", ErrKindInvalidData, 1, {{"Host", "x"}}},
+      // Only CRLF ends a line.
+      {"A: b\n\n", ErrKindInvalidData, 0, {{0}}},
+      {"A: b\nC: d\r\n\r\n", ErrKindInvalidData, 0, {{0}}},
+      {"A: b\rC: d\r\n\r\n", ErrKindInvalidData, 0, {{0}}},
+      // No colon, or no name.
+      {"Host x\r\n\r\n", ErrKindInvalidData, 0, {{0}}},
+      {": x\r\n\r\n", ErrKindInvalidData, 0, {{0}}},
+      // Whitespace before the colon.
+      {"Host : x\r\n\r\n", ErrKindInvalidData, 0, {{0}}},
+      {"Host\t: x\r\n\r\n", ErrKindInvalidData, 0, {{0}}},
+      // obs-fold, and its look-alike on the first line.
+      {"A: b\r\n c\r\n\r\n", ErrKindInvalidData, 1, {{"A", "b"}}},
+      {"A: b\r\n\tc\r\n\r\n", ErrKindInvalidData, 1, {{"A", "b"}}},
+      {" A: b\r\n\r\n", ErrKindInvalidData, 0, {{0}}},
+      // Not a token.
+      {"A(: b\r\n\r\n", ErrKindInvalidData, 0, {{0}}},
+      {"A\": b\r\n\r\n", ErrKindInvalidData, 0, {{0}}},
+      {"\x80: b\r\n\r\n", ErrKindInvalidData, 0, {{0}}},
+      // Control characters in the value.
+      {"A: b\x7f\r\n\r\n", ErrKindInvalidData, 0, {{0}}},
+      {"A: b\x01\r\n\r\n", ErrKindInvalidData, 0, {{0}}},
+  };
+
+  for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    const Bytes src = bytes_from_cstr(cases[i].src);
+    HttpHeader headers[3] = {0};
+    usize headers_len = 0;
+
+    const Error err = http_parse_headers(src, headers, &headers_len,
+                                         sizeof(headers) / sizeof(headers[0]));
+    assert(cases[i].err == err.kind);
+    assert(cases[i].headers_len == headers_len);
+
+    for (usize j = 0; j < headers_len; j++) {
+      assert(bytes_eq_cstr(headers[j].key, cases[i].headers[j].key));
+      assert(bytes_eq_cstr(headers[j].value, cases[i].headers[j].value));
+
+      // Borrowed from `src`, not copied.
+      assert(src.data <= headers[j].key.data);
+      assert(headers[j].key.data + headers[j].key.len <= src.data + src.len);
+      assert(src.data <= headers[j].value.data);
+      assert(headers[j].value.data + headers[j].value.len <=
+             src.data + src.len);
+    }
+  }
+
+  // A NUL in the value, which a C string cannot hold.
+  {
+    const u8 data[] = {'A', ':', ' ', 'b', 0, 'c', '\r', '\n', '\r', '\n'};
+    HttpHeader headers[1] = {0};
+    usize headers_len = 0;
+
+    assert(ErrKindInvalidData ==
+           http_parse_headers(bytes_make((u8 *)data, sizeof(data)), headers,
+                              &headers_len, 1)
+               .kind);
+    assert(0 == headers_len);
+  }
+
+  // A NULL pointer is legal as long as the length is zero.
+  {
+    HttpHeader headers[1] = {0};
+    usize headers_len = 0;
+
+    assert(
+        ErrKindInvalidData ==
+        http_parse_headers(bytes_make(NULL, 0), headers, &headers_len, 1).kind);
+    assert(0 == headers_len);
+  }
+
+  // Out of room, and exactly enough room.
+  {
+    const Bytes src = bytes_from_cstr("A: b\r\nC: d\r\n\r\n");
+
+    HttpHeader one[1] = {0};
+    usize one_len = 0;
+    assert(ErrKindOOM == http_parse_headers(src, one, &one_len, 1).kind);
+    assert(1 == one_len);
+    assert(bytes_eq_cstr(one[0].key, "A"));
+
+    HttpHeader two[2] = {0};
+    usize two_len = 0;
+    assert(ErrKindNone == http_parse_headers(src, two, &two_len, 2).kind);
+    assert(2 == two_len);
+    assert(bytes_eq_cstr(two[1].key, "C"));
+    assert(bytes_eq_cstr(two[1].value, "d"));
+  }
+
+  // `http_is_tchar` against the list in RFC 9110 section 5.6.2, byte by byte.
+  {
+    const char tchars[] = "!#$%&'*+-.^_`|~0123456789"
+                          "abcdefghijklmnopqrstuvwxyz"
+                          "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    for (usize c = 0; c <= 0xff; c++) {
+      const bool expected =
+          0 != c && NULL != memchr(tchars, (int)c, sizeof(tchars) - 1);
+      assert(expected == http_is_tchar((u8)c));
+    }
+  }
+}
+
 static void test_bencode_validate_dict(void) {
   const BencodeValue num = {.kind = BencodeKindInteger, .v.num = 42};
 
@@ -7801,6 +7968,8 @@ static void test(const char *filter) {
       {"bytes_cmp", test_bytes_cmp},
       {"bytes_find", test_bytes_find},
       {"bytes_split", test_bytes_split},
+      {"http_find_headers_end", test_http_find_headers_end},
+      {"http_parse_headers", test_http_parse_headers},
       {"bencode_validate_dict", test_bencode_validate_dict},
       {"sha256_vectors", test_sha256_vectors},
       {"sha256_million_a", test_sha256_million_a},
