@@ -114,6 +114,15 @@ static void otel_on_read(IoCompletion *completion, Error read_err,
   }
   assert(advanced <= headers.len);
 
+  // HTTP/1.x only. A higher minor version is handled as 1.1 (RFC 9110 section
+  // 2.5).
+  if (1 != sl.version_major) {
+    log(&handler->logger, LogLevelError, "unsupported http version: %u.%u",
+        sl.version_major, sl.version_minor);
+    otel_handler_close(handler);
+    return;
+  }
+
   bytes_advance(&headers, advanced);
   fwrite(headers.data, 1, headers.len, stdout);
   puts("");

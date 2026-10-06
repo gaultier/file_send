@@ -4769,6 +4769,32 @@ static void test_http_parse_req_status_line(void) {
     assert(src.data + 4 == sl.url.data);
   }
 
+  // The version is one digit, a dot, one digit. Any such version parses.
+  {
+    const struct {
+      const char *line;
+      u8 major;
+      u8 minor;
+    } cases[] = {
+        {"GET / HTTP/1.0\r\n", 1, 0},
+        {"GET / HTTP/1.1\r\n", 1, 1},
+        {"GET / HTTP/1.2\r\n", 1, 2},
+        {"GET / HTTP/2.0\r\n", 2, 0},
+        {"GET / HTTP/0.9\r\n", 0, 9},
+        {"GET / HTTP/9.9\r\n", 9, 9},
+    };
+    for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+      HttpRequestStatusLine sl = {.version_major = 42, .version_minor = 42};
+      usize advanced = 0;
+      assert(ErrKindNone ==
+             http_parse_req_status_line(bytes_from_cstr(cases[i].line), &sl,
+                                        &advanced)
+                 .kind);
+      assert(cases[i].major == sl.version_major);
+      assert(cases[i].minor == sl.version_minor);
+    }
+  }
+
   // Nothing to parse is not an error, and nothing is consumed.
   {
     HttpRequestStatusLine sl = {0};
@@ -4798,8 +4824,19 @@ static void test_http_parse_req_status_line(void) {
         "GET / \r\n",
         // No slash in the version.
         "GET / HTTP\r\n",
-        // Not HTTP.
+        // Not HTTP, and the name is case-sensitive.
         "GET / HTTPS/1.1\r\n",
+        "GET / http/1.1\r\n",
+        // Not `DIGIT "." DIGIT`.
+        "GET / HTTP/\r\n",
+        "GET / HTTP/1\r\n",
+        "GET / HTTP/1.\r\n",
+        "GET / HTTP/.1\r\n",
+        "GET / HTTP/1.10\r\n",
+        "GET / HTTP/11.1\r\n",
+        "GET / HTTP/a.b\r\n",
+        "GET / HTTP/1,1\r\n",
+        "GET / HTTP/1.1 \r\n",
     };
     for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
       HttpRequestStatusLine sl = {0};
@@ -5316,6 +5353,31 @@ static void test_otel(void) {
     test_otel_connection(&c);
     assert(0 == c.write_calls);
     assert(1 == c.close_calls);
+  }
+
+  // Only HTTP/1.x is answered, whatever its minor version.
+  {
+    TestOtelCtx v2 = {
+        .chunks = {bytes_from_cstr("GET / HTTP/2.0\r\n\r\n")},
+        .chunks_len = 1,
+    };
+    test_otel_connection(&v2);
+    assert(0 == v2.write_calls);
+    assert(1 == v2.close_calls);
+
+    TestOtelCtx v1_0 = {
+        .chunks = {bytes_from_cstr("GET / HTTP/1.0\r\n\r\n")},
+        .chunks_len = 1,
+    };
+    test_otel_connection(&v1_0);
+    assert(test_otel_responded(&v1_0));
+
+    TestOtelCtx v1_2 = {
+        .chunks = {bytes_from_cstr("GET / HTTP/1.2\r\n\r\n")},
+        .chunks_len = 1,
+    };
+    test_otel_connection(&v1_2);
+    assert(test_otel_responded(&v1_2));
   }
 
   // A malformed status line or header gets no answer.

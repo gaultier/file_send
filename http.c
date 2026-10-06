@@ -345,9 +345,17 @@ http_parse_req_status_line(Bytes src, HttpRequestStatusLine *res,
   if (!bytes_eq_cstr(split.left, "HTTP")) {
     return (Error){.kind = ErrKindInvalidData};
   }
-  // FIXME
-  res->version_major = 1;
-  res->version_minor = 1;
+  // `DIGIT "." DIGIT` (RFC 9112 section 2.3). Which versions are supported is
+  // up to the caller.
+  const Bytes version = split.right;
+  if (3 != version.len || !char_is_digit_ascii(version.data[0]) ||
+      '.' != version.data[1] || !char_is_digit_ascii(version.data[2])) {
+    return (Error){.kind = ErrKindInvalidData};
+  }
+  res->version_major = (u8)(version.data[0] - '0');
+  res->version_minor = (u8)(version.data[2] - '0');
+  assert(res->version_major <= 9);
+  assert(res->version_minor <= 9);
 
   *advanced = src.len - remaining.len;
   return (Error){0};
