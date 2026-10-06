@@ -1740,3 +1740,33 @@ slice_u8_find_slice(Slice_u8 haystack, Slice_u8 needle, FindOptions options) {
 
   return (Find){0};
 }
+
+typedef struct {
+  Slice_u8 left;
+  Slice_u8 right;
+} Split;
+
+__attribute__((warn_unused_result)) static Split
+slice_u8_split(Slice_u8 haystack, Slice_u8 needle) {
+  if (0 == haystack.len || 0 == needle.len || needle.len > haystack.len) {
+    return (Split){0};
+  }
+
+  const Find find =
+      slice_u8_find_slice(haystack, needle, FindOptionsIndexAtNeedleStart);
+
+  if (!find.found) {
+    return (Split){0};
+  }
+
+  const Split res = {
+      .left = slice_u8_take(haystack, find.idx),
+      .right.data = haystack.data + find.idx + needle.len,
+      .right.len = haystack.len - find.idx - needle.len,
+  };
+  assert(res.left.len < haystack.len);
+  assert(res.right.len < haystack.len);
+  assert(res.left.data + res.left.len < res.right.data);
+
+  return res;
+}
