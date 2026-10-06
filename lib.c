@@ -1764,6 +1764,8 @@ slice_u8_split(Slice_u8 haystack, Slice_u8 needle) {
       .right.data = haystack.data + find.idx + needle.len,
       .right.len = haystack.len - find.idx - needle.len,
   };
+  assert(res.left.data);
+  assert(res.right.data);
   assert(res.left.len < haystack.len);
   assert(res.right.len < haystack.len);
   assert(res.left.data + res.left.len < res.right.data);
