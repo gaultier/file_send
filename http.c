@@ -160,7 +160,6 @@ http_parse_headers(Bytes src, HttpHeader *headers, usize *headers_len,
   }
 
   assert(0 && "unreachable");
-  __builtin_unreachable();
 }
 
 // ---------- Server ----------
