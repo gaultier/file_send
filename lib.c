@@ -1705,8 +1705,8 @@ typedef struct {
 } Find;
 
 typedef enum {
-  FindOptionsIndexOfNeedleStart = 0,
-  FindOptionsIndexOfNeedleEndExcl = 1,
+  FindOptionsIndexAtNeedleStart = 0,
+  FindOptionsIndexAfterNeedleEnd = 1,
 } FindOptions;
 
 __attribute__((warn_unused_result)) static Find
@@ -1718,7 +1718,7 @@ slice_u8_find_slice(Slice_u8 haystack, Slice_u8 needle, FindOptions options) {
   for (usize i = 0; i < haystack.len - needle.len; i++) {
     if (0 == memcmp(&haystack.data[i], &needle.data[i], needle.len)) {
       const usize idx =
-          (options & FindOptionsIndexOfNeedleEndExcl) ? i + needle.len : i;
+          (options & FindOptionsIndexAfterNeedleEnd) ? i + needle.len : i;
       return (Find){
           .found = true,
           .idx = idx,
