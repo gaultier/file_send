@@ -16,7 +16,7 @@ static void http_handler_on_close(IoCompletion *completion, Error err,
 
   log(&handler->logger, LogLevelInfo, "closed");
 
-  http_handler_pool_release(&handler->server->pool, handler);
+  pool_release(&handler->server->handler_pool, handler);
 }
 
 static void otel_on_write(IoCompletion *completion, Error write_err,
@@ -124,7 +124,7 @@ static void otel_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
   assert(vctx);
   HttpServer *const server = vctx;
 
-  HttpHandler *const handler = http_handler_pool_acquire(&server->pool);
+  HttpHandler *const handler = pool_acquire(&server->handler_pool);
   if (!handler) {
     log(&server->logger, LogLevelError,
         "backpressure: no available pool slot for request");

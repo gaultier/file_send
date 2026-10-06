@@ -208,22 +208,11 @@ typedef struct {
   BytesBuffer resp;
 } HttpHandler;
 
-// Both arrays live in the server's arena.
-typedef struct {
-  // Bitset, `slots_len / HTTP_POOL_SLOTS_PER_GROUP` groups.
-  // Bit `i` of group `g` means: `slots[g * HTTP_POOL_SLOTS_PER_GROUP + i]` is
-  // occupied.
-  HttpPoolSlotGroup *occupied;
-  HttpHandler *slots;
-  // A multiple of `HTTP_POOL_SLOTS_PER_GROUP`.
-  usize slots_len;
-} HttpHandlerPool;
-
 struct HttpServer {
   Logger logger;
   // Owned by the server. The pool is carved out of it.
   Arena arena;
-  HttpHandlerPool pool;
+  Pool handler_pool;
   const Env *env;
 };
 
@@ -263,53 +252,13 @@ http_server_init(HttpServer *server, Arena arena, usize inflight_requests_max,
   memset(occupied, 0, groups_len * sizeof(HttpPoolSlotGroup));
   memset(slots, 0, slots_len * sizeof(HttpHandler));
 
-  server->pool = (HttpHandlerPool){
-      .occupied = occupied,
-      .slots = slots,
-      .slots_len = slots_len,
-  };
-  assert(server->pool.slots_len >= inflight_requests_max);
-
-  return (Error){.kind = ErrKindNone};
-}
-
-__attribute__((warn_unused_result)) static HttpHandler *
-http_handler_pool_acquire(HttpHandlerPool *pool) {
-  assert(pool);
-  assert(pool->occupied);
-  assert(pool->slots);
-  assert(pool->slots_len > 0);
-  assert(0 == pool->slots_len % HTTP_POOL_SLOTS_PER_GROUP);
-
-  const usize groups_len = pool->slots_len / HTTP_POOL_SLOTS_PER_GROUP;
-  for (usize i = 0; i < groups_len; i++) {
-    const HttpPoolSlotGroup slot_group = pool->occupied[i];
-
-    const i32 first_unset_bit = __builtin_ffsll((i64)~slot_group);
-
-    // This group is full; there may be a free slot in a later one.
-    if (0 == first_unset_bit) {
-      continue;
-    }
-
-    const u32 bit_idx = (u32)(first_unset_bit - 1);
-    const HttpPoolSlotGroup mask = 1ULL << bit_idx;
-
-    // The read above is still good: one thread runs the loop, and between that
-    // read and this write there is nothing for it to have been doing but this.
-    assert(0 == (pool->occupied[i] & mask));
-    pool->occupied[i] |= mask;
-
-    const usize slot_idx = i * HTTP_POOL_SLOTS_PER_GROUP + bit_idx;
-    assert(slot_idx < pool->slots_len);
-
-    HttpHandler *res = &pool->slots[slot_idx];
-    assert(0 == res->io);
-    assert(0 == res->socket);
-    return res;
+  Error err =
+      pool_make(&server->handler_pool, &arena, sizeof(HttpHandler), 1 << 14);
+  if (ErrKindNone != err.kind) {
+    return err;
   }
 
-  return NULL;
+  return (Error){.kind = ErrKindNone};
 }
 
 static void http_handler_init(HttpHandler *handler, HttpServer *server, IO *io,
@@ -339,29 +288,6 @@ static void http_handler_init(HttpHandler *handler, HttpServer *server, IO *io,
   handler->headers = arena_alloc(&handler->arena, __alignof__(HttpHeader),
                                  sizeof(HttpHeader), handler->headers_cap);
   assert(handler->headers);
-}
-
-static void http_handler_pool_release(HttpHandlerPool *pool,
-                                      HttpHandler *slot) {
-  assert(pool);
-  assert(slot);
-
-  assert(slot >= pool->slots);
-  const usize slot_idx = (usize)(slot - pool->slots);
-  assert(slot_idx < pool->slots_len);
-
-  const usize slot_group_idx = slot_idx / HTTP_POOL_SLOTS_PER_GROUP;
-  assert(slot_group_idx < pool->slots_len / HTTP_POOL_SLOTS_PER_GROUP);
-  const u32 bit_idx = slot_idx % HTTP_POOL_SLOTS_PER_GROUP;
-
-  // We are still the owner so we are responsible for zeroing it.
-  memset(slot, 0, sizeof(*slot));
-
-  const HttpPoolSlotGroup mask = 1ULL << bit_idx;
-
-  // Sanity check against double release of the same slot: it was occupied.
-  assert(0 != (pool->occupied[slot_group_idx] & mask));
-  pool->occupied[slot_group_idx] &= ~mask;
 }
 
 __attribute__((warn_unused_result)) static Error

@@ -1874,3 +1874,75 @@ __attribute__((warn_unused_result)) static Split bytes_split(Bytes haystack,
 
   return res;
 }
+
+// ----------------- Pool (free list) ------------
+typedef struct PoolNode PoolNode;
+
+struct PoolNode {
+  PoolNode *next;
+};
+
+typedef struct {
+  PoolNode *head;
+  usize chunk_size;
+
+  void *buffer;
+  usize buffer_len;
+
+} Pool;
+
+__attribute__((warn_unused_result)) static Error
+pool_make(Pool *pool, Arena *arena, usize chunk_size, usize elems_count) {
+  assert(pool);
+  assert(arena);
+  assert(chunk_size);
+  assert(elems_count);
+
+  usize real_chunk_size = chunk_size;
+  assert(!__builtin_add_overflow(real_chunk_size, sizeof(PoolNode),
+                                 &real_chunk_size));
+
+  pool->buffer = arena_alloc(arena, 8, real_chunk_size, elems_count);
+  if (!pool->buffer) {
+    return (Error){.kind = ErrKindOOM};
+  }
+  // Cannot overflow since `arena_alloc` did not.
+  pool->buffer_len = real_chunk_size * elems_count;
+  pool->chunk_size = chunk_size;
+  pool->head = (PoolNode *)pool->buffer;
+  memset(pool->head, 0, sizeof(PoolNode));
+
+  return (Error){0};
+}
+
+__attribute__((warn_unused_result)) static void *pool_acquire(Pool *pool) {
+  assert(pool);
+  assert(pool->chunk_size);
+
+  // OOM?
+  if (!pool->head) {
+    return NULL;
+  }
+
+  PoolNode *const res = pool->head;
+
+  pool->head = pool->head->next;
+
+  memset(res, 0, pool->chunk_size);
+
+  return res;
+}
+
+static void pool_release(Pool *pool, void *ptr) {
+  assert(pool);
+  assert(pool->chunk_size);
+  assert(ptr);
+
+  assert(pool->buffer <= ptr);
+  assert((u8 *)pool->buffer + pool->buffer_len < (u8 *)ptr);
+
+  PoolNode *const node = (PoolNode *)ptr;
+
+  node->next = pool->head;
+  pool->head = node->next;
+}
