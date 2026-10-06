@@ -237,8 +237,7 @@ int main(i32 argc, char *argv[]) {
     };
     IoServer server = {0};
     Error err_listen = io_listen_and_serve_tcp_ipv4(
-        io, &server, &ctx, listen_addr, ctx.log_level_mask,
-        torrent_peer_on_accept);
+        io, &server, &ctx, listen_addr, &logger, torrent_peer_on_accept);
     if (ErrKindNone != err_listen.kind) {
       log_err(&logger, "failed to listen and serve", err_listen);
       return 1;
@@ -283,7 +282,7 @@ int main(i32 argc, char *argv[]) {
     };
     IoServer server = {0};
     Error err_listen = io_listen_and_serve_tcp_ipv4(
-        io, &server, &ctx, listen_addr, ctx.log_level_mask, otel_on_accept);
+        io, &server, &ctx, listen_addr, &logger, otel_on_accept);
     if (ErrKindNone != err_listen.kind) {
       log_err(&logger, "failed to listen and serve", err_listen);
       return 1;

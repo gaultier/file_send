@@ -266,6 +266,7 @@ unix_tcp_bind_ipv4(const Env *env, i32 listen_socket, Ipv4Addr *addr) {
   (void)env;
   assert(addr);
 
+  const Ipv4Addr requested = *addr;
   struct sockaddr_in sock_addr_in = {
       .sin_family = AF_INET,
       .sin_port = htons(addr->port),
@@ -286,11 +287,17 @@ unix_tcp_bind_ipv4(const Env *env, i32 listen_socket, Ipv4Addr *addr) {
   ret =
       getsockname(listen_socket, (struct sockaddr *)&sock_addr_in, &sock_size);
   if (-1 == ret) {
-    return unix_error_from_errno(ret);
+    return unix_error_from_errno(errno);
   }
-  addr->ip = sock_addr_in.sin_addr.s_addr;
-  addr->port = sock_addr_in.sin_port;
-  assert(addr->port);
+  assert(sizeof(sock_addr_in) == sock_size);
+  assert(AF_INET == sock_addr_in.sin_family);
+
+  addr->ip = ntohl(sock_addr_in.sin_addr.s_addr);
+  addr->port = ntohs(sock_addr_in.sin_port);
+  // Port 0 asks the OS to pick one; anything else is kept as is.
+  assert(0 != addr->port);
+  assert(0 == requested.port || requested.port == addr->port);
+  assert(0 == requested.ip || requested.ip == addr->ip);
 
   return (Error){.kind = ErrKindNone};
 }

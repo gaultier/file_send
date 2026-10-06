@@ -1268,8 +1268,7 @@ static void log_err(const Logger *logger, const char *context, Error err) {
   assert(context);
 
   if (0 == err.data) {
-    log(logger, LogLevelError, "%s: %s\n", context,
-        error_kind_to_cstr(err.kind));
+    log(logger, LogLevelError, "%s: %s", context, error_kind_to_cstr(err.kind));
     return;
   }
 
@@ -1278,14 +1277,15 @@ static void log_err(const Logger *logger, const char *context, Error err) {
   if (!platform_error_describe(err.data, os_msg, sizeof(os_msg))) {
     // The description did not fit or the number is not one the system knows;
     // the number itself is still worth printing.
-    log(logger, LogLevelError, "%s: %s (errno %" PRIu64 ")\n", context,
+    log(logger, LogLevelError, "%s: %s (errno %" PRIu64 ")", context,
         error_kind_to_cstr(err.kind), err.data);
     return;
   }
 
-  log(logger, LogLevelError, "%s: %s (errno %" PRIu64 ": %s)\n", context,
+  log(logger, LogLevelError, "%s: %s (errno %" PRIu64 ": %s)", context,
       error_kind_to_cstr(err.kind), err.data, os_msg);
 }
+
 // ---------- IO: serving TCP ----------
 
 // `accept_socket` belongs to the callback from the moment it is handed over,
@@ -1303,6 +1303,8 @@ typedef struct {
   void *cb_ctx;
   AcceptCallback on_accept;
   i32 listen_socket;
+  // The address actually bound: with port 0, the port the OS picked.
+  Ipv4Addr addr;
   // Why the listener is not running. Set before `done` ever is, so a caller
   // that turns the loop until `done` always has the reason waiting for it.
   Error err;
@@ -1406,10 +1408,11 @@ static void io_server_on_accept(IoCompletion *completion, Error err,
 // read `server->err` when `server->done`.
 __attribute__((warn_unused_result)) static Error
 io_listen_and_serve_tcp_ipv4(IO *io, IoServer *server, void *cb_ctx,
-                             Ipv4Addr listen_addr, u32 log_level_mask,
+                             Ipv4Addr listen_addr, const Logger *logger,
                              AcceptCallback on_accept) {
   assert(io);
   assert(server);
+  assert(logger);
   assert(on_accept);
   assert(io->env);
 
@@ -1450,9 +1453,9 @@ io_listen_and_serve_tcp_ipv4(IO *io, IoServer *server, void *cb_ctx,
     }
   }
 
-  Logger logger = {.level_mask = log_level_mask};
-  log(&logger, LogLevelInfo, "http server listening on port %hu",
-      listen_addr.port);
+  assert(0 != listen_addr.port);
+  server->addr = listen_addr;
+  log(logger, LogLevelInfo, "listening on port %hu", listen_addr.port);
 
   {
     const Error err = env->listen(env, server->listen_socket, 1024);

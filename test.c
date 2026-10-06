@@ -905,6 +905,8 @@ typedef struct {
 
 // A recognisable descriptor: a real one would never be this.
 #define TEST_SERVER_LISTEN_FD 4242
+// What the fake OS picks when asked for port 0.
+#define TEST_SERVER_ASSIGNED_PORT 54321
 
 __attribute__((warn_unused_result)) static Error
 test_server_socket(const Env *env, SocketDomain domain, SocketType type,
@@ -935,14 +937,22 @@ test_server_enable_socket_reuse(const Env *env, i32 fd) {
 }
 
 __attribute__((warn_unused_result)) static Error
-test_server_tcp_bind_ipv4(const Env *env, i32 fd, Ipv4Addr addr) {
+test_server_tcp_bind_ipv4(const Env *env, i32 fd, Ipv4Addr *addr) {
   TestServerCtx *const c = env->ctx;
   assert(c);
+  assert(addr);
   assert(TEST_SERVER_LISTEN_FD == fd);
 
   c->bind_calls += 1;
-  c->bound_addr = addr;
-  return (Error){.kind = c->bind_fails_with};
+  c->bound_addr = *addr;
+  if (ErrKindNone != c->bind_fails_with) {
+    return (Error){.kind = c->bind_fails_with};
+  }
+
+  if (0 == addr->port) {
+    addr->port = TEST_SERVER_ASSIGNED_PORT;
+  }
+  return (Error){.kind = ErrKindNone};
 }
 
 __attribute__((warn_unused_result)) static Error
@@ -1096,8 +1106,9 @@ test_server_run(TestIo *test_io, TestServerCtx *ctx, const Env *env,
 
   const i32 saved = test_stdout_silence();
 
+  const Logger logger = logger_make(LogLevelAll, bytes_from_cstr("[test]"));
   const Error err_listen = io_listen_and_serve_tcp_ipv4(
-      &test_io->io, server, network_ctx, addr, torrent_peer_on_accept);
+      &test_io->io, server, network_ctx, addr, &logger, torrent_peer_on_accept);
 
   // Whether the setup failed or the listener ran and stopped, the loop is
   // turned until nothing is outstanding: a listener that came down still has a
@@ -1192,9 +1203,30 @@ static void test_io_listen_and_serve_setup_failures(void) {
 
     assert(addr.ip == ctx.bound_addr.ip);
     assert(addr.port == ctx.bound_addr.port);
+    assert(addr.ip == server.addr.ip);
+    assert(addr.port == server.addr.port);
     assert(ctx.backlog > 0);
     // The listener is closed on the way out.
     assert(1 == ctx.close_calls);
+  }
+
+  // Port 0: the port the OS picked is the one the server reports.
+  {
+    TestServerCtx ctx = {.accept_ends_with = ErrKindInvalidData};
+    const Env env = test_env_server_make(&ctx);
+    TestIo test_io = {0};
+    IoServer server = {0};
+    static TorrentNetworkCtx network_ctx;
+    test_network_ctx_init(&network_ctx);
+
+    const Ipv4Addr any_port = {.ip = addr.ip, .port = 0};
+    assert(ErrKindInvalidData == test_server_run(&test_io, &ctx, &env, &server,
+                                                 &network_ctx, any_port)
+                                     .kind);
+
+    assert(0 == ctx.bound_addr.port);
+    assert(addr.ip == server.addr.ip);
+    assert(TEST_SERVER_ASSIGNED_PORT == server.addr.port);
   }
 }
 
@@ -1253,8 +1285,10 @@ static void test_io_listen_and_serve_accept(void) {
     test_io.submit_fails_with = ErrKindOOM;
 
     const i32 saved = test_stdout_silence();
-    const Error err_listen = io_listen_and_serve_tcp_ipv4(
-        &test_io.io, &server, &network_ctx, addr, torrent_peer_on_accept);
+    const Logger logger = logger_make(LogLevelAll, bytes_from_cstr("[test]"));
+    const Error err_listen =
+        io_listen_and_serve_tcp_ipv4(&test_io.io, &server, &network_ctx, addr,
+                                     &logger, torrent_peer_on_accept);
     assert(ErrKindNone == err_listen.kind);
     assert(ErrKindNone == io_run_until(&test_io.io, &server.done, 1).kind);
     test_io_drain(&test_io);
