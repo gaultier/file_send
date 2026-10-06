@@ -177,7 +177,8 @@ typedef struct {
   Arena arena;
   IO *io;
   HttpServer *server;
-  IoCompletion completion_close;
+  IoCompletion completion;
+  BytesBuffer recv;
 } HttpHandler;
 
 // Both arrays live in the server's arena.
@@ -192,20 +193,25 @@ typedef struct {
 } HttpHandlerPool;
 
 struct HttpServer {
-  u32 log_level_mask;
+  Logger logger;
   // Owned by the server. The pool is carved out of it.
   Arena arena;
   HttpHandlerPool pool;
+  const Env *env;
 };
 
 // `inflight_requests_max` is rounded up to a whole slot group.
 __attribute__((warn_unused_result)) static Error
 http_server_init(HttpServer *server, Arena arena, usize inflight_requests_max,
-                 u32 log_level_mask) {
+                 u32 log_level_mask, const Env *env) {
   assert(server);
   assert(inflight_requests_max > 0);
 
-  *server = (HttpServer){.log_level_mask = log_level_mask, .arena = arena};
+  *server = (HttpServer){
+      .logger = logger_make(log_level_mask, (Bytes){0}),
+      .arena = arena,
+      .env = env,
+  };
 
   const usize slots_len = usize_round_up_multiple_of(inflight_requests_max,
                                                      HTTP_POOL_SLOTS_PER_GROUP);
@@ -279,7 +285,7 @@ http_handler_pool_acquire(HttpHandlerPool *pool) {
   return NULL;
 }
 
-static void http_handler_init(HttpHandler *handler, HttpServer *server,
+static void http_handler_init(HttpHandler *handler, HttpServer *server, IO *io,
                               Ipv4Addr addr, i32 socket) {
   assert(handler);
 
@@ -291,10 +297,17 @@ static void http_handler_init(HttpHandler *handler, HttpServer *server,
            addr.port);
 
   handler->logger =
-      logger_make(server->log_level_mask, bytes_from_cstr(log_prefix));
+      logger_make(server->logger.level_mask, bytes_from_cstr(log_prefix));
   handler->socket = socket;
   handler->server = server;
-  handler->completion_close.ctx = handler;
+  handler->io = io;
+  handler->completion.ctx = handler;
+  // FIXME: Pools.
+  assert(ErrKindNone ==
+         arena_valloc(server->env, 1 * MiB /* TODO: Revisit */, &handler->arena)
+             .kind);
+  assert(ErrKindNone ==
+         bytes_buffer_make(8 * KiB, &handler->arena, &handler->recv).kind);
 }
 
 static void http_handler_pool_release(HttpHandlerPool *pool,

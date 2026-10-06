@@ -283,7 +283,8 @@ int main(i32 argc, char *argv[]) {
     HttpServer ctx = {0};
     {
       const Error err_init = http_server_init(
-          &ctx, http_arena, 1024, LogLevelError | LogLevelInfo | LogLevelDebug);
+          &ctx, http_arena, 1024, LogLevelError | LogLevelInfo | LogLevelDebug,
+          env_platform_make());
       if (ErrKindNone != err_init.kind) {
         log_err(&logger, "failed to create the http server", err_init);
         return 1;

@@ -1742,6 +1742,16 @@ bytes_buffer_space(BytesBuffer bb) {
   return bb.container.len - bb.len;
 }
 
+__attribute__((warn_unused_result)) static Bytes
+bytes_buffer_space_bytes(BytesBuffer bb) {
+  assert(bb.len <= bb.container.len);
+
+  return (Bytes){
+      .data = bb.container.data + bb.len,
+      .len = bytes_buffer_space(bb),
+  };
+}
+
 __attribute__((warn_unused_result)) static bool
 bytes_buffer_extend_within_cap(BytesBuffer *bb, Bytes s) {
   assert(bb);

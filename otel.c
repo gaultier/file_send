@@ -12,11 +12,46 @@ static void http_handler_on_close(IoCompletion *completion, Error err,
   assert(handler);
 
   // http_handler_assert_invariants(handler);
-  assert(&handler->completion_close == completion);
+  assert(&handler->completion == completion);
 
   log(&handler->logger, LogLevelInfo, "closed");
 
   http_handler_pool_release(&handler->server->pool, handler);
+}
+
+static void otel_on_read(IoCompletion *completion, Error err,
+                         usize read_count) {
+  assert(completion);
+  assert(completion->ctx);
+
+  HttpHandler *const handler = completion->ctx;
+  IO *const io = handler->io;
+  assert(io);
+
+  if (ErrKindNone != err.kind) {
+    log(&handler->logger, LogLevelError, "read error: %s",
+        error_kind_to_cstr(err.kind));
+    (void)handler->io->close(handler->io, &handler->completion, handler->socket,
+                             http_handler_on_close);
+    return;
+  }
+
+  if (0 == read_count) {
+    log(&handler->logger, LogLevelDebug, "closing connection: 0 bytes read");
+    (void)handler->io->close(handler->io, &handler->completion, handler->socket,
+                             http_handler_on_close);
+    return;
+  }
+
+  assert(!__builtin_add_overflow(handler->recv.container.len, read_count,
+                                 &handler->recv.container.len));
+  log(&handler->logger, LogLevelDebug, "read %zu bytes", read_count);
+  fwrite(handler->recv.container.data, 1, handler->recv.len, stdout);
+  puts("");
+
+  (void)io->close(io, &handler->completion, handler->socket,
+                  http_handler_on_close);
+  log(&handler->logger, LogLevelDebug, "closing");
 }
 
 static void otel_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
@@ -27,20 +62,16 @@ static void otel_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
 
   HttpHandler *const handler = http_handler_pool_acquire(&server->pool);
   if (!handler) {
-    fprintf(stderr, "backpressure: no available pool slot for request\n");
+    log(&server->logger, LogLevelError,
+        "backpressure: no available pool slot for request");
     (void)io->env->close_socket(io->env, accept_socket);
     return;
   }
 
-  http_handler_init(handler, server, accept_addr, accept_socket);
+  http_handler_init(handler, server, io, accept_addr, accept_socket);
 
   log(&handler->logger, LogLevelInfo, "accepted");
 
-  const Error err = io->close(io, &handler->completion_close, handler->socket,
-                              http_handler_on_close);
-  if (ErrKindNone != err.kind) {
-    log_err(&handler->logger, "failed to hang up", err);
-    (void)io->env->close_socket(io->env, handler->socket);
-    http_handler_pool_release(&server->pool, handler);
-  }
+  io->read(io, &handler->completion, accept_socket,
+           bytes_buffer_space_bytes(handler->recv), otel_on_read);
 }
