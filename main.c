@@ -23,7 +23,7 @@ int main(i32 argc, char *argv[]) {
   assert(argv);
 
   const Env *const env = env_platform_make();
-  const Logger logger = logger_make(LogLevelAll, bytes_from_cstr("[main]"));
+  const Logger logger = logger_make(LogLevelAll, bytes_from_cstr("[main] "));
 
   const char *const cmd = argc >= 2 ? argv[1] : "";
   const usize arena_cap = 32 * MiB;
@@ -276,7 +276,7 @@ int main(i32 argc, char *argv[]) {
     printf("mem used: %zu\n", used_bytes);
     printf("mem unused: %zu\n", unused_bytes);
   } else if (0 == strcmp(cmd, "otel")) {
-    const Ipv4Addr listen_addr = {0};
+    const Ipv4Addr listen_addr = {.port = 8081};
     Arena http_arena = {0};
     assert(ErrKindNone == arena_valloc(env, 16 * MiB, &http_arena).kind);
 
