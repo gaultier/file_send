@@ -73,7 +73,7 @@ http_handler_pool_acquire(HttpHandlerPool *pool) {
   return NULL;
 }
 
-static void http_handler_init(HttpHandler *handler, u32 log_level_mask,
+static void http_handler_init(HttpHandler *handler, HttpServer *server,
                               Ipv4Addr addr, i32 socket) {
   assert(handler);
 
@@ -84,8 +84,11 @@ static void http_handler_init(HttpHandler *handler, u32 log_level_mask,
            ip >> 24 & 0xff, ip >> 16 & 0xff, ip >> 8 & 0xff, ip >> 0 & 0xff,
            addr.port);
 
-  handler->logger = logger_make(log_level_mask, bytes_from_cstr(log_prefix));
+  handler->logger =
+      logger_make(server->log_level_mask, bytes_from_cstr(log_prefix));
   handler->socket = socket;
+  handler->server = server;
+  handler->completion_close.ctx = handler;
 }
 
 static void http_handler_pool_release(HttpHandlerPool *pool,
@@ -118,6 +121,8 @@ static void http_handler_on_close(IoCompletion *completion, Error err,
   (void)res;
 
   HttpHandler *const handler = completion->ctx;
+  assert(handler);
+
   // http_handler_assert_invariants(handler);
   assert(&handler->completion_close == completion);
 
@@ -139,8 +144,7 @@ static void otel_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
     return;
   }
 
-  http_handler_init(handler, server->log_level_mask, accept_addr,
-                    accept_socket);
+  http_handler_init(handler, server, accept_addr, accept_socket);
 
   log(&handler->logger, LogLevelInfo, "accepted");
 
