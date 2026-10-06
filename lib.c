@@ -1,6 +1,5 @@
 #pragma once
 
-#include <assert.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <limits.h>
@@ -11,6 +10,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef assert
+#undef assert
+#endif
+
+#define assert(e)                                                              \
+  (__builtin_expect(!(e), 0) ? (fprintf(stderr, "%s:%s:%d:%s\n", __func__,     \
+                                        __FILE_NAME__, __LINE__, #e),          \
+                                fflush(stderr), __builtin_trap())              \
+                             : (void)0)
 
 #if (defined(__APPLE__) && defined(__MACH__))
 #define PLATFORM_DARWIN
