@@ -379,10 +379,30 @@ http_parse_req_status_line(Bytes src, HttpRequestStatusLine *res,
   if (!split.found) {
     return (Error){.kind = ErrKindInvalidData};
   }
-
-  // const Bytes method = split.left;
-  //  FIXME
-  res->method = HTTP_METHOD_GET;
+  const Bytes method = split.left;
+  if (bytes_eq_cstr(method, "UNKNOWN")) {
+    res->method = HTTP_METHOD_UNKNOWN;
+  } else if (bytes_eq_cstr(method, "OPTIONS")) {
+    res->method = HTTP_METHOD_OPTIONS;
+  } else if (bytes_eq_cstr(method, "GET")) {
+    res->method = HTTP_METHOD_GET;
+  } else if (bytes_eq_cstr(method, "HEAD")) {
+    res->method = HTTP_METHOD_HEAD;
+  } else if (bytes_eq_cstr(method, "POST")) {
+    res->method = HTTP_METHOD_POST;
+  } else if (bytes_eq_cstr(method, "PUT")) {
+    res->method = HTTP_METHOD_PUT;
+  } else if (bytes_eq_cstr(method, "DELETE")) {
+    res->method = HTTP_METHOD_DELETE;
+  } else if (bytes_eq_cstr(method, "TRACE")) {
+    res->method = HTTP_METHOD_TRACE;
+  } else if (bytes_eq_cstr(method, "CONNECT")) {
+    res->method = HTTP_METHOD_CONNECT;
+  } else if (bytes_eq_cstr(method, "EXTENSION")) {
+    res->method = HTTP_METHOD_EXTENSION;
+  } else {
+    return (Error){.kind = ErrKindInvalidData};
+  }
 
   remaining = split.right;
   split = bytes_split(remaining, bytes_from_cstr(" "));
