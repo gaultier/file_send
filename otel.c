@@ -19,6 +19,22 @@ static void http_handler_on_close(IoCompletion *completion, Error err,
   http_handler_pool_release(&handler->server->pool, handler);
 }
 
+static void otel_on_write(IoCompletion *completion, Error write_err,
+                          usize write_count) {
+  assert(completion);
+  assert(completion->ctx);
+
+  HttpHandler *const handler = completion->ctx;
+  IO *const io = handler->io;
+  assert(io);
+
+  (void)write_err;
+  (void)write_count;
+
+  (void)io->close(io, &handler->completion, handler->socket,
+                  http_handler_on_close);
+}
+
 static void otel_on_read(IoCompletion *completion, Error read_err,
                          usize read_count) {
   assert(completion);
@@ -86,9 +102,20 @@ static void otel_on_read(IoCompletion *completion, Error read_err,
   log(&handler->logger, LogLevelDebug, "parsed %zu HTTP headers",
       handler->headers_len);
 
-  (void)io->close(io, &handler->completion, handler->socket,
-                  http_handler_on_close);
-  log(&handler->logger, LogLevelDebug, "closing");
+  // FIXME
+  assert(ErrKindNone ==
+         bytes_buffer_make(128, &handler->arena, &handler->resp).kind);
+  assert(bytes_buffer_extend_within_cap(
+      &handler->resp,
+      bytes_from_cstr("HTTP/1.1 200\r\nConnection:Close\r\n\r\nHello")));
+
+  err = io->write(io, &handler->completion, handler->socket,
+                  bytes_buffer_to_bytes(handler->resp), otel_on_write);
+  if (ErrKindNone != read_err.kind) {
+    log_err(&handler->logger, "failed to write", err);
+    (void)io->env->close_socket(io->env, handler->socket);
+    return;
+  }
 }
 
 static void otel_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,

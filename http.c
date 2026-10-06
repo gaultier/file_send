@@ -204,6 +204,8 @@ typedef struct {
   HttpHeader *headers;
   usize headers_len;
   usize headers_cap;
+
+  BytesBuffer resp;
 } HttpHandler;
 
 // Both arrays live in the server's arena.
