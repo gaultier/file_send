@@ -1876,20 +1876,44 @@ __attribute__((warn_unused_result)) static Split bytes_split(Bytes haystack,
 }
 
 // ----------------- Pool (free list) ------------
+// A free chunk holds the link to the next free chunk in its first bytes. An
+// acquired chunk is all user data.
 typedef struct PoolNode PoolNode;
 
 struct PoolNode {
   PoolNode *next;
 };
 
+// Every chunk is aligned to this.
+#define POOL_ALIGN 8
+
 typedef struct {
+  // NULL when every chunk is acquired.
   PoolNode *head;
+  // Distance between two chunks: the user size, rounded up so that a chunk
+  // fits a `PoolNode` and the next chunk stays aligned.
   usize chunk_size;
 
-  void *buffer;
+  // Lives in the arena given to `pool_make`.
+  u8 *buffer;
   usize buffer_len;
-
 } Pool;
+
+// Is `ptr` the start of a chunk of this pool?
+__attribute__((warn_unused_result)) static bool pool_owns(const Pool *pool,
+                                                          const void *ptr) {
+  assert(pool);
+  assert(pool->buffer);
+  assert(pool->chunk_size);
+
+  const usize addr = (usize)ptr;
+  const usize start = (usize)pool->buffer;
+  if (addr < start || addr >= start + pool->buffer_len) {
+    return false;
+  }
+
+  return 0 == (addr - start) % pool->chunk_size;
+}
 
 __attribute__((warn_unused_result)) static Error
 pool_make(Pool *pool, Arena *arena, usize chunk_size, usize elems_count) {
@@ -1898,51 +1922,74 @@ pool_make(Pool *pool, Arena *arena, usize chunk_size, usize elems_count) {
   assert(chunk_size);
   assert(elems_count);
 
-  usize real_chunk_size = chunk_size;
-  assert(!__builtin_add_overflow(real_chunk_size, sizeof(PoolNode),
-                                 &real_chunk_size));
+  const usize real_chunk_size = usize_round_up_multiple_of(
+      chunk_size < sizeof(PoolNode) ? sizeof(PoolNode) : chunk_size,
+      POOL_ALIGN);
+  assert(real_chunk_size >= chunk_size);
+  assert(real_chunk_size >= sizeof(PoolNode));
+  assert(0 == real_chunk_size % __alignof__(PoolNode));
 
-  pool->buffer = arena_alloc(arena, 8, real_chunk_size, elems_count);
-  if (!pool->buffer) {
+  u8 *const buffer =
+      arena_alloc(arena, POOL_ALIGN, real_chunk_size, elems_count);
+  if (!buffer) {
     return (Error){.kind = ErrKindOOM};
   }
-  // Cannot overflow since `arena_alloc` did not.
-  pool->buffer_len = real_chunk_size * elems_count;
-  pool->chunk_size = chunk_size;
-  pool->head = (PoolNode *)pool->buffer;
-  memset(pool->head, 0, sizeof(PoolNode));
+  assert(0 == (usize)buffer % POOL_ALIGN);
 
-  return (Error){0};
+  // Every chunk starts free, in address order.
+  for (usize i = 0; i < elems_count; i++) {
+    PoolNode *const node = (PoolNode *)(void *)(buffer + i * real_chunk_size);
+    node->next = (i + 1 < elems_count)
+                     ? (PoolNode *)(void *)(buffer + (i + 1) * real_chunk_size)
+                     : NULL;
+  }
+
+  *pool = (Pool){
+      .head = (PoolNode *)(void *)buffer,
+      // Cannot overflow since `arena_alloc` did not.
+      .buffer_len = real_chunk_size * elems_count,
+      .chunk_size = real_chunk_size,
+      .buffer = buffer,
+  };
+  assert(pool_owns(pool, pool->head));
+
+  return (Error){.kind = ErrKindNone};
 }
 
+// The chunk is zeroed. Returns NULL when every chunk is acquired.
 __attribute__((warn_unused_result)) static void *pool_acquire(Pool *pool) {
   assert(pool);
+  assert(pool->buffer);
   assert(pool->chunk_size);
 
-  // OOM?
   if (!pool->head) {
     return NULL;
   }
 
   PoolNode *const res = pool->head;
+  assert(pool_owns(pool, res));
 
-  pool->head = pool->head->next;
+  pool->head = res->next;
+  // Catches a chunk written to after release.
+  assert(!pool->head || pool_owns(pool, pool->head));
 
   memset(res, 0, pool->chunk_size);
 
   return res;
 }
 
+// `ptr` must have come from `pool_acquire` on this pool, and not be used after.
 static void pool_release(Pool *pool, void *ptr) {
   assert(pool);
+  assert(pool->buffer);
   assert(pool->chunk_size);
   assert(ptr);
-
-  assert(pool->buffer <= ptr);
-  assert((u8 *)pool->buffer + pool->buffer_len < (u8 *)ptr);
+  assert(pool_owns(pool, ptr));
+  // Cheap partial check against a double release.
+  assert(ptr != pool->head);
 
   PoolNode *const node = (PoolNode *)ptr;
 
   node->next = pool->head;
-  pool->head = node->next;
+  pool->head = node;
 }
