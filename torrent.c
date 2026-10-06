@@ -7,7 +7,7 @@
 // ---------- Bencode ----------
 typedef enum {
   BencodeKindInteger,
-  BencodeKindString,
+  BencodeKindBytes,
   BencodeKindList,
   BencodeKindDict,
 } BencodeKind;
@@ -28,7 +28,7 @@ struct BencodeValue {
   BencodeKind kind;
   union {
     isize num;        // Integer
-    Slice_u8 s;       // String
+    Bytes bytes;      // Bytes
     BencodeList list; // List or Dict (stored as contiguous key-value pairs)
   } v;
 };
@@ -39,19 +39,19 @@ struct BencodeValue {
 // `*input` is only advanced, and `*res` only written, when the parse
 // succeeds.
 __attribute__((warn_unused_result)) static Error
-bencode_parse_num(Slice_u8 *input, BencodeValue *res) {
+bencode_parse_num(Bytes *input, BencodeValue *res) {
   assert(input);
   assert(input->data);
   assert(res);
 
-  Slice_u8 remaining = *input;
+  Bytes remaining = *input;
 
-  if (ErrKindNone != slice_u8_expect_u8(&remaining, 'i').kind) {
+  if (ErrKindNone != bytes_expect_u8(&remaining, 'i').kind) {
     return (Error){.kind = ErrKindInvalidData};
   }
 
   const bool negative_sign =
-      ErrKindNone == slice_u8_expect_u8(&remaining, '-').kind;
+      ErrKindNone == bytes_expect_u8(&remaining, '-').kind;
 
   // Also rejects `ie` and `i-e`: a number needs at least one digit. A run of
   // digits too wide for a `usize` comes back as `ErrRange`, which is passed
@@ -77,7 +77,7 @@ bencode_parse_num(Slice_u8 *input, BencodeValue *res) {
     }
   }
 
-  if (ErrKindNone != slice_u8_expect_u8(&remaining, 'e').kind) {
+  if (ErrKindNone != bytes_expect_u8(&remaining, 'e').kind) {
     return (Error){.kind = ErrKindInvalidData};
   }
 
@@ -88,16 +88,16 @@ bencode_parse_num(Slice_u8 *input, BencodeValue *res) {
 
 // `4:spam`
 //
-// The string is not copied: it points into `*input`.
+// The bytes are not copied: it points into `*input`.
 // `*input` is only advanced, and `*res` only written, when the parse
 // succeeds.
 __attribute__((warn_unused_result)) static Error
-bencode_parse_string(Slice_u8 *input, BencodeValue *res) {
+bencode_parse_bytes(Bytes *input, BencodeValue *res) {
   assert(input);
   assert(input->data);
   assert(res);
 
-  Slice_u8 remaining = *input;
+  Bytes remaining = *input;
 
   // Also rejects a leading `:` or any non-digit: a length needs a digit.
   usize len = 0;
@@ -108,7 +108,7 @@ bencode_parse_string(Slice_u8 *input, BencodeValue *res) {
     }
   }
 
-  if (ErrKindNone != slice_u8_expect_u8(&remaining, ':').kind) {
+  if (ErrKindNone != bytes_expect_u8(&remaining, ':').kind) {
     return (Error){.kind = ErrKindInvalidData};
   }
 
@@ -117,15 +117,15 @@ bencode_parse_string(Slice_u8 *input, BencodeValue *res) {
     return (Error){.kind = ErrKindInvalidData};
   }
 
-  const Slice_u8 s = slice_u8_take(remaining, len);
-  slice_u8_advance(&remaining, len);
+  const Bytes s = bytes_take(remaining, len);
+  bytes_advance(&remaining, len);
 
   *input = remaining;
-  *res = (BencodeValue){.kind = BencodeKindString, .v.s = s};
+  *res = (BencodeValue){.kind = BencodeKindBytes, .v.bytes = s};
 
-  assert(res->v.s.len == len);
-  if (0 != res->v.s.len) {
-    assert(res->v.s.data);
+  assert(res->v.bytes.len == len);
+  if (0 != res->v.bytes.len) {
+    assert(res->v.bytes.data);
   }
   return (Error){.kind = ErrKindNone};
 }
@@ -137,8 +137,7 @@ bencode_parse_string(Slice_u8 *input, BencodeValue *res) {
 // Bytes are compared as unsigned values, so `0x80` sorts after `0x7f`. This
 // is a total order over arbitrary bytes, embedded zeroes included, and it is
 // the ordering bencode requires of dict keys.
-__attribute__((warn_unused_result)) static i32 slice_u8_cmp(Slice_u8 a,
-                                                            Slice_u8 b) {
+__attribute__((warn_unused_result)) static i32 bytes_cmp(Bytes a, Bytes b) {
   if (0 != a.len) {
     assert(a.data);
   }
@@ -176,15 +175,15 @@ bencode_validate_dict(BencodeList list) {
   for (usize i = 0; i < list.len; i += 2) {
     const BencodeValue key = list.data[i];
 
-    if (key.kind != BencodeKindString) {
+    if (key.kind != BencodeKindBytes) {
       return (Error){.kind = ErrKindInvalidData};
     }
 
     if (i > 1) {
       const BencodeValue previous = list.data[i - 2];
-      assert(BencodeKindString == previous.kind);
+      assert(BencodeKindBytes == previous.kind);
 
-      if (slice_u8_cmp(previous.v.s, key.v.s) >= 0) {
+      if (bytes_cmp(previous.v.bytes, key.v.bytes) >= 0) {
         return (Error){.kind = ErrKindInvalidData};
       }
     }
@@ -208,7 +207,7 @@ bencode_validate_dict(BencodeList list) {
 // waiting for does not exist. It is kept, and tested, because that is the gap
 // to close and not a reason to throw the parser away.
 __attribute__((unused, warn_unused_result)) static Error
-bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
+bencode_parse(Bytes *input, Arena *arena, Arena scratch, BencodeValue *res) {
   assert(input);
   assert(arena);
   assert(arena->start <= arena->end);
@@ -222,7 +221,7 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
     return (Error){.kind = ErrKindInvalidData};
   }
 
-  Slice_u8 remaining = *input;
+  Bytes remaining = *input;
   Arena arena_local = *arena;
 
   // At most, there are as many bencode values as `input bytes/2+1` since each
@@ -243,7 +242,7 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
 
   for (usize _i = 0; _i < MAX_LEN; _i++) {
     u8 current = 0;
-    if (ErrKindNone != slice_u8_first(remaining, &current).kind) {
+    if (ErrKindNone != bytes_first(remaining, &current).kind) {
       return (Error){.kind = ErrKindInvalidData};
     }
 
@@ -265,7 +264,7 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
       if (containers_count >= BENCODE_MAX_DEPTH) {
         return (Error){.kind = ErrKindInvalidData};
       }
-      slice_u8_advance(&remaining, 1);
+      bytes_advance(&remaining, 1);
 
       containers[containers_count].is_list = current == 'l';
       containers[containers_count].children_start = values_count;
@@ -280,7 +279,7 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
         return (Error){.kind = ErrKindInvalidData};
       }
 
-      slice_u8_advance(&remaining, 1);
+      bytes_advance(&remaining, 1);
 
       // Time to pop `containers`.
       const BencodeContainer container = containers[containers_count - 1];
@@ -346,7 +345,7 @@ bencode_parse(Slice_u8 *input, Arena *arena, Arena scratch, BencodeValue *res) {
       assert(values_count < values_cap);
       {
         const Error err =
-            bencode_parse_string(&remaining, &values[values_count]);
+            bencode_parse_bytes(&remaining, &values[values_count]);
         if (ErrKindNone != err.kind) {
           return err;
         }
@@ -400,12 +399,12 @@ __attribute__((unused)) static void bencode_print(BencodeValue v,
     printf("%zd", v.v.num);
     break;
 
-  case BencodeKindString:
-    // Bencode strings are arbitrary bytes, and `%s` would stop at the first
-    // NUL however large a precision it is given, so the bytes go out through
-    // `fwrite` instead.
+  case BencodeKindBytes:
+    // Bencode byte strings are arbitrary bytes, and `%s` would stop at the
+    // first NUL however large a precision it is given, so the bytes go out
+    // through `fwrite` instead.
     printf("\"");
-    assert(v.v.s.len == fwrite(v.v.s.data, 1, v.v.s.len, stdout));
+    assert(v.v.bytes.len == fwrite(v.v.bytes.data, 1, v.v.bytes.len, stdout));
     printf("\"");
     break;
 
@@ -473,7 +472,7 @@ typedef struct {
 // recursion cannot then disagree with itself about where the piece layer
 // sits, and the divisions and `ctz`s happen once rather than once per node.
 typedef struct {
-  const Slice_u8 data;
+  const Bytes data;
   // Depth of the leaf layer, counting down from `0` at the root. Equivalently
   // `log2` of the block count rounded up to a power of two.
   const usize max_depth;
@@ -491,7 +490,7 @@ typedef struct {
 } MerkleTree;
 
 __attribute__((warn_unused_result)) static MerkleTree
-torrent_merkle_tree_make(Slice_u8 data, usize piece_length_in_bytes,
+torrent_merkle_tree_make(Bytes data, usize piece_length_in_bytes,
                          PieceHash *piece_hashes) {
   assert(data.data);
   assert(data.len > 0); // An empty file has no tree at all, per spec.
@@ -577,7 +576,7 @@ static void torrent_build_merkle_sub_tree(const MerkleTree *tree,
 
     if (offset < tree->data.len) { // Still inside the file?
       const usize remaining = tree->data.len - offset;
-      const Slice_u8 block_data = {
+      const Bytes block_data = {
           .data = tree->data.data + offset,
           .len =
               remaining < TORRENT_BLOCK_SIZE ? remaining : TORRENT_BLOCK_SIZE,
@@ -626,7 +625,7 @@ static void torrent_build_merkle_sub_tree(const MerkleTree *tree,
 // info dictionary) and its piece layer (`piece layers` at the torrent root).
 // An empty file has neither, per BEP 52, and leaves `root` zeroed.
 __attribute__((warn_unused_result)) static Error
-torrent_build_merkle_tree(Slice_u8 data, usize piece_length_in_bytes,
+torrent_build_merkle_tree(Bytes data, usize piece_length_in_bytes,
                           PieceHash **piece_hashes, usize *piece_hashes_count,
                           u8 root[SHA256_DIGEST_LENGTH], Arena *arena) {
   assert(piece_hashes);
@@ -687,10 +686,10 @@ torrent_build_merkle_tree(Slice_u8 data, usize piece_length_in_bytes,
 }
 
 __attribute__((warn_unused_result)) static Error torrent_make_metainfo_dict_v2(
-    Slice_u8 pieces_root, Slice_u8 announce_url, BencodeList info_dict,
+    Bytes pieces_root, Bytes announce_url, BencodeList info_dict,
     const PieceHash *piece_hashes, usize piece_hashes_count, BencodeValue *dst,
     Arena *arena) {
-  assert(!slice_u8_is_empty(announce_url));
+  assert(!bytes_is_empty(announce_url));
   assert(info_dict.len > 0);
   assert(SHA256_DIGEST_LENGTH == pieces_root.len);
   assert(dst);
@@ -712,19 +711,20 @@ __attribute__((warn_unused_result)) static Error torrent_make_metainfo_dict_v2(
   // `metainfo["announce"] = announce_url`
   {
     BencodeValue *const announce_key = &dst->v.list.data[0];
-    announce_key->kind = BencodeKindString;
-    announce_key->v.s = slice_u8_make((u8 *)"announce", sizeof("announce") - 1);
+    announce_key->kind = BencodeKindBytes;
+    announce_key->v.bytes =
+        bytes_make((u8 *)"announce", sizeof("announce") - 1);
 
     BencodeValue *const announce_value = &dst->v.list.data[1];
-    announce_value->kind = BencodeKindString;
-    announce_value->v.s = announce_url;
+    announce_value->kind = BencodeKindBytes;
+    announce_value->v.bytes = announce_url;
   }
 
   // `metainfo["info"] = info_dict`
   {
     BencodeValue *const info_key = &dst->v.list.data[2];
-    info_key->kind = BencodeKindString;
-    info_key->v.s = slice_u8_make((u8 *)"info", sizeof("info") - 1);
+    info_key->kind = BencodeKindBytes;
+    info_key->v.bytes = bytes_make((u8 *)"info", sizeof("info") - 1);
 
     dst->v.list.data[3].kind = BencodeKindDict;
     dst->v.list.data[3].v.list = info_dict;
@@ -735,9 +735,9 @@ __attribute__((warn_unused_result)) static Error torrent_make_metainfo_dict_v2(
     assert(dst->v.list.len == 2 * kv_count);
 
     BencodeValue *const pieces_key = &dst->v.list.data[4];
-    pieces_key->kind = BencodeKindString;
-    pieces_key->v.s =
-        slice_u8_make((u8 *)"piece layers", sizeof("piece layers") - 1);
+    pieces_key->kind = BencodeKindBytes;
+    pieces_key->v.bytes =
+        bytes_make((u8 *)"piece layers", sizeof("piece layers") - 1);
 
     BencodeValue *const pieces_value = &dst->v.list.data[5];
     pieces_value->kind = BencodeKindDict;
@@ -765,19 +765,19 @@ __attribute__((warn_unused_result)) static Error torrent_make_metainfo_dict_v2(
     // other peer looks up.
     {
       BencodeValue *const layer_key = &pieces_value->v.list.data[0];
-      layer_key->kind = BencodeKindString;
-      layer_key->v.s = pieces_root;
+      layer_key->kind = BencodeKindBytes;
+      layer_key->v.bytes = pieces_root;
 
       BencodeValue *const layer_value = &pieces_value->v.list.data[1];
-      layer_value->kind = BencodeKindString;
-      layer_value->v.s.len = piece_hashes_count * SHA256_DIGEST_LENGTH;
-      layer_value->v.s.data =
-          arena_alloc(arena, __alignof__(u8), sizeof(u8), layer_value->v.s.len);
-      if (!layer_value->v.s.data) {
+      layer_value->kind = BencodeKindBytes;
+      layer_value->v.bytes.len = piece_hashes_count * SHA256_DIGEST_LENGTH;
+      layer_value->v.bytes.data = arena_alloc(
+          arena, __alignof__(u8), sizeof(u8), layer_value->v.bytes.len);
+      if (!layer_value->v.bytes.data) {
         return (Error){.kind = ErrKindOOM};
       }
 
-      memcpy(layer_value->v.s.data, piece_hashes, layer_value->v.s.len);
+      memcpy(layer_value->v.bytes.data, piece_hashes, layer_value->v.bytes.len);
     }
   }
 
@@ -785,8 +785,8 @@ __attribute__((warn_unused_result)) static Error torrent_make_metainfo_dict_v2(
 }
 
 __attribute__((warn_unused_result)) static Error torrent_make_info_dict_v2(
-    Slice_u8 name, usize piece_length_in_bytes, Slice_u8 file_data,
-    Slice_u8 file_name, BencodeValue *dst_info_dict, Slice_u8 *dst_pieces_root,
+    Bytes name, usize piece_length_in_bytes, Bytes file_data, Bytes file_name,
+    BencodeValue *dst_info_dict, Bytes *dst_pieces_root,
     PieceHash **dst_piece_hashes, usize *dst_piece_hashes_count, Arena *arena) {
   assert(piece_length_in_bytes >= 16 * KiB);      // Per spec.
   assert(is_power_of_two(piece_length_in_bytes)); // Per spec.
@@ -796,7 +796,7 @@ __attribute__((warn_unused_result)) static Error torrent_make_info_dict_v2(
   assert(dst_piece_hashes_count);
   assert(arena);
 
-  *dst_pieces_root = (Slice_u8){0};
+  *dst_pieces_root = (Bytes){0};
   *dst_piece_hashes = NULL;
   *dst_piece_hashes_count = 0;
 
@@ -814,19 +814,19 @@ __attribute__((warn_unused_result)) static Error torrent_make_info_dict_v2(
   // `info["name"] = name`
   {
     BencodeValue *const key = &dst_info_dict->v.list.data[4];
-    key->kind = BencodeKindString;
-    key->v.s = slice_u8_make((u8 *)"name", sizeof("name") - 1);
+    key->kind = BencodeKindBytes;
+    key->v.bytes = bytes_make((u8 *)"name", sizeof("name") - 1);
 
     BencodeValue *const value = &dst_info_dict->v.list.data[5];
-    value->kind = BencodeKindString;
-    value->v.s = name;
+    value->kind = BencodeKindBytes;
+    value->v.bytes = name;
   }
 
   // `info["piece length"] = piece_length_in_bytes`
   {
     BencodeValue *const key = &dst_info_dict->v.list.data[6];
-    key->kind = BencodeKindString;
-    key->v.s = slice_u8_make((u8 *)"piece length", sizeof("piece length") - 1);
+    key->kind = BencodeKindBytes;
+    key->v.bytes = bytes_make((u8 *)"piece length", sizeof("piece length") - 1);
 
     BencodeValue *const value = &dst_info_dict->v.list.data[7];
     value->kind = BencodeKindInteger;
@@ -841,8 +841,8 @@ __attribute__((warn_unused_result)) static Error torrent_make_info_dict_v2(
   {
 
     BencodeValue *const key = &dst_info_dict->v.list.data[2];
-    key->kind = BencodeKindString;
-    key->v.s = slice_u8_make((u8 *)"meta version", sizeof("meta version") - 1);
+    key->kind = BencodeKindBytes;
+    key->v.bytes = bytes_make((u8 *)"meta version", sizeof("meta version") - 1);
 
     BencodeValue *const value = &dst_info_dict->v.list.data[3];
     value->kind = BencodeKindInteger;
@@ -852,9 +852,9 @@ __attribute__((warn_unused_result)) static Error torrent_make_info_dict_v2(
   // `info["file tree"] = ...`
   {
     BencodeValue *const file_tree_key = &dst_info_dict->v.list.data[0];
-    file_tree_key->kind = BencodeKindString;
-    file_tree_key->v.s =
-        slice_u8_make((u8 *)"file tree", sizeof("file tree") - 1);
+    file_tree_key->kind = BencodeKindBytes;
+    file_tree_key->v.bytes =
+        bytes_make((u8 *)"file tree", sizeof("file tree") - 1);
 
     u8 root[SHA256_DIGEST_LENGTH] = {0};
     const Error err = torrent_build_merkle_tree(
@@ -883,8 +883,8 @@ __attribute__((warn_unused_result)) static Error torrent_make_info_dict_v2(
     // `info["file tree"][file_name] = {}`
     {
       BencodeValue *const file_name_key = &file_tree_dict->v.list.data[0];
-      file_name_key->kind = BencodeKindString;
-      file_name_key->v.s = file_name;
+      file_name_key->kind = BencodeKindBytes;
+      file_name_key->v.bytes = file_name;
 
       BencodeValue *const file_name_dict = &file_tree_dict->v.list.data[1];
       file_name_dict->kind = BencodeKindDict;
@@ -899,8 +899,8 @@ __attribute__((warn_unused_result)) static Error torrent_make_info_dict_v2(
       // `info["file tree"][file_name][""] = {}`
       {
         BencodeValue *const empty_key = &file_name_dict->v.list.data[0];
-        empty_key->kind = BencodeKindString;
-        empty_key->v.s = (Slice_u8){0};
+        empty_key->kind = BencodeKindBytes;
+        empty_key->v.bytes = (Bytes){0};
 
         BencodeValue *const empty_dict = &file_name_dict->v.list.data[1];
         empty_dict->kind = BencodeKindDict;
@@ -915,8 +915,9 @@ __attribute__((warn_unused_result)) static Error torrent_make_info_dict_v2(
         // `info["file tree"][file_name][""]["length"] = file_data.length`
         {
           BencodeValue *const length_key = &empty_dict->v.list.data[0];
-          length_key->kind = BencodeKindString;
-          length_key->v.s = slice_u8_make((u8 *)"length", sizeof("length") - 1);
+          length_key->kind = BencodeKindBytes;
+          length_key->v.bytes =
+              bytes_make((u8 *)"length", sizeof("length") - 1);
 
           BencodeValue *const length_value = &empty_dict->v.list.data[1];
           length_value->kind = BencodeKindInteger;
@@ -930,23 +931,23 @@ __attribute__((warn_unused_result)) static Error torrent_make_info_dict_v2(
         // `info["file tree"][file_name][""]["pieces root"] = root.digest`
         {
           BencodeValue *const pieces_root_key = &empty_dict->v.list.data[2];
-          pieces_root_key->kind = BencodeKindString;
-          pieces_root_key->v.s =
-              slice_u8_make((u8 *)"pieces root", sizeof("pieces root") - 1);
+          pieces_root_key->kind = BencodeKindBytes;
+          pieces_root_key->v.bytes =
+              bytes_make((u8 *)"pieces root", sizeof("pieces root") - 1);
 
           BencodeValue *const pieces_root_value = &empty_dict->v.list.data[3];
-          pieces_root_value->kind = BencodeKindString;
-          pieces_root_value->v.s.len = SHA256_DIGEST_LENGTH;
-          pieces_root_value->v.s.data = arena_alloc(
+          pieces_root_value->kind = BencodeKindBytes;
+          pieces_root_value->v.bytes.len = SHA256_DIGEST_LENGTH;
+          pieces_root_value->v.bytes.data = arena_alloc(
               arena, __alignof__(u8), sizeof(u8), SHA256_DIGEST_LENGTH);
-          if (NULL == pieces_root_value->v.s.data) {
+          if (NULL == pieces_root_value->v.bytes.data) {
             return (Error){.kind = ErrKindOOM};
           }
-          memcpy(pieces_root_value->v.s.data, root, SHA256_DIGEST_LENGTH);
+          memcpy(pieces_root_value->v.bytes.data, root, SHA256_DIGEST_LENGTH);
 
           // `piece layers` is keyed by this exact digest, so hand it back
           // rather than making the caller dig it out of the tree.
-          *dst_pieces_root = pieces_root_value->v.s;
+          *dst_pieces_root = pieces_root_value->v.bytes;
         }
       }
     }
@@ -967,11 +968,11 @@ bencode_encode_exact_size(BencodeValue b, usize depth) {
     assert(
         !__builtin_add_overflow(res, 2 + isize_digits_base_10(b.v.num), &res));
     break;
-  case BencodeKindString:
+  case BencodeKindBytes:
     // <length> `:` <bytes>
-    assert(!__builtin_add_overflow(res, usize_digits_base_10(b.v.s.len) + 1,
+    assert(!__builtin_add_overflow(res, usize_digits_base_10(b.v.bytes.len) + 1,
                                    &res));
-    assert(!__builtin_add_overflow(res, b.v.s.len, &res));
+    assert(!__builtin_add_overflow(res, b.v.bytes.len, &res));
     break;
   case BencodeKindList:
   case BencodeKindDict:
@@ -993,7 +994,7 @@ bencode_encode_exact_size(BencodeValue b, usize depth) {
 // wrapper below rather than here, where they would run once per level of
 // nesting.
 __attribute__((warn_unused_result)) static usize
-bencode_encode_rec(BencodeValue b, Slice_u8 dst, usize depth) {
+bencode_encode_rec(BencodeValue b, Bytes dst, usize depth) {
   assert(depth <= BENCODE_MAX_DEPTH);
   assert(dst.data);
   assert(dst.len >= 2);
@@ -1002,37 +1003,37 @@ bencode_encode_rec(BencodeValue b, Slice_u8 dst, usize depth) {
   switch (b.kind) {
   case BencodeKindInteger: {
     dst.data[0] = 'i';
-    slice_u8_advance(&dst, 1);
+    bytes_advance(&dst, 1);
 
-    slice_u8_advance(&dst, encode_isize_base_10(b.v.num, dst));
+    bytes_advance(&dst, encode_isize_base_10(b.v.num, dst));
 
     dst.data[0] = 'e';
-    slice_u8_advance(&dst, 1);
+    bytes_advance(&dst, 1);
 
   } break;
-  case BencodeKindString: {
-    slice_u8_advance(&dst, encode_usize_base_10(b.v.s.len, dst));
+  case BencodeKindBytes: {
+    bytes_advance(&dst, encode_usize_base_10(b.v.bytes.len, dst));
 
     dst.data[0] = ':';
-    slice_u8_advance(&dst, 1);
+    bytes_advance(&dst, 1);
 
-    if (b.v.s.len > 0) {
-      memcpy(dst.data, b.v.s.data, b.v.s.len);
-      slice_u8_advance(&dst, b.v.s.len);
+    if (b.v.bytes.len > 0) {
+      memcpy(dst.data, b.v.bytes.data, b.v.bytes.len);
+      bytes_advance(&dst, b.v.bytes.len);
     }
   } break;
   case BencodeKindList:
   case BencodeKindDict: {
     dst.data[0] = b.kind == BencodeKindList ? 'l' : 'd';
-    slice_u8_advance(&dst, 1);
+    bytes_advance(&dst, 1);
 
     for (usize i = 0; i < b.v.list.len; i++) {
       const BencodeValue item = b.v.list.data[i];
-      slice_u8_advance(&dst, bencode_encode_rec(item, dst, depth + 1));
+      bytes_advance(&dst, bencode_encode_rec(item, dst, depth + 1));
     }
 
     dst.data[0] = 'e';
-    slice_u8_advance(&dst, 1);
+    bytes_advance(&dst, 1);
   } break;
 
   default:
@@ -1055,7 +1056,7 @@ bencode_encode_rec(BencodeValue b, Slice_u8 dst, usize depth) {
 // passes are compared without walking the tree a third time, and the
 // recursion cannot scribble into slack it was never given.
 __attribute__((warn_unused_result)) static usize
-bencode_encode_in_place(BencodeValue b, Slice_u8 dst) {
+bencode_encode_in_place(BencodeValue b, Bytes dst) {
   assert(dst.data);
 
   const usize written = bencode_encode_rec(b, dst, 0);
@@ -1065,14 +1066,13 @@ bencode_encode_in_place(BencodeValue b, Slice_u8 dst) {
 }
 
 __attribute__((warn_unused_result)) static Error
-bencode_encode(BencodeValue b, Slice_u8 *dst, Arena *arena) {
+bencode_encode(BencodeValue b, Bytes *dst, Arena *arena) {
   assert(dst);
   assert(arena);
 
   const usize size = bencode_encode_exact_size(b, 0);
 
-  *dst =
-      (Slice_u8){.data = arena_alloc(arena, __alignof__(u8), sizeof(u8), size),
+  *dst = (Bytes){.data = arena_alloc(arena, __alignof__(u8), sizeof(u8), size),
                  .len = size};
   if (!dst->data) {
     return (Error){.kind = ErrKindOOM};
@@ -1085,24 +1085,21 @@ bencode_encode(BencodeValue b, Slice_u8 *dst, Arena *arena) {
   return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static Error
-torrent_gen_torrent_file_data(Slice_u8 file_path, Slice_u8 file_data,
-                              Slice_u8 announce_url, Slice_u8 *dst_torrent,
-                              u8 dst_info_hash[SHA256_DIGEST_LENGTH],
-                              Arena scratch, Arena *arena) {
+__attribute__((warn_unused_result)) static Error torrent_gen_torrent_file_data(
+    Bytes file_path, Bytes file_data, Bytes announce_url, Bytes *dst_torrent,
+    u8 dst_info_hash[SHA256_DIGEST_LENGTH], Arena scratch, Arena *arena) {
   assert(dst_torrent);
   assert(dst_info_hash);
   assert(arena);
 
   Error err = {0};
 
-  const Slice_u8 file_name =
-      path_last_component(file_path, PATH_SEPARATOR_UNIX);
+  const Bytes file_name = path_last_component(file_path, PATH_SEPARATOR_UNIX);
 
   BencodeValue info_dict = {0};
   PieceHash *piece_hashes = NULL;
   usize piece_hashes_count = 0;
-  Slice_u8 pieces_root = {0};
+  Bytes pieces_root = {0};
   err = torrent_make_info_dict_v2(file_name, TORRENT_BLOCK_SIZE * 16, file_data,
                                   file_name, &info_dict, &pieces_root,
                                   &piece_hashes, &piece_hashes_count, &scratch);
@@ -1111,7 +1108,7 @@ torrent_gen_torrent_file_data(Slice_u8 file_path, Slice_u8 file_data,
     return err;
   }
 
-  Slice_u8 info_dict_encoded = {0};
+  Bytes info_dict_encoded = {0};
   err = bencode_encode(info_dict, &info_dict_encoded, &scratch);
   if (ErrKindNone != err.kind) {
     return err;
@@ -1127,7 +1124,7 @@ torrent_gen_torrent_file_data(Slice_u8 file_path, Slice_u8 file_data,
     return err;
   }
 
-  Slice_u8 metainfo_dict_encoded = {0};
+  Bytes metainfo_dict_encoded = {0};
   err = bencode_encode(metainfo_dict, &metainfo_dict_encoded, arena);
   if (ErrKindNone != err.kind) {
     return err;
@@ -1450,7 +1447,7 @@ typedef struct {
   u8 send_buf[TORRENT_PEER_SEND_BUF_CAP];
   usize send_len;
 
-  Slice_u8 info_hash;
+  Bytes info_hash;
   u8 id[20];
   // More: torrent, etc.
   TorrentPeerState state;
@@ -1713,7 +1710,7 @@ typedef struct {
 
 struct TorrentNetworkCtx {
   TorrentpeerHandleCtxPool pool;
-  Slice_u8 info_hash;
+  Bytes info_hash;
   u32 log_level_mask;
   // More...
 };
@@ -1760,7 +1757,7 @@ struct TorrentNetworkCtx {
 // So the two answers that carry no message still differ in `*data`, and a
 // caller that stops on `None` as though it were `Unknown` stalls.
 __attribute__((warn_unused_result)) static Error
-torrent_peer_parse_message(Slice_u8 *data, TorrentPeerMessage *dst_msg) {
+torrent_peer_parse_message(Bytes *data, TorrentPeerMessage *dst_msg) {
   assert(data);
   assert(dst_msg);
 
@@ -1770,12 +1767,12 @@ torrent_peer_parse_message(Slice_u8 *data, TorrentPeerMessage *dst_msg) {
   dst_msg->kind = TorrentMessageKindNone;
 
   // A copy, and `*data` is only moved on at the very end: a message that turns
-  // out to be half-arrived must leave the caller's slice untouched, or the
+  // out to be half-arrived must leave the caller's `Bytes` untouched, or the
   // bytes it did consume are lost before the rest ever gets here.
-  Slice_u8 remaining = *data;
+  Bytes remaining = *data;
 
   u32 msg_size = 0;
-  if (!slice_u8_consume_u32_be(&remaining, &msg_size)) {
+  if (!bytes_consume_u32_be(&remaining, &msg_size)) {
     return (Error){.kind = ErrKindNone};
   }
 
@@ -1800,14 +1797,14 @@ torrent_peer_parse_message(Slice_u8 *data, TorrentPeerMessage *dst_msg) {
 
   // Nothing past this message, so a payload that is shorter than its length
   // claims is the peer's mistake and not a short read.
-  Slice_u8 body = slice_u8_take(remaining, msg_size);
-  slice_u8_advance(&remaining, msg_size);
+  Bytes body = bytes_take(remaining, msg_size);
+  bytes_advance(&remaining, msg_size);
   assert(msg_size == body.len);
   assert(remaining.len < data->len);
 
   u8 msg_tag = 0;
   // The length is at least 1 and the body is that long, so the tag is there.
-  assert(slice_u8_consume_u8(&body, &msg_tag));
+  assert(bytes_consume_u8(&body, &msg_tag));
   assert(msg_size - 1 == body.len);
 
   switch (msg_tag) {
@@ -1828,7 +1825,7 @@ torrent_peer_parse_message(Slice_u8 *data, TorrentPeerMessage *dst_msg) {
       return (Error){.kind = ErrKindInvalidData};
     }
     dst_msg->kind = msg_tag;
-    assert(slice_u8_consume_u32_be(&body, &dst_msg->v.have));
+    assert(bytes_consume_u32_be(&body, &dst_msg->v.have));
     assert(0 == body.len);
     break;
 
@@ -1846,9 +1843,9 @@ torrent_peer_parse_message(Slice_u8 *data, TorrentPeerMessage *dst_msg) {
       return (Error){.kind = ErrKindInvalidData};
     }
     dst_msg->kind = msg_tag;
-    assert(slice_u8_consume_u32_be(&body, &dst_msg->v.idx_begin_len.idx));
-    assert(slice_u8_consume_u32_be(&body, &dst_msg->v.idx_begin_len.begin));
-    assert(slice_u8_consume_u32_be(&body, &dst_msg->v.idx_begin_len.len));
+    assert(bytes_consume_u32_be(&body, &dst_msg->v.idx_begin_len.idx));
+    assert(bytes_consume_u32_be(&body, &dst_msg->v.idx_begin_len.begin));
+    assert(bytes_consume_u32_be(&body, &dst_msg->v.idx_begin_len.len));
     assert(0 == body.len);
     break;
 
@@ -1859,8 +1856,8 @@ torrent_peer_parse_message(Slice_u8 *data, TorrentPeerMessage *dst_msg) {
       return (Error){.kind = ErrKindInvalidData};
     }
     dst_msg->kind = msg_tag;
-    assert(slice_u8_consume_u32_be(&body, &dst_msg->v.piece.idx));
-    assert(slice_u8_consume_u32_be(&body, &dst_msg->v.piece.begin));
+    assert(bytes_consume_u32_be(&body, &dst_msg->v.piece.idx));
+    assert(bytes_consume_u32_be(&body, &dst_msg->v.piece.begin));
     // What is left is the block, which is why a `piece` with nothing left is
     // refused above.
     assert(body.len > 0);
@@ -1886,7 +1883,7 @@ torrent_peer_parse_message(Slice_u8 *data, TorrentPeerMessage *dst_msg) {
          TorrentMessageKindUnknown == dst_msg->kind);
 
   *data = remaining;
-  // A message was taken, so the caller's slice is strictly shorter: that is
+  // A message was taken, so the caller's `Bytes` is strictly shorter: that is
   // what keeps the loop that calls this from running for ever.
   assert(data->len < remaining.len + msg_size + sizeof(msg_size));
 
@@ -2058,8 +2055,7 @@ static void torrent_peer_close(TorrentPeer *peer) {
 }
 
 __attribute__((warn_unused_result)) static bool
-torrent_check_handshake(Slice_u8 data, Slice_u8 info_hash_expected,
-                        Slice_u8 *peer_id) {
+torrent_check_handshake(Bytes data, Bytes info_hash_expected, Bytes *peer_id) {
   assert(peer_id);
   // Raw bytes, not the hex form: a hex info hash would simply match nothing,
   // and the peer would look like it answered with the wrong torrent.
@@ -2073,24 +2069,24 @@ torrent_check_handshake(Slice_u8 data, Slice_u8 info_hash_expected,
     return false;
   }
 
-  const Slice_u8 handshake_header_expected =
-      slice_u8_from_cstr("\x13"
-                         "BitTorrent protocol");
-  if (!slice_u8_starts_with(data, handshake_header_expected)) {
+  const Bytes handshake_header_expected =
+      bytes_from_cstr("\x13"
+                      "BitTorrent protocol");
+  if (!bytes_starts_with(data, handshake_header_expected)) {
     return false;
   }
-  slice_u8_advance(&data, handshake_header_expected.len);
+  bytes_advance(&data, handshake_header_expected.len);
 
   // 8 reserved bytes.
-  slice_u8_advance(&data, 8);
+  bytes_advance(&data, 8);
 
-  const Slice_u8 info_hash_actual = slice_u8_take(data, TORRENT_INFO_HASH_LEN);
-  if (!slice_u8_eq(info_hash_actual, info_hash_expected)) {
+  const Bytes info_hash_actual = bytes_take(data, TORRENT_INFO_HASH_LEN);
+  if (!bytes_eq(info_hash_actual, info_hash_expected)) {
     return false;
   }
-  slice_u8_advance(&data, TORRENT_INFO_HASH_LEN);
+  bytes_advance(&data, TORRENT_INFO_HASH_LEN);
 
-  *peer_id = slice_u8_take(data, TORRENT_PEER_ID_LEN);
+  *peer_id = bytes_take(data, TORRENT_PEER_ID_LEN);
   assert(TORRENT_PEER_ID_LEN == peer_id->len);
 
   return true;
@@ -2121,9 +2117,8 @@ torrent_peer_read(TorrentPeer *peer, IO *io) {
   log(&peer->logger, LogLevelDebug, "queuing read: space=%zu",
       TORRENT_PEER_RECV_BUF_CAP - peer->recv_len);
 
-  const Slice_u8 dst =
-      slice_u8_make(peer->recv_buf + peer->recv_len,
-                    TORRENT_PEER_RECV_BUF_CAP - peer->recv_len);
+  const Bytes dst = bytes_make(peer->recv_buf + peer->recv_len,
+                               TORRENT_PEER_RECV_BUF_CAP - peer->recv_len);
 
   const Error err = io->read(io, &peer->completion_read, peer->socket, dst,
                              torrent_peer_on_read);
@@ -2147,7 +2142,7 @@ torrent_peer_write(TorrentPeer *peer, IO *io) {
 
   log(&peer->logger, LogLevelDebug, "queuing write: space=%zu", peer->send_len);
 
-  const Slice_u8 src = slice_u8_make(peer->send_buf, peer->send_len);
+  const Bytes src = bytes_make(peer->send_buf, peer->send_len);
 
   const Error err = io->write(io, &peer->completion_write, peer->socket, src,
                               torrent_peer_on_write);
@@ -2278,10 +2273,10 @@ static void torrent_peer_queue_handshake(TorrentPeer *peer) {
 
   // What goes out has to pass the same check a peer's does, or no peer will
   // answer it.
-  Slice_u8 queued_peer_id = {0};
+  Bytes queued_peer_id = {0};
   assert(torrent_check_handshake(
-      slice_u8_make(peer->send_buf, TORRENT_PEER_HANDSHAKE_LEN),
-      peer->info_hash, &queued_peer_id));
+      bytes_make(peer->send_buf, TORRENT_PEER_HANDSHAKE_LEN), peer->info_hash,
+      &queued_peer_id));
 
   log(&peer->logger, LogLevelDebug, "queued handshake");
 }
@@ -2467,10 +2462,9 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io, const u64 now_ns) {
   // and those bytes belong to the drain below.
   if (TorrentPeerStateSentHandshake == peer->state &&
       peer->recv_len >= TORRENT_PEER_HANDSHAKE_LEN) {
-    const Slice_u8 recv =
-        slice_u8_make(peer->recv_buf, TORRENT_PEER_HANDSHAKE_LEN);
+    const Bytes recv = bytes_make(peer->recv_buf, TORRENT_PEER_HANDSHAKE_LEN);
 
-    Slice_u8 peer_id = {0};
+    Bytes peer_id = {0};
     const bool valid = torrent_check_handshake(recv, peer->info_hash, &peer_id);
 
     if (valid) {
@@ -2508,7 +2502,7 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io, const u64 now_ns) {
     for (usize i = 0; i < TORRENT_PEER_MSGS_PER_BUF_MAX + 1; i++) {
       const usize recv_len_before = peer->recv_len;
 
-      Slice_u8 recv = slice_u8_make(peer->recv_buf, peer->recv_len);
+      Bytes recv = bytes_make(peer->recv_buf, peer->recv_len);
       TorrentPeerMessage msg = {0};
 
       const Error err = torrent_peer_parse_message(&recv, &msg);
@@ -2542,7 +2536,7 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io, const u64 now_ns) {
       peer->recv_len = recv.len;
 
       // The buffer is strictly shorter than it was, which is what keeps this
-      // loop finite: a pass that took bytes out of the slice without taking
+      // loop finite: a pass that took bytes out of `recv` without taking
       // them out of the buffer would run here for ever on the same bytes.
       assert(peer->recv_len < recv_len_before);
 
@@ -2624,7 +2618,7 @@ static void torrent_peer_init(TorrentPeer *peer, IO *io,
            addr.port);
 
   peer->logger =
-      logger_make(network_ctx->log_level_mask, slice_u8_from_cstr(log_prefix));
+      logger_make(network_ctx->log_level_mask, bytes_from_cstr(log_prefix));
 
   log(&peer->logger, LogLevelDebug, "init");
 }
@@ -2772,40 +2766,41 @@ torrent_peers_wait_ns(const u64 earliest, const u64 now_ns) {
 }
 
 __attribute__((warn_unused_result)) static Error
-torrent_make_udp_broadcast_message(Slice_u8 url, u16 port, Slice_u8 info_hash,
-                                   Arena *arena, Slice_u8 *dst) {
+torrent_make_udp_broadcast_message(Bytes url, u16 port, Bytes info_hash,
+                                   Arena *arena, Bytes *dst) {
   assert(arena);
   assert(dst);
 
-  StringBuffer sb = {0};
-  Error err = sb_make(128 + url.len, arena, &sb);
+  BytesBuffer bb = {0};
+  Error err = bytes_buffer_make(128 + url.len, arena, &bb);
   if (ErrKindNone != err.kind) {
     return err;
   }
 
-  assert(sb_extend_within_cap(&sb, slice_u8_from_cstr("BT-SEARCH * HTTP/1.1\r\n"
-                                                      "Host: ")));
-  assert(sb_extend_within_cap(&sb, url));
-  assert(sb_extend_within_cap(&sb, slice_u8_from_cstr("\r\n"
-                                                      "Port: ")));
+  assert(bytes_buffer_extend_within_cap(
+      &bb, bytes_from_cstr("BT-SEARCH * HTTP/1.1\r\n"
+                           "Host: ")));
+  assert(bytes_buffer_extend_within_cap(&bb, url));
+  assert(bytes_buffer_extend_within_cap(&bb, bytes_from_cstr("\r\n"
+                                                             "Port: ")));
 
-  assert(sb_append_usize_within_cap(&sb, port));
-  assert(sb_extend_within_cap(&sb, slice_u8_from_cstr("\r\n"
-                                                      "Infohash: ")));
+  assert(bytes_buffer_append_usize_within_cap(&bb, port));
+  assert(bytes_buffer_extend_within_cap(&bb, bytes_from_cstr("\r\n"
+                                                             "Infohash: ")));
 
-  assert(sb_extend_within_cap(&sb, info_hash));
+  assert(bytes_buffer_extend_within_cap(&bb, info_hash));
 
   // Three CRLFs after the cookie value, not two: the one that ends the header
   // line, then the blank line that ends the block, then one more. That is what
   // libtorrent 2.1 puts on the wire, captured from the group:
   //
   //   ...Infohash: 363b69d6...\r\ncookie: 58eac522\r\n\r\n\r\n
-  assert(sb_extend_within_cap(&sb, slice_u8_from_cstr("\r\n"
-                                                      "cookie: fixme\r\n"
-                                                      "\r\n"
-                                                      "\r\n")));
+  assert(bytes_buffer_extend_within_cap(&bb, bytes_from_cstr("\r\n"
+                                                             "cookie: fixme\r\n"
+                                                             "\r\n"
+                                                             "\r\n")));
 
-  *dst = slice_u8_take(sb.container, sb.len);
+  *dst = bytes_take(bb.container, bb.len);
 
   return (Error){.kind = ErrKindNone};
 }
@@ -2815,7 +2810,7 @@ torrent_find_info_dict_in_metainfo(BencodeValue metainfo) {
   for (usize i = 1; i < metainfo.v.list.len; i += 2) {
     const BencodeValue k = metainfo.v.list.data[i - 1];
     BencodeValue *const v = &metainfo.v.list.data[i];
-    if (BencodeKindString == k.kind && slice_u8_eq_cstr(k.v.s, "info") &&
+    if (BencodeKindBytes == k.kind && bytes_eq_cstr(k.v.bytes, "info") &&
         BencodeKindDict == v->kind) {
       return v;
     }
@@ -2840,7 +2835,7 @@ torrent_validate_info_dict(BencodeValue info_dict) {
   for (usize i = 0; i < l.len; i += 2) {
     const BencodeValue k = l.data[i];
 
-    if (BencodeKindString != k.kind) {
+    if (BencodeKindBytes != k.kind) {
       return (Error){.kind = ErrKindInvalidData};
     }
 
@@ -2848,9 +2843,9 @@ torrent_validate_info_dict(BencodeValue info_dict) {
     // adjacent pair of keys and skipping it would let `d1:b..1:a..e` through.
     if (i > 0) {
       const BencodeValue prev_k = l.data[i - 2];
-      assert(BencodeKindString == prev_k.kind);
+      assert(BencodeKindBytes == prev_k.kind);
 
-      if (slice_u8_cmp(prev_k.v.s, k.v.s) >= 0) {
+      if (bytes_cmp(prev_k.v.bytes, k.v.bytes) >= 0) {
         return (Error){.kind = ErrKindInvalidData};
       }
     }

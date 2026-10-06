@@ -210,7 +210,7 @@ __attribute__((warn_unused_result)) static Error unix_listen(const Env *env, i32
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_open(Slice_u8 path, FileOpenOptions options, i32 *fd) {
+unix_open(Bytes path, FileOpenOptions options, i32 *fd) {
   assert(fd);
 
   i32 unix_options = 0;
@@ -382,8 +382,8 @@ unix_enable_socket_reuse(const Env *env, i32 fd) {
   return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static Error
-unix_read(i32 fd, Slice_u8 data, usize *dst_read) {
+__attribute__((warn_unused_result)) static Error unix_read(i32 fd, Bytes data,
+                                                           usize *dst_read) {
   assert(dst_read);
 
   isize ret = 0;
@@ -402,7 +402,7 @@ unix_read(i32 fd, Slice_u8 data, usize *dst_read) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_write(i32 fd, Slice_u8 data, usize *dst_written) {
+unix_write(i32 fd, Bytes data, usize *dst_written) {
   assert(dst_written);
 
   isize ret = 0;
@@ -497,7 +497,7 @@ __attribute__((warn_unused_result)) static Error unix_connect(i32 fd,
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_udp_send_to_ipv4(i32 fd, Ipv4Addr addr, Slice_u8 msg, usize *dst_sent) {
+unix_udp_send_to_ipv4(i32 fd, Ipv4Addr addr, Bytes msg, usize *dst_sent) {
   assert(dst_sent);
 
   const struct sockaddr_in sock_addr_in = {
@@ -537,10 +537,9 @@ unix_file_size(i32 fd, usize *dst_size) {
   return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static Error
-unix_remove_file(Slice_u8 path) {
+__attribute__((warn_unused_result)) static Error unix_remove_file(Bytes path) {
   // Same bound and the same reason as `unix_open`: the name has to reach the
-  // kernel as a NUL terminated string, and the slice carries no terminator.
+  // kernel as a NUL terminated string, and `Bytes` carries no terminator.
   char unix_path[4096] = {0};
   const usize unix_path_max_len = sizeof(unix_path) - 1;
 
@@ -636,7 +635,7 @@ unix_stdout_restore(const Env *env, i32 saved) {
 // later page fault will do. Nothing waits, so it belongs to `Env`.
 __attribute__((warn_unused_result)) static Error
 unix_map_fd(const Env *env, i32 fd, usize size, FileOpenOptions opts,
-            Slice_u8 *dst) {
+            Bytes *dst) {
   (void)env;
   assert(dst);
 

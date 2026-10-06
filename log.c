@@ -16,7 +16,7 @@ typedef struct {
 } Logger;
 
 __attribute__((warn_unused_result)) static Logger logger_make(u32 level_mask,
-                                                              Slice_u8 prefix) {
+                                                              Bytes prefix) {
   Logger logger = {.level_mask = level_mask};
   memcpy(&logger.prefix, prefix.data,
          prefix.len < sizeof(logger.prefix) ? prefix.len

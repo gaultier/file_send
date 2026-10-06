@@ -330,7 +330,7 @@ __attribute__((warn_unused_result)) static Error linux_run_for_ns(IO *io,
 // reaches the callback.
 
 __attribute__((warn_unused_result)) static Error
-linux_open(IO *io, IoCompletion *completion, Slice_u8 path,
+linux_open(IO *io, IoCompletion *completion, Bytes path,
            FileOpenOptions options, IoCallback cb) {
   assert(io);
   assert(completion);
@@ -356,7 +356,7 @@ linux_close(IO *io, IoCompletion *completion, i32 fd, IoCallback cb) {
 }
 
 __attribute__((warn_unused_result)) static Error
-linux_read(IO *io, IoCompletion *completion, i32 fd, Slice_u8 data,
+linux_read(IO *io, IoCompletion *completion, i32 fd, Bytes data,
            IoCallback cb) {
   assert(io);
   assert(completion);
@@ -371,7 +371,7 @@ linux_read(IO *io, IoCompletion *completion, i32 fd, Slice_u8 data,
 }
 
 __attribute__((warn_unused_result)) static Error
-linux_write(IO *io, IoCompletion *completion, i32 fd, Slice_u8 data,
+linux_write(IO *io, IoCompletion *completion, i32 fd, Bytes data,
             IoCallback cb) {
   assert(io);
   assert(completion);
@@ -415,7 +415,7 @@ linux_connect(IO *io, IoCompletion *completion, i32 fd, Ipv4Addr addr,
 
 __attribute__((warn_unused_result)) static Error
 linux_send_to(IO *io, IoCompletion *completion, i32 fd, Ipv4Addr addr,
-              Slice_u8 data, IoCallback cb) {
+              Bytes data, IoCallback cb) {
   assert(io);
   assert(completion);
   assert(cb);
@@ -442,8 +442,7 @@ linux_file_size(IO *io, IoCompletion *completion, i32 fd, IoCallback cb) {
 }
 
 __attribute__((warn_unused_result)) static Error
-linux_remove_file(IO *io, IoCompletion *completion, Slice_u8 path,
-                  IoCallback cb) {
+linux_remove_file(IO *io, IoCompletion *completion, Bytes path, IoCallback cb) {
   assert(io);
   assert(completion);
   assert(cb);

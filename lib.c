@@ -152,7 +152,7 @@ isize_from_usize(usize magnitude, bool negative, isize *res) {
 }
 
 // The byte that separates path components on this platform. Passed to the
-// `path_*` helpers rather than baked into them: they are pure string
+// `path_*` helpers rather than baked into them: they are pure byte
 // functions, and a hardcoded `/` would make them Unix wrappers in everything
 // but name.
 static const u8 PATH_SEPARATOR_UNIX = '/';
@@ -215,25 +215,25 @@ arena_from_mem(u8 *mem, usize bytes_count) {
   return res;
 }
 
-// ---------- Slice_u8 ----------
+// ---------- Bytes ----------
 
 typedef struct {
   usize len;
   u8 *data;
-} Slice_u8;
+} Bytes;
 
-__attribute__((warn_unused_result)) static bool slice_u8_is_empty(Slice_u8 s) {
+__attribute__((warn_unused_result)) static bool bytes_is_empty(Bytes s) {
   return NULL == s.data || 0 == s.len;
 }
 
-__attribute__((warn_unused_result)) static Slice_u8
-slice_u8_from_cstr(const char *s) {
-  return (Slice_u8){.data = (u8 *)s, .len = strlen(s)};
+__attribute__((warn_unused_result)) static Bytes
+bytes_from_cstr(const char *s) {
+  return (Bytes){.data = (u8 *)s, .len = strlen(s)};
 }
 
-__attribute__((warn_unused_result)) static bool
-slice_u8_contains_byte(Slice_u8 s, u8 byte) {
-  if (slice_u8_is_empty(s)) {
+__attribute__((warn_unused_result)) static bool bytes_contains_byte(Bytes s,
+                                                                    u8 byte) {
+  if (bytes_is_empty(s)) {
     return false;
   }
 
@@ -242,8 +242,7 @@ slice_u8_contains_byte(Slice_u8 s, u8 byte) {
   return NULL != memchr(s.data, byte, s.len);
 }
 
-__attribute__((warn_unused_result)) static bool slice_u8_eq(Slice_u8 a,
-                                                            Slice_u8 b) {
+__attribute__((warn_unused_result)) static bool bytes_eq(Bytes a, Bytes b) {
   if (a.len != b.len) {
     return false;
   }
@@ -262,127 +261,127 @@ __attribute__((warn_unused_result)) static bool slice_u8_eq(Slice_u8 a,
 }
 
 __attribute__((warn_unused_result)) static bool
-slice_u8_eq_cstr(Slice_u8 s, const char *cstr) {
+bytes_eq_cstr(Bytes s, const char *cstr) {
   if (!cstr) {
-    return slice_u8_is_empty(s);
+    return bytes_is_empty(s);
   }
-  return slice_u8_eq(s, slice_u8_from_cstr(cstr));
+  return bytes_eq(s, bytes_from_cstr(cstr));
 }
 
-// Peek at the first byte of `slice`, leaving it in place.
+// Peek at the first byte of `bytes`, leaving it in place.
 // Returns `ErrInvalidData`, and does not touch `*res`, if there is no first
 // byte.
-__attribute__((warn_unused_result)) static Error slice_u8_first(Slice_u8 slice,
-                                                                u8 *res) {
+__attribute__((warn_unused_result)) static Error bytes_first(Bytes bytes,
+                                                             u8 *res) {
   assert(res);
 
-  if (!slice.data) {
+  if (!bytes.data) {
     return (Error){.kind = ErrKindInvalidData};
   }
 
-  if (slice.len == 0) {
+  if (bytes.len == 0) {
     return (Error){.kind = ErrKindInvalidData};
   }
 
-  *res = slice.data[0];
+  *res = bytes.data[0];
   return (Error){.kind = ErrKindNone};
 }
 
 // Advance past `count` bytes. The caller must have already established that
 // they are available, which is why this cannot fail: every parser here has to
-// know the length before it advances anyway, either to `slice_u8_take` the
+// know the length before it advances anyway, either to `bytes_take` the
 // bytes or to pick which error a short input deserves, so a checking variant
 // would only ever re-check what the caller just established.
-static void slice_u8_advance(Slice_u8 *slice, usize count) {
-  assert(slice);
-  assert(slice->data);
-  assert(count <= slice->len);
+static void bytes_advance(Bytes *bytes, usize count) {
+  assert(bytes);
+  assert(bytes->data);
+  assert(count <= bytes->len);
 
-  slice->len -= count;
-  slice->data += count;
+  bytes->len -= count;
+  bytes->data += count;
 }
 
 // The caller must have already established that `count` bytes are available:
-// silently returning a short slice would turn a malformed length into a
+// silently returning a short `Bytes` would turn a malformed length into a
 // successful parse of truncated data.
-__attribute__((warn_unused_result)) static Slice_u8
-slice_u8_take(Slice_u8 input, usize count) {
+__attribute__((warn_unused_result)) static Bytes bytes_take(Bytes input,
+                                                            usize count) {
   assert(count <= input.len);
 
-  return (Slice_u8){.data = input.data, .len = count};
+  return (Bytes){.data = input.data, .len = count};
 }
 
 __attribute__((warn_unused_result)) static bool
-slice_u8_starts_with(Slice_u8 s, Slice_u8 prefix) {
+bytes_starts_with(Bytes s, Bytes prefix) {
   if (s.len < prefix.len) {
     return false;
   }
 
-  return slice_u8_eq(prefix, slice_u8_take(s, prefix.len));
+  return bytes_eq(prefix, bytes_take(s, prefix.len));
 
   return true;
 }
 
-__attribute__((warn_unused_result)) static Slice_u8 slice_u8_make(u8 *data,
-                                                                  usize len) {
+__attribute__((warn_unused_result)) static Bytes bytes_make(u8 *data,
+                                                            usize len) {
   if (0 != len) {
     assert(data);
   }
 
-  return (Slice_u8){.data = data, .len = len};
+  return (Bytes){.data = data, .len = len};
 }
 
-__attribute__((warn_unused_result)) static Error
-slice_u8_expect_u8(Slice_u8 *slice, u8 expected) {
-  assert(slice);
-  assert(slice->data);
+__attribute__((warn_unused_result)) static Error bytes_expect_u8(Bytes *bytes,
+                                                                 u8 expected) {
+  assert(bytes);
+  assert(bytes->data);
 
   u8 actual = 0;
-  if (ErrKindNone != slice_u8_first(*slice, &actual).kind) {
+  if (ErrKindNone != bytes_first(*bytes, &actual).kind) {
     return (Error){.kind = ErrKindInvalidData};
   }
   if (actual != expected) {
     return (Error){.kind = ErrKindInvalidData};
   }
 
-  slice_u8_advance(slice, 1);
+  bytes_advance(bytes, 1);
   return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static bool
-slice_u8_consume_u8(Slice_u8 *slice, u8 *dst) {
-  assert(slice);
-  if (slice->len < sizeof(*dst)) {
+__attribute__((warn_unused_result)) static bool bytes_consume_u8(Bytes *bytes,
+                                                                 u8 *dst) {
+  assert(bytes);
+  if (bytes->len < sizeof(*dst)) {
     return false;
   }
 
   if (dst) {
-    *dst = slice->data[0];
+    *dst = bytes->data[0];
   }
 
-  slice_u8_advance(slice, sizeof(*dst));
+  bytes_advance(bytes, sizeof(*dst));
 
   return true;
 }
 
 __attribute__((warn_unused_result)) static bool
-slice_u8_consume_u32_be(Slice_u8 *slice, u32 *dst) {
-  assert(slice);
+bytes_consume_u32_be(Bytes *bytes, u32 *dst) {
+  assert(bytes);
   assert(dst);
 
-  if (slice->len < sizeof(*dst)) {
+  if (bytes->len < sizeof(*dst)) {
     return false;
   }
 
-  *dst = (u32)slice->data[0] << 24 | (u32)slice->data[1] << 16 |
-         (u32)slice->data[2] << 8 | (u32)slice->data[3];
+  *dst = (u32)bytes->data[0] << 24 | (u32)bytes->data[1] << 16 |
+         (u32)bytes->data[2] << 8 | (u32)bytes->data[3];
 
-  slice_u8_advance(slice, sizeof(*dst));
+  bytes_advance(bytes, sizeof(*dst));
 
   return true;
 }
 
-// The other half of `slice_u8_consume_u32_be`: four bytes, the most
+// The other half of `bytes_consume_u32_be`: four bytes, the most
 // significant first. Shifts and not `htonl`, so what lands in `dst` is the
 // same whatever order the host keeps its own integers in, and so that nothing
 // here depends on a socket header.
@@ -396,7 +395,7 @@ static void u8_write_u32_be(u8 dst[static 4], const u32 value) {
 }
 
 // The extension of the last component of `path`, dot included, or an empty
-// slice when there is none. The result borrows from `path`: nothing is
+// `Bytes` when there is none. The result borrows from `path`: nothing is
 // copied, and it is always a suffix of the input.
 //
 // The extension is what follows the last `.` of the *last* component, so a
@@ -409,10 +408,10 @@ static void u8_write_u32_be(u8 dst[static 4], const u32 value) {
 // yields nothing). This is Go's `filepath.Ext`; note that `path_with_ext`
 // takes its replacement *without* the dot, the way Rust's
 // `Path::set_extension` does.
-__attribute__((warn_unused_result)) static Slice_u8 path_get_ext(Slice_u8 path,
-                                                                 u8 separator) {
+__attribute__((warn_unused_result)) static Bytes path_get_ext(Bytes path,
+                                                              u8 separator) {
   if (!path.data || 0 == path.len) {
-    return (Slice_u8){0};
+    return (Bytes){0};
   }
 
   // Start of the last component. Everything before it is directories, whose
@@ -429,11 +428,11 @@ __attribute__((warn_unused_result)) static Slice_u8 path_get_ext(Slice_u8 path,
   // part of the name, per the hidden file rule above.
   for (usize i = path.len; i > base + 1; i--) {
     if ('.' == path.data[i - 1]) {
-      return slice_u8_make(path.data + i - 1, path.len - (i - 1));
+      return bytes_make(path.data + i - 1, path.len - (i - 1));
     }
   }
 
-  return (Slice_u8){0};
+  return (Bytes){0};
 }
 
 // Replace the path's extension with `ext`, or append one when the path has
@@ -446,8 +445,7 @@ __attribute__((warn_unused_result)) static Slice_u8 path_get_ext(Slice_u8 path,
 // `..<ext>`; callers pass real file paths, so the case is pinned by the tests
 // rather than special cased.
 __attribute__((warn_unused_result)) static Error
-path_with_ext(Slice_u8 path, Slice_u8 ext, u8 separator, Slice_u8 *dst,
-              Arena *arena) {
+path_with_ext(Bytes path, Bytes ext, u8 separator, Bytes *dst, Arena *arena) {
   assert(dst);
   assert(arena);
   assert(ext.data);
@@ -464,7 +462,7 @@ path_with_ext(Slice_u8 path, Slice_u8 ext, u8 separator, Slice_u8 *dst,
 
   // How much of `path` is kept, the dot itself excluded. The extension always
   // starts at index one or later, so at least one byte of name survives.
-  const Slice_u8 old_ext = path_get_ext(path, separator);
+  const Bytes old_ext = path_get_ext(path, separator);
   assert(old_ext.len < path.len);
   const usize stem_len = path.len - old_ext.len;
   assert(stem_len > 0);
@@ -482,7 +480,7 @@ path_with_ext(Slice_u8 path, Slice_u8 ext, u8 separator, Slice_u8 *dst,
   data[stem_len] = '.';
   memcpy(data + stem_len + 1, ext.data, ext.len);
 
-  *dst = slice_u8_make(data, dst_len);
+  *dst = bytes_make(data, dst_len);
 
   return (Error){.kind = ErrKindNone};
 }
@@ -491,15 +489,15 @@ path_with_ext(Slice_u8 path, Slice_u8 ext, u8 separator, Slice_u8 *dst,
 //
 // The result may be "/", "." or "..": it is the last path element, not a
 // validated file name, so callers that need one must check it themselves.
-__attribute__((warn_unused_result)) static Slice_u8
-path_last_component(Slice_u8 path, u8 separator) {
+__attribute__((warn_unused_result)) static Bytes
+path_last_component(Bytes path, u8 separator) {
   //  If the path is empty, Base returns ".".
-  if (slice_u8_is_empty(path)) {
-    return (Slice_u8){.data = (u8 *)".", .len = 1};
+  if (bytes_is_empty(path)) {
+    return (Bytes){.data = (u8 *)".", .len = 1};
   }
 
   //  Trailing path separators are removed before extracting the last element.
-  while (!slice_u8_is_empty(path)) {
+  while (!bytes_is_empty(path)) {
     if (separator == path.data[path.len - 1]) {
       path.len -= 1;
     } else {
@@ -510,9 +508,9 @@ path_last_component(Slice_u8 path, u8 separator) {
   //  If the path consists entirely of separators, Base returns a single
   //  separator. Only `len` was trimmed above, so the first byte of the
   //  caller's path is still there to borrow it from.
-  if (slice_u8_is_empty(path)) {
+  if (bytes_is_empty(path)) {
     assert(path.data);
-    return (Slice_u8){.data = path.data, .len = 1};
+    return (Bytes){.data = path.data, .len = 1};
   }
 
   // Counts down over one-past-the-byte so the whole walk stays in `usize`:
@@ -521,17 +519,17 @@ path_last_component(Slice_u8 path, u8 separator) {
   for (usize i = path.len; i > 0; i--) {
     const u8 c = path.data[i - 1];
     if (separator == c) {
-      const Slice_u8 res = {.data = path.data + i, .len = path.len - i};
+      const Bytes res = {.data = path.data + i, .len = path.len - i};
       // The trailing separators are gone, so there is at least one byte left
       // after the last one.
-      assert(!slice_u8_is_empty(res));
-      assert(!slice_u8_contains_byte(res, separator));
+      assert(!bytes_is_empty(res));
+      assert(!bytes_contains_byte(res, separator));
 
       return res;
     }
   }
 
-  assert(!slice_u8_contains_byte(path, separator));
+  assert(!bytes_contains_byte(path, separator));
   return path;
 }
 
@@ -599,7 +597,7 @@ struct Env {
   // it stands for happen later, on a page fault, where no loop can see them.
   // That makes this memory management and not an operation to submit.
   Error (*map_fd)(const Env *env, i32 fd, usize size, FileOpenOptions opts,
-                  Slice_u8 *dst);
+                  Bytes *dst);
 
   // Nothing in the program proper calls this any more: one thread runs one
   // `IO` loop, and a second thread driving the same loop would be a race. It
@@ -653,14 +651,14 @@ typedef struct {
   IoActionKind kind;
   union {
     struct {
-      Slice_u8 path;
+      Bytes path;
       FileOpenOptions options;
     } open;
     struct {
-      Slice_u8 data;
+      Bytes data;
     } read;
     struct {
-      Slice_u8 data;
+      Bytes data;
     } write;
     struct {
       // Written on success: who connected.
@@ -671,10 +669,10 @@ typedef struct {
     } connect;
     struct {
       Ipv4Addr addr;
-      Slice_u8 data;
+      Bytes data;
     } send_to;
     struct {
-      Slice_u8 path;
+      Bytes path;
     } remove_file;
   } v;
 } IoAction;
@@ -767,12 +765,12 @@ struct IO {
   // anyway.
   u64 (*monotonic_ns)(IO *io);
 
-  Error (*open)(IO *io, IoCompletion *completion, Slice_u8 path,
+  Error (*open)(IO *io, IoCompletion *completion, Bytes path,
                 FileOpenOptions options, IoCallback cb);
   Error (*close)(IO *io, IoCompletion *completion, i32 fd, IoCallback cb);
-  Error (*read)(IO *io, IoCompletion *completion, i32 fd, Slice_u8 data,
+  Error (*read)(IO *io, IoCompletion *completion, i32 fd, Bytes data,
                 IoCallback cb);
-  Error (*write)(IO *io, IoCompletion *completion, i32 fd, Slice_u8 data,
+  Error (*write)(IO *io, IoCompletion *completion, i32 fd, Bytes data,
                  IoCallback cb);
   // On success the callback's `res` is the accepted socket, and the peer is in
   // `completion->action.v.accept.addr`.
@@ -781,9 +779,9 @@ struct IO {
   Error (*connect)(IO *io, IoCompletion *completion, i32 fd, Ipv4Addr addr,
                    IoCallback cb);
   Error (*send_to)(IO *io, IoCompletion *completion, i32 fd, Ipv4Addr addr,
-                   Slice_u8 data, IoCallback cb);
+                   Bytes data, IoCallback cb);
   Error (*file_size)(IO *io, IoCompletion *completion, i32 fd, IoCallback cb);
-  Error (*remove_file)(IO *io, IoCompletion *completion, Slice_u8 path,
+  Error (*remove_file)(IO *io, IoCompletion *completion, Bytes path,
                        IoCallback cb);
 };
 
@@ -930,7 +928,7 @@ typedef struct {
   IO *io;
   IoCompletion completion;
   FileOpenOptions opts;
-  Slice_u8 *dst;
+  Bytes *dst;
   i32 fd;
   // The first failure of the sequence, reported once `done` is set. A later
   // step never overwrites it: the cleanup runs whatever happened, and its own
@@ -1023,8 +1021,8 @@ static void io_map_file_on_open(IoCompletion *completion, Error err,
 // Map the whole of `path`. `*ctx` has to outlive the operation; `*dst` is only
 // written on success, and `ctx->err` is the answer once `ctx->done`.
 __attribute__((warn_unused_result)) static Error
-io_map_file(IO *io, IoMapFile *ctx, Slice_u8 path, FileOpenOptions opts,
-            Slice_u8 *dst) {
+io_map_file(IO *io, IoMapFile *ctx, Bytes path, FileOpenOptions opts,
+            Bytes *dst) {
   assert(io);
   assert(ctx);
   assert(dst);
@@ -1046,7 +1044,7 @@ typedef struct {
   IoCompletion completion;
   // What is left to write. A short write is ordinary, so this shrinks a
   // callback at a time rather than in one go.
-  Slice_u8 remaining;
+  Bytes remaining;
   i32 fd;
   Error err;
   bool done;
@@ -1131,7 +1129,7 @@ static void io_write_all_to_file_on_write(IoCompletion *completion, Error err,
   }
 
   assert(res <= ctx->remaining.len);
-  slice_u8_advance(&ctx->remaining, res);
+  bytes_advance(&ctx->remaining, res);
 
   io_write_all_to_file_step(ctx);
 }
@@ -1158,8 +1156,7 @@ static void io_write_all_to_file_on_open(IoCompletion *completion, Error err,
 // Replace the contents of `path` with `data`. `*ctx` has to outlive the
 // operation, and `ctx->err` is the answer once `ctx->done`.
 __attribute__((warn_unused_result)) static Error
-io_write_all_to_file(IO *io, IoWriteAllToFile *ctx, Slice_u8 path,
-                     Slice_u8 data) {
+io_write_all_to_file(IO *io, IoWriteAllToFile *ctx, Bytes path, Bytes data) {
   assert(io);
   assert(ctx);
 
@@ -1185,8 +1182,7 @@ io_write_all_to_file(IO *io, IoWriteAllToFile *ctx, Slice_u8 path,
 // on its behalf so that it reads as the sequence it is; nothing that serves a
 // peer may use them.
 __attribute__((warn_unused_result)) static Error
-io_map_file_blocking(IO *io, Slice_u8 path, FileOpenOptions opts,
-                     Slice_u8 *dst) {
+io_map_file_blocking(IO *io, Bytes path, FileOpenOptions opts, Bytes *dst) {
   assert(io);
   assert(dst);
 
@@ -1205,7 +1201,7 @@ io_map_file_blocking(IO *io, Slice_u8 path, FileOpenOptions opts,
 }
 
 __attribute__((warn_unused_result)) static Error
-io_write_all_to_file_blocking(IO *io, Slice_u8 path, Slice_u8 data) {
+io_write_all_to_file_blocking(IO *io, Bytes path, Bytes data) {
   assert(io);
 
   IoWriteAllToFile ctx = {0};
@@ -1500,7 +1496,7 @@ arena_valloc(const Env *env, usize bytes_count, Arena *res) {
 // Rejects a run with no digits at all, one that is not terminated by a
 // non-digit, one with a leading zero, and one that overflows a `usize`.
 // `*data` is only advanced, and `*res` only written, when the parse succeeds.
-__attribute__((warn_unused_result)) static Error ascii_num_parse(Slice_u8 *data,
+__attribute__((warn_unused_result)) static Error ascii_num_parse(Bytes *data,
                                                                  usize *res) {
   assert(data);
   assert(res);
@@ -1509,7 +1505,7 @@ __attribute__((warn_unused_result)) static Error ascii_num_parse(Slice_u8 *data,
     return (Error){.kind = ErrKindInvalidData};
   }
 
-  Slice_u8 remaining = *data;
+  Bytes remaining = *data;
   usize num = 0;
   bool has_leading_zero = false;
 
@@ -1519,7 +1515,7 @@ __attribute__((warn_unused_result)) static Error ascii_num_parse(Slice_u8 *data,
     u8 current = 0;
 
     // Unterminated.
-    if (ErrKindNone != slice_u8_first(remaining, &current).kind) {
+    if (ErrKindNone != bytes_first(remaining, &current).kind) {
       return (Error){.kind = ErrKindInvalidData};
     }
 
@@ -1555,7 +1551,7 @@ __attribute__((warn_unused_result)) static Error ascii_num_parse(Slice_u8 *data,
       return (Error){.kind = ErrKindRange};
     }
 
-    slice_u8_advance(&remaining, 1);
+    bytes_advance(&remaining, 1);
   }
 
   assert(0 && "unreachable");
@@ -1589,7 +1585,7 @@ __attribute__((warn_unused_result)) static usize isize_digits_base_10(isize n) {
 // one. Base 10 yields the least significant digit first, hence the up front
 // width.
 __attribute__((warn_unused_result)) static usize
-encode_usize_base_10(usize n, Slice_u8 dst) {
+encode_usize_base_10(usize n, Bytes dst) {
   assert(dst.data);
 
   const usize digits = usize_digits_base_10(n);
@@ -1613,7 +1609,7 @@ encode_usize_base_10(usize n, Slice_u8 dst) {
 }
 
 __attribute__((warn_unused_result)) static usize
-encode_isize_base_10(isize n, Slice_u8 dst) {
+encode_isize_base_10(isize n, Bytes dst) {
   assert(dst.data);
 
   const bool negative = n < 0;
@@ -1627,18 +1623,18 @@ encode_isize_base_10(isize n, Slice_u8 dst) {
   dst.data[0] = '-';
 
   const usize digits =
-      encode_usize_base_10(magnitude, slice_u8_make(dst.data + 1, dst.len - 1));
+      encode_usize_base_10(magnitude, bytes_make(dst.data + 1, dst.len - 1));
 
   return 1 + digits;
 }
 
 typedef struct {
-  Slice_u8 container;
+  Bytes container;
   usize len;
-} StringBuffer;
+} BytesBuffer;
 
 __attribute__((warn_unused_result)) static Error
-sb_make(usize cap, Arena *arena, StringBuffer *dst) {
+bytes_buffer_make(usize cap, Arena *arena, BytesBuffer *dst) {
   assert(arena);
   assert(dst);
 
@@ -1654,47 +1650,48 @@ sb_make(usize cap, Arena *arena, StringBuffer *dst) {
   return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static usize sb_space(StringBuffer sb) {
-  assert(sb.len <= sb.container.len);
+__attribute__((warn_unused_result)) static usize
+bytes_buffer_space(BytesBuffer bb) {
+  assert(bb.len <= bb.container.len);
 
-  return sb.container.len - sb.len;
+  return bb.container.len - bb.len;
 }
 
 __attribute__((warn_unused_result)) static bool
-sb_extend_within_cap(StringBuffer *sb, Slice_u8 s) {
-  assert(sb);
+bytes_buffer_extend_within_cap(BytesBuffer *bb, Bytes s) {
+  assert(bb);
 
   if (!s.data || 0 == s.len) {
     return true;
   }
 
-  if (sb_space(*sb) < s.len) {
+  if (bytes_buffer_space(*bb) < s.len) {
     return false;
   }
 
-  memcpy(sb->container.data + sb->len, s.data, s.len);
-  assert(!__builtin_add_overflow(sb->len, s.len, &sb->len));
+  memcpy(bb->container.data + bb->len, s.data, s.len);
+  assert(!__builtin_add_overflow(bb->len, s.len, &bb->len));
 
   return true;
 }
 
 __attribute__((warn_unused_result)) static bool
-sb_append_usize_within_cap(StringBuffer *sb, usize n) {
-  assert(sb);
+bytes_buffer_append_usize_within_cap(BytesBuffer *bb, usize n) {
+  assert(bb);
 
   const usize digits = usize_digits_base_10(n);
 
-  if (sb_space(*sb) < digits) {
+  if (bytes_buffer_space(*bb) < digits) {
     return false;
   }
 
-  const Slice_u8 sb_dst = {
-      .data = sb->container.data + sb->len,
-      .len = sb_space(*sb),
+  const Bytes bb_dst = {
+      .data = bb->container.data + bb->len,
+      .len = bytes_buffer_space(*bb),
   };
-  assert(digits == encode_usize_base_10(n, sb_dst));
+  assert(digits == encode_usize_base_10(n, bb_dst));
 
-  assert(!__builtin_add_overflow(sb->len, digits, &sb->len));
+  assert(!__builtin_add_overflow(bb->len, digits, &bb->len));
 
   return true;
 }
@@ -1710,7 +1707,7 @@ typedef enum {
 } FindOptions;
 
 __attribute__((warn_unused_result)) static Find
-slice_u8_find_slice(Slice_u8 haystack, Slice_u8 needle, FindOptions options) {
+bytes_find(Bytes haystack, Bytes needle, FindOptions options) {
   if (needle.len > haystack.len) {
     return (Find){0};
   }
@@ -1744,19 +1741,18 @@ slice_u8_find_slice(Slice_u8 haystack, Slice_u8 needle, FindOptions options) {
 // Like Go's `strings.Cut`: split around the first `needle`. Calling it again on
 // `right` while `found` gives the same pieces as Go's `strings.Split`.
 typedef struct {
-  Slice_u8 left;
-  Slice_u8 right;
+  Bytes left;
+  Bytes right;
   bool found;
 } Split;
 
-__attribute__((warn_unused_result)) static Split
-slice_u8_split(Slice_u8 haystack, Slice_u8 needle) {
+__attribute__((warn_unused_result)) static Split bytes_split(Bytes haystack,
+                                                             Bytes needle) {
   // Go splits per rune on an empty needle. Bytes have no runes, so it is a bug.
   assert(needle.len > 0);
   assert(needle.data);
 
-  const Find find =
-      slice_u8_find_slice(haystack, needle, FindOptionsIndexAtNeedleStart);
+  const Find find = bytes_find(haystack, needle, FindOptionsIndexAtNeedleStart);
 
   if (!find.found) {
     return (Split){.left = haystack};
@@ -1765,7 +1761,7 @@ slice_u8_split(Slice_u8 haystack, Slice_u8 needle) {
   assert(find.idx + needle.len <= haystack.len);
 
   const Split res = {
-      .left = slice_u8_take(haystack, find.idx),
+      .left = bytes_take(haystack, find.idx),
       .right.data = haystack.data + find.idx + needle.len,
       .right.len = haystack.len - find.idx - needle.len,
       .found = true,
@@ -1773,8 +1769,8 @@ slice_u8_split(Slice_u8 haystack, Slice_u8 needle) {
   assert(res.left.data == haystack.data);
   assert(res.left.len + needle.len + res.right.len == haystack.len);
   assert(res.right.data == res.left.data + res.left.len + needle.len);
-  assert(slice_u8_eq(
-      needle, slice_u8_make(haystack.data + res.left.len, needle.len)));
+  assert(
+      bytes_eq(needle, bytes_make(haystack.data + res.left.len, needle.len)));
 
   return res;
 }

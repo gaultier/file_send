@@ -30,28 +30,22 @@ __attribute__((warn_unused_result)) static Arena test_arena(usize bytes_count) {
   return arena;
 }
 
-__attribute__((warn_unused_result)) static Slice_u8
-test_slice(const char *input) {
-  assert(input);
-
-  return slice_u8_make((u8 *)input, strlen(input));
-}
-
 __attribute__((warn_unused_result)) static BencodeValue
 test_bencode_int(isize n) {
   return (BencodeValue){.kind = BencodeKindInteger, .v.num = n};
 }
 
 __attribute__((warn_unused_result)) static BencodeValue
-test_bencode_str(const char *s) {
-  return (BencodeValue){.kind = BencodeKindString, .v.s = test_slice(s)};
+test_bencode_bytes(const char *s) {
+  return (BencodeValue){.kind = BencodeKindBytes,
+                        .v.bytes = bytes_from_cstr(s)};
 }
 
 // Is `needle` present in `haystack`? `memmem` is not C99, and an empty needle
 // is not a question this asks.
 __attribute__((warn_unused_result)) static bool
-test_slice_contains(Slice_u8 haystack, Slice_u8 needle) {
-  assert(!slice_u8_is_empty(needle));
+test_bytes_contains(Bytes haystack, Bytes needle) {
+  assert(!bytes_is_empty(needle));
 
   if (needle.len > haystack.len) {
     return false;
@@ -150,7 +144,7 @@ static void test_usize_round_up_multiple_of(void) {
 }
 
 // The length prefix every peer message carries. Its counterpart on the read
-// side is `slice_u8_consume_u32_be`, so the two are checked against each other
+// side is `bytes_consume_u32_be`, so the two are checked against each other
 // as well as against bytes written out by hand.
 static void test_u8_write_u32_be(void) {
   // The most significant byte first, whatever the host thinks of that order.
@@ -188,9 +182,9 @@ static void test_u8_write_u32_be(void) {
 
       // Read back by the parser's own helper: the two have to be inverses, or
       // this process cannot read what it just sent.
-      Slice_u8 read = slice_u8_make(dst + 1, 4);
+      Bytes read = bytes_make(dst + 1, 4);
       u32 got = 0;
-      assert(slice_u8_consume_u32_be(&read, &got));
+      assert(bytes_consume_u32_be(&read, &got));
       assert(values[i] == got);
       assert(0 == read.len);
 
@@ -702,7 +696,7 @@ __attribute__((warn_unused_result)) static u64 test_io_monotonic_ns(IO *io) {
 // was asked for, and ask for a turn of the loop.
 
 __attribute__((warn_unused_result)) static Error
-test_io_open(IO *io, IoCompletion *completion, Slice_u8 path,
+test_io_open(IO *io, IoCompletion *completion, Bytes path,
              FileOpenOptions options, IoCallback cb) {
   assert(completion);
 
@@ -722,7 +716,7 @@ test_io_close(IO *io, IoCompletion *completion, i32 fd, IoCallback cb) {
 }
 
 __attribute__((warn_unused_result)) static Error
-test_io_read(IO *io, IoCompletion *completion, i32 fd, Slice_u8 data,
+test_io_read(IO *io, IoCompletion *completion, i32 fd, Bytes data,
              IoCallback cb) {
   assert(completion);
   assert(data.data);
@@ -735,7 +729,7 @@ test_io_read(IO *io, IoCompletion *completion, i32 fd, Slice_u8 data,
 }
 
 __attribute__((warn_unused_result)) static Error
-test_io_write(IO *io, IoCompletion *completion, i32 fd, Slice_u8 data,
+test_io_write(IO *io, IoCompletion *completion, i32 fd, Bytes data,
               IoCallback cb) {
   assert(completion);
   assert(data.data);
@@ -846,8 +840,8 @@ _Static_assert(TEST_PEER_GREETING_LEN ==
                    TEST_HANDSHAKE_LEN + sizeof(test_peer_greeting),
                "the two have to agree");
 
-static void test_handshake_fill(u8 dst[TEST_HANDSHAKE_LEN], Slice_u8 info_hash,
-                                Slice_u8 peer_id) {
+static void test_handshake_fill(u8 dst[TEST_HANDSHAKE_LEN], Bytes info_hash,
+                                Bytes peer_id) {
   assert(dst);
   assert(20 == info_hash.len);
   assert(20 == peer_id.len);
@@ -1035,7 +1029,7 @@ static TestIoPerformResult test_server_perform(TestIo *test_io,
     u8 msg[TEST_HANDSHAKE_LEN];
     memset(msg, 'x', sizeof(msg));
 
-    const Slice_u8 data = completion->action.v.read.data;
+    const Bytes data = completion->action.v.read.data;
     assert(data.len >= sizeof(msg));
     memcpy(data.data, msg, sizeof(msg));
     *dst_res = sizeof(msg);
@@ -1083,7 +1077,7 @@ static void test_network_ctx_init(TorrentNetworkCtx *network_ctx) {
 
   memset(network_ctx, 0, sizeof(*network_ctx));
   network_ctx->info_hash =
-      slice_u8_make(test_info_hash_bytes, TORRENT_INFO_HASH_LEN);
+      bytes_make(test_info_hash_bytes, TORRENT_INFO_HASH_LEN);
 }
 
 // Run the listener to a standstill and report what stopped it. Every one of
@@ -1462,7 +1456,7 @@ static void test_torrent_peer_to_cstr(void) {
 // payload. The length does not count itself.
 //
 // Four answers come back and a test has to tell them apart: a whole message,
-// "not yet" with the slice untouched, a whole message with a tag this does not
+// "not yet" with the input untouched, a whole message with a tag this does not
 // know that is stepped over, and a peer talking nonsense. The second is the one
 // a real network produces constantly and the one a parser is most likely to get
 // wrong, so most of what follows is about it. It and the third differ only in
@@ -1518,7 +1512,7 @@ static void test_torrent_peer_parse_message(void) {
     };
 
     for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-      Slice_u8 data = slice_u8_make((u8 *)cases[i].bytes, cases[i].len);
+      Bytes data = bytes_make((u8 *)cases[i].bytes, cases[i].len);
       TorrentPeerMessage msg = {.kind = TorrentMessageKindNone};
 
       assert(ErrKindNone == torrent_peer_parse_message(&data, &msg).kind);
@@ -1530,14 +1524,14 @@ static void test_torrent_peer_parse_message(void) {
 
   // The payloads, which is what the tag is for.
   {
-    Slice_u8 data = slice_u8_make((u8 *)have, sizeof(have));
+    Bytes data = bytes_make((u8 *)have, sizeof(have));
     TorrentPeerMessage msg = {.kind = TorrentMessageKindNone};
     assert(ErrKindNone == torrent_peer_parse_message(&data, &msg).kind);
     assert(TorrentMessageKindHave == msg.kind);
     assert(300 == msg.v.have);
   }
   {
-    Slice_u8 data = slice_u8_make((u8 *)request, sizeof(request));
+    Bytes data = bytes_make((u8 *)request, sizeof(request));
     TorrentPeerMessage msg = {.kind = TorrentMessageKindNone};
     assert(ErrKindNone == torrent_peer_parse_message(&data, &msg).kind);
     assert(TorrentMessageKindRequest == msg.kind);
@@ -1546,7 +1540,7 @@ static void test_torrent_peer_parse_message(void) {
     assert(0x4000 == msg.v.idx_begin_len.len);
   }
   {
-    Slice_u8 data = slice_u8_make((u8 *)piece, sizeof(piece));
+    Bytes data = bytes_make((u8 *)piece, sizeof(piece));
     TorrentPeerMessage msg = {.kind = TorrentMessageKindNone};
     assert(ErrKindNone == torrent_peer_parse_message(&data, &msg).kind);
     assert(TorrentMessageKindPiece == msg.kind);
@@ -1556,11 +1550,11 @@ static void test_torrent_peer_parse_message(void) {
 
   // Half a message is the ordinary case, not a broken peer: TCP cuts a stream
   // wherever it likes. Every prefix of a `request` short of the whole thing is
-  // "not yet", and leaves the slice exactly as it was so the same call works
+  // "not yet", and leaves the input exactly as it was so the same call works
   // once the rest turns up.
   {
     for (usize n = 0; n < sizeof(request); n++) {
-      Slice_u8 data = slice_u8_make((u8 *)request, n);
+      Bytes data = bytes_make((u8 *)request, n);
       TorrentPeerMessage msg = {.kind = TorrentMessageKindUnknown};
 
       assert(ErrKindNone == torrent_peer_parse_message(&data, &msg).kind);
@@ -1579,7 +1573,7 @@ static void test_torrent_peer_parse_message(void) {
     for (usize n = 0; n < sizeof(piece); n++) {
       buf[n] = piece[n];
 
-      Slice_u8 data = slice_u8_make(buf, n + 1);
+      Bytes data = bytes_make(buf, n + 1);
       TorrentPeerMessage msg = {.kind = TorrentMessageKindUnknown};
 
       assert(ErrKindNone == torrent_peer_parse_message(&data, &msg).kind);
@@ -1612,7 +1606,7 @@ static void test_torrent_peer_parse_message(void) {
         TorrentMessageKindBitfield, TorrentMessageKindUnchoke,
         TorrentMessageKindHave, TorrentMessageKindKeepAlive};
 
-    Slice_u8 data = slice_u8_make(run, sizeof(run));
+    Bytes data = bytes_make(run, sizeof(run));
     for (usize i = 0; i < sizeof(expected) / sizeof(expected[0]); i++) {
       TorrentPeerMessage msg = {.kind = TorrentMessageKindNone};
 
@@ -1659,7 +1653,7 @@ static void test_torrent_peer_parse_message(void) {
     };
 
     for (usize i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
-      Slice_u8 data = slice_u8_make((u8 *)bad[i].bytes, bad[i].len);
+      Bytes data = bytes_make((u8 *)bad[i].bytes, bad[i].len);
       TorrentPeerMessage msg = {.kind = TorrentMessageKindUnknown};
 
       assert(ErrKindInvalidData ==
@@ -1675,7 +1669,7 @@ static void test_torrent_peer_parse_message(void) {
   // how many bytes, which is all a log line needs.
   {
     const u8 unknown[] = {0x00, 0x00, 0x00, 0x03, 0x63, 0xaa, 0xbb};
-    Slice_u8 data = slice_u8_make((u8 *)unknown, sizeof(unknown));
+    Bytes data = bytes_make((u8 *)unknown, sizeof(unknown));
     TorrentPeerMessage msg = {.kind = TorrentMessageKindNone};
 
     assert(ErrKindNone == torrent_peer_parse_message(&data, &msg).kind);
@@ -1694,7 +1688,7 @@ static void test_torrent_peer_parse_message(void) {
   {
     const u8 unknown[] = {0x00, 0x00, 0x00, 0x03, 0x63, 0xaa, 0xbb};
     for (usize n = 0; n < sizeof(unknown); n++) {
-      Slice_u8 data = slice_u8_make((u8 *)unknown, n);
+      Bytes data = bytes_make((u8 *)unknown, n);
       TorrentPeerMessage msg = {.kind = TorrentMessageKindUnknown};
 
       assert(ErrKindNone == torrent_peer_parse_message(&data, &msg).kind);
@@ -1717,7 +1711,7 @@ static void test_torrent_peer_parse_message(void) {
     at += sizeof(unknown);
     memcpy(run + at, have, sizeof(have));
 
-    Slice_u8 data = slice_u8_make(run, sizeof(run));
+    Bytes data = bytes_make(run, sizeof(run));
 
     TorrentPeerMessage msg = {.kind = TorrentMessageKindNone};
     assert(ErrKindNone == torrent_peer_parse_message(&data, &msg).kind);
@@ -1746,7 +1740,7 @@ static void test_torrent_peer_parse_message(void) {
 
     u8 head[4] = {(u8)(biggest >> 24), (u8)(biggest >> 16), (u8)(biggest >> 8),
                   (u8)biggest};
-    Slice_u8 data = slice_u8_make(head, sizeof(head));
+    Bytes data = bytes_make(head, sizeof(head));
     TorrentPeerMessage msg = {.kind = TorrentMessageKindUnknown};
     assert(ErrKindNone == torrent_peer_parse_message(&data, &msg).kind);
     assert(TorrentMessageKindNone == msg.kind);
@@ -1755,7 +1749,7 @@ static void test_torrent_peer_parse_message(void) {
     const u32 too_big = biggest + 1;
     u8 head2[4] = {(u8)(too_big >> 24), (u8)(too_big >> 16), (u8)(too_big >> 8),
                    (u8)too_big};
-    Slice_u8 data2 = slice_u8_make(head2, sizeof(head2));
+    Bytes data2 = bytes_make(head2, sizeof(head2));
     assert(ErrKindInvalidData ==
            torrent_peer_parse_message(&data2, &msg).kind);
   }
@@ -1763,7 +1757,7 @@ static void test_torrent_peer_parse_message(void) {
   // Nothing at all is "not yet", not an error: an empty buffer is where every
   // connection starts.
   {
-    Slice_u8 data = {0};
+    Bytes data = {0};
     TorrentPeerMessage msg = {.kind = TorrentMessageKindUnknown};
     assert(ErrKindNone == torrent_peer_parse_message(&data, &msg).kind);
     assert(TorrentMessageKindNone == msg.kind);
@@ -1782,7 +1776,7 @@ static void test_torrent_peer_parse_message(void) {
 typedef struct {
   // What the peer says, handed over `chunk` bytes at a time. A `chunk` of 0
   // means "everything still unsaid", which is one packet for the whole thing.
-  Slice_u8 says;
+  Bytes says;
   usize chunk;
   usize said;
 
@@ -1848,7 +1842,7 @@ static TestIoPerformResult test_peer_perform(TestIo *test_io,
       return TestIoPerformDone;
     }
 
-    const Slice_u8 data = completion->action.v.read.data;
+    const Bytes data = completion->action.v.read.data;
     assert(data.len > 0);
 
     usize n = (0 == c->chunk) ? unsaid : c->chunk;
@@ -1873,7 +1867,7 @@ static TestIoPerformResult test_peer_perform(TestIo *test_io,
       return TestIoPerformDone;
     }
 
-    const Slice_u8 data = completion->action.v.write.data;
+    const Bytes data = completion->action.v.write.data;
     assert(data.len > 0);
 
     usize n = (0 == c->write_chunk) ? data.len : c->write_chunk;
@@ -1993,13 +1987,13 @@ static void test_torrent_peer_state_machine(void) {
   u8 peer_id_bytes[TORRENT_PEER_ID_LEN] = {'-',  'F',  'S',  '0', '0', '0', '1',
                                            0x00, 0xff, 0x2a, 1,   2,   3,   4,
                                            5,    6,    7,    8,   9,   10};
-  const Slice_u8 peer_id = slice_u8_make(peer_id_bytes, sizeof(peer_id_bytes));
+  const Bytes peer_id = bytes_make(peer_id_bytes, sizeof(peer_id_bytes));
 
   test_network_ctx_init(&network_ctx);
 
   u8 handshake[TEST_HANDSHAKE_LEN] = {0};
   test_handshake_fill(handshake, network_ctx.info_hash, peer_id);
-  const Slice_u8 whole = slice_u8_make(handshake, sizeof(handshake));
+  const Bytes whole = bytes_make(handshake, sizeof(handshake));
 
   // The handshake in one packet. Ours goes out, theirs comes in, and the
   // connection then stays up waiting for messages: it ends only because the
@@ -2039,8 +2033,8 @@ static void test_torrent_peer_state_machine(void) {
     // It has to pass the same check we apply to a peer's, against the info hash
     // we are serving. Our peer id is our own, so it is not compared against
     // theirs -- only its length is fixed.
-    Slice_u8 sent_peer_id = {0};
-    assert(torrent_check_handshake(slice_u8_make(sent, sizeof(sent)),
+    Bytes sent_peer_id = {0};
+    assert(torrent_check_handshake(bytes_make(sent, sizeof(sent)),
                                    network_ctx.info_hash, &sent_peer_id));
     assert(TORRENT_PEER_ID_LEN == sent_peer_id.len);
     assert(test_peer_pool_is_empty(&network_ctx));
@@ -2061,7 +2055,7 @@ static void test_torrent_peer_state_machine(void) {
     // go, and end of file in any of them would hang up with it half sent.
     u8 quiet[TEST_HANDSHAKE_LEN + 16] = {0};
     memcpy(quiet, handshake, sizeof(handshake));
-    const Slice_u8 unhurried = slice_u8_make(quiet, sizeof(quiet));
+    const Bytes unhurried = bytes_make(quiet, sizeof(quiet));
 
     const usize chunks[] = {1, 7, 33, 67, 68};
     for (usize i = 0; i < sizeof(chunks) / sizeof(chunks[0]); i++) {
@@ -2126,7 +2120,7 @@ static void test_torrent_peer_state_machine(void) {
   // so asking again would answer 0 for ever: `TEST_PEER_TURNS_MAX` is what says
   // so here, rather than the test running until someone stops it.
   {
-    TestPeerCtx ctx = {.says = slice_u8_take(whole, 20)};
+    TestPeerCtx ctx = {.says = bytes_take(whole, 20)};
     const Env env = test_env_peer_make(&ctx);
 
     assert(TorrentPeerStateSentHandshake ==
@@ -2140,7 +2134,7 @@ static void test_torrent_peer_state_machine(void) {
 
   // A peer that is cut off rather than hanging up politely.
   {
-    TestPeerCtx ctx = {.says = slice_u8_take(whole, 20),
+    TestPeerCtx ctx = {.says = bytes_take(whole, 20),
                        .spent_err = ErrKindConnReset};
     const Env env = test_env_peer_make(&ctx);
 
@@ -2159,7 +2153,7 @@ static void test_torrent_peer_state_machine(void) {
     memcpy(wrong, handshake, sizeof(wrong));
     wrong[28] ^= 0x01;
 
-    TestPeerCtx ctx = {.says = slice_u8_make(wrong, sizeof(wrong))};
+    TestPeerCtx ctx = {.says = bytes_make(wrong, sizeof(wrong))};
     const Env env = test_env_peer_make(&ctx);
 
     assert(TorrentPeerStateSentHandshake ==
@@ -2287,9 +2281,9 @@ static void test_torrent_peer_messages(void) {
 
   u8 says[TEST_HANDSHAKE_LEN + sizeof(msgs)] = {0};
   test_handshake_fill(says, network_ctx.info_hash,
-                      slice_u8_make(peer_id_bytes, sizeof(peer_id_bytes)));
+                      bytes_make(peer_id_bytes, sizeof(peer_id_bytes)));
   memcpy(says + TEST_HANDSHAKE_LEN, msgs, sizeof(msgs));
-  const Slice_u8 whole = slice_u8_make(says, sizeof(says));
+  const Bytes whole = bytes_make(says, sizeof(says));
 
   // All of it in one packet: the handshake is taken, and then every message
   // behind it, without another read in between.
@@ -2333,14 +2327,14 @@ static void test_torrent_peer_messages(void) {
   {
     u8 bad[TEST_HANDSHAKE_LEN + 6] = {0};
     test_handshake_fill(bad, network_ctx.info_hash,
-                        slice_u8_make(peer_id_bytes, sizeof(peer_id_bytes)));
+                        bytes_make(peer_id_bytes, sizeof(peer_id_bytes)));
     // `choke` is the tag on its own, so a payload behind it cannot be read as
     // anything. An unknown tag is not this: its length still says where it
     // ends, and it is skipped below.
     const u8 nonsense[] = {0x00, 0x00, 0x00, 0x02, 0x00, 0xff};
     memcpy(bad + TEST_HANDSHAKE_LEN, nonsense, sizeof(nonsense));
 
-    TestPeerCtx ctx = {.says = slice_u8_make(bad, sizeof(bad))};
+    TestPeerCtx ctx = {.says = bytes_make(bad, sizeof(bad))};
     const Env env = test_env_peer_make(&ctx);
 
     assert(TorrentPeerStateHandshaked ==
@@ -2365,11 +2359,11 @@ static void test_torrent_peer_messages(void) {
 
     u8 skipped[TEST_HANDSHAKE_LEN + sizeof(unknown_then_unchoke)] = {0};
     test_handshake_fill(skipped, network_ctx.info_hash,
-                        slice_u8_make(peer_id_bytes, sizeof(peer_id_bytes)));
+                        bytes_make(peer_id_bytes, sizeof(peer_id_bytes)));
     memcpy(skipped + TEST_HANDSHAKE_LEN, unknown_then_unchoke,
            sizeof(unknown_then_unchoke));
 
-    TestPeerCtx ctx = {.says = slice_u8_make(skipped, sizeof(skipped))};
+    TestPeerCtx ctx = {.says = bytes_make(skipped, sizeof(skipped))};
     const Env env = test_env_peer_make(&ctx);
 
     assert(TorrentPeerStateHandshaked ==
@@ -2391,10 +2385,10 @@ static void test_torrent_peer_messages(void) {
 
     u8 skipped[TEST_HANDSHAKE_LEN + sizeof(unknown_then_unchoke)] = {0};
     test_handshake_fill(skipped, network_ctx.info_hash,
-                        slice_u8_make(peer_id_bytes, sizeof(peer_id_bytes)));
+                        bytes_make(peer_id_bytes, sizeof(peer_id_bytes)));
     memcpy(skipped + TEST_HANDSHAKE_LEN, unknown_then_unchoke,
            sizeof(unknown_then_unchoke));
-    const Slice_u8 skipped_says = slice_u8_make(skipped, sizeof(skipped));
+    const Bytes skipped_says = bytes_make(skipped, sizeof(skipped));
 
     const usize chunks[] = {1, 2, 3, 5, 8, 13, 67, 68, 69, 70, 1024};
     for (usize i = 0; i < sizeof(chunks) / sizeof(chunks[0]); i++) {
@@ -2421,7 +2415,7 @@ static void test_torrent_peer_recv_buf_compacted(void) {
 
   u8 peer_id_bytes[TORRENT_PEER_ID_LEN];
   memset(peer_id_bytes, 'P', sizeof(peer_id_bytes));
-  const Slice_u8 peer_id = slice_u8_make(peer_id_bytes, sizeof(peer_id_bytes));
+  const Bytes peer_id = bytes_make(peer_id_bytes, sizeof(peer_id_bytes));
 
   // Two whole messages and the first three bytes of a third length prefix,
   // which is a cut no peer can be asked for but every network makes.
@@ -2734,7 +2728,7 @@ static void test_torrent_peer_run(void) {
 // pool's first, these starting with it empty.
 __attribute__((warn_unused_result)) static TorrentPeer *
 test_peer_handshaked(TestIo *test_io, TestPeerCtx *ctx, const Env *env,
-                     TorrentNetworkCtx *network_ctx, Slice_u8 handshake) {
+                     TorrentNetworkCtx *network_ctx, Bytes handshake) {
   assert(test_io);
   assert(ctx);
   assert(network_ctx);
@@ -2835,9 +2829,9 @@ static void test_torrent_peer_deadlines(void) {
   // file, which is how each block below gets its slot back.
   u8 handshake[TEST_HANDSHAKE_LEN + sizeof(keep_alive)] = {0};
   test_handshake_fill(handshake, network_ctx.info_hash,
-                      slice_u8_make(peer_id_bytes, sizeof(peer_id_bytes)));
+                      bytes_make(peer_id_bytes, sizeof(peer_id_bytes)));
   memcpy(handshake + TEST_HANDSHAKE_LEN, keep_alive, sizeof(keep_alive));
-  const Slice_u8 whole = slice_u8_make(handshake, sizeof(handshake));
+  const Bytes whole = bytes_make(handshake, sizeof(handshake));
 
   // The wait, on its own: the nearest deadline when it is nearer than the
   // ceiling, the ceiling when it is not, and the ceiling again when there is no
@@ -3177,7 +3171,7 @@ static void test_arena_valloc(void) {
 // The length prefix in front of every peer message, and every index and offset
 // inside one: four bytes, most significant first, whatever the host's own order
 // is.
-static void test_slice_u8_consume_u32_be(void) {
+static void test_bytes_consume_u32_be(void) {
   const struct {
     u8 bytes[8];
     usize len;
@@ -3197,7 +3191,7 @@ static void test_slice_u8_consume_u32_be(void) {
       // Only the first four are taken; the rest stay for the next reader.
       {{0xde, 0xad, 0xbe, 0xef, 0x0a, 0x0b}, 6, true, 0xdeadbeef, 2},
       // Too short is answered, not read: three bytes are not a length prefix,
-      // and the slice is left alone for whatever arrives next.
+      // and the input is left alone for whatever arrives next.
       {{0x01, 0x02, 0x03}, 3, false, 0, 3},
       {{0}, 0, false, 0, 0},
   };
@@ -3205,11 +3199,11 @@ static void test_slice_u8_consume_u32_be(void) {
   for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
     u8 bytes[8] = {0};
     memcpy(bytes, cases[i].bytes, sizeof(bytes));
-    Slice_u8 slice = slice_u8_make(bytes, cases[i].len);
+    Bytes input = bytes_make(bytes, cases[i].len);
 
     u32 got = 0xa5a5a5a5;
-    assert(cases[i].expected == slice_u8_consume_u32_be(&slice, &got));
-    assert(cases[i].left == slice.len);
+    assert(cases[i].expected == bytes_consume_u32_be(&input, &got));
+    assert(cases[i].left == input.len);
 
     if (cases[i].expected) {
       assert(cases[i].value == got);
@@ -3221,60 +3215,60 @@ static void test_slice_u8_consume_u32_be(void) {
   }
 
   // Back to back, which is how a `request` is read: three of these in a row off
-  // the one slice.
+  // the one input.
   {
     u8 bytes[] = {0x00, 0x00, 0x00, 0x07, 0x00, 0x00,
                   0x40, 0x00, 0x00, 0x00, 0x40, 0x00};
-    Slice_u8 slice = slice_u8_make(bytes, sizeof(bytes));
+    Bytes input = bytes_make(bytes, sizeof(bytes));
 
     u32 idx = 0;
     u32 begin = 0;
     u32 len = 0;
-    assert(slice_u8_consume_u32_be(&slice, &idx));
-    assert(slice_u8_consume_u32_be(&slice, &begin));
-    assert(slice_u8_consume_u32_be(&slice, &len));
+    assert(bytes_consume_u32_be(&input, &idx));
+    assert(bytes_consume_u32_be(&input, &begin));
+    assert(bytes_consume_u32_be(&input, &len));
     assert(7 == idx);
     assert(0x4000 == begin);
     assert(0x4000 == len);
-    assert(0 == slice.len);
+    assert(0 == input.len);
     // And nothing is left to read.
-    assert(!slice_u8_consume_u32_be(&slice, &idx));
+    assert(!bytes_consume_u32_be(&input, &idx));
   }
 }
 
 // One byte off the front. Its own test because it is one byte and not four: the
 // tag of a peer message sits between the length and the payload, so reading one
 // byte too many puts every field behind it out by three.
-static void test_slice_u8_consume_u8(void) {
+static void test_bytes_consume_u8(void) {
   // A whole `have`: length 5, tag 4, then the piece index.
   u8 bytes[] = {0x00, 0x00, 0x00, 0x05, 0x04, 0x00, 0x00, 0x01, 0x00};
-  Slice_u8 slice = slice_u8_make(bytes, sizeof(bytes));
+  Bytes input = bytes_make(bytes, sizeof(bytes));
 
   u32 len = 0;
-  assert(slice_u8_consume_u32_be(&slice, &len));
+  assert(bytes_consume_u32_be(&input, &len));
   assert(5 == len);
 
   u8 tag = 0;
-  assert(slice_u8_consume_u8(&slice, &tag));
+  assert(bytes_consume_u8(&input, &tag));
   assert(TorrentMessageKindHave == tag);
   // One byte, so the four behind it are still there and start where they
   // should.
-  assert(4 == slice.len);
+  assert(4 == input.len);
 
   u32 piece = 0;
-  assert(slice_u8_consume_u32_be(&slice, &piece));
+  assert(bytes_consume_u32_be(&input, &piece));
   assert(256 == piece);
-  assert(0 == slice.len);
+  assert(0 == input.len);
 
   // A single byte is enough for one, and nothing is enough for none.
   {
     u8 one[] = {0x2a};
-    Slice_u8 s1 = slice_u8_make(one, sizeof(one));
+    Bytes s1 = bytes_make(one, sizeof(one));
     u8 got = 0;
-    assert(slice_u8_consume_u8(&s1, &got));
+    assert(bytes_consume_u8(&s1, &got));
     assert(0x2a == got);
     assert(0 == s1.len);
-    assert(!slice_u8_consume_u8(&s1, &got));
+    assert(!bytes_consume_u8(&s1, &got));
     // Untouched by the failure.
     assert(0x2a == got);
   }
@@ -3282,41 +3276,41 @@ static void test_slice_u8_consume_u8(void) {
   // The byte is optional: a caller that only wants it gone passes nothing.
   {
     u8 two[] = {0x01, 0x02};
-    Slice_u8 s2 = slice_u8_make(two, sizeof(two));
-    assert(slice_u8_consume_u8(&s2, NULL));
+    Bytes s2 = bytes_make(two, sizeof(two));
+    assert(bytes_consume_u8(&s2, NULL));
     assert(1 == s2.len);
     assert(0x02 == s2.data[0]);
   }
 }
 
-static void test_slice_u8(void) {
+static void test_bytes(void) {
   u8 data[] = {'a', 'b', 'c'};
 
-  // slice_u8_first.
+  // bytes_first.
   {
     u8 first = 0xAA;
-    assert(ErrKindNone != slice_u8_first(slice_u8_make(NULL, 0), &first).kind);
-    assert(ErrKindNone != slice_u8_first(slice_u8_make(data, 0), &first).kind);
+    assert(ErrKindNone != bytes_first(bytes_make(NULL, 0), &first).kind);
+    assert(ErrKindNone != bytes_first(bytes_make(data, 0), &first).kind);
     // Nothing is written when there is no first byte.
     assert(0xAA == first);
 
     assert(ErrKindNone ==
-           slice_u8_first(slice_u8_make(data, sizeof(data)), &first).kind);
+           bytes_first(bytes_make(data, sizeof(data)), &first).kind);
     assert('a' == first);
 
     // Peeking does not consume.
-    Slice_u8 slice = slice_u8_make(data, sizeof(data));
-    assert(ErrKindNone == slice_u8_first(slice, &first).kind);
-    assert(sizeof(data) == slice.len);
+    Bytes input = bytes_make(data, sizeof(data));
+    assert(ErrKindNone == bytes_first(input, &first).kind);
+    assert(sizeof(data) == input.len);
   }
-  // slice_u8_take.
+  // bytes_take.
   {
-    const Slice_u8 slice = slice_u8_make(data, sizeof(data));
+    const Bytes input = bytes_make(data, sizeof(data));
 
-    assert(0 == slice_u8_take(slice, 0).len);
-    assert(sizeof(data) == slice_u8_take(slice, sizeof(data)).len);
+    assert(0 == bytes_take(input, 0).len);
+    assert(sizeof(data) == bytes_take(input, sizeof(data)).len);
 
-    const Slice_u8 taken = slice_u8_take(slice, 2);
+    const Bytes taken = bytes_take(input, 2);
     assert(2 == taken.len);
     assert(data == taken.data);
   }
@@ -3375,37 +3369,37 @@ static void test_path_last_component(void) {
   };
 
   for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-    const Slice_u8 got =
-        path_last_component(test_slice(cases[i].input), PATH_SEPARATOR_UNIX);
+    const Bytes got = path_last_component(bytes_from_cstr(cases[i].input),
+                                          PATH_SEPARATOR_UNIX);
 
-    assert(!slice_u8_is_empty(got));
-    assert(slice_u8_eq_cstr(got, cases[i].expected));
+    assert(!bytes_is_empty(got));
+    assert(bytes_eq_cstr(got, cases[i].expected));
   }
 
-  // A null slice is the same as an empty one.
-  assert(slice_u8_eq_cstr(
-      path_last_component(slice_u8_make(NULL, 0), PATH_SEPARATOR_UNIX), "."));
+  // A NULL `Bytes` is the same as an empty one.
+  assert(bytes_eq_cstr(
+      path_last_component(bytes_make(NULL, 0), PATH_SEPARATOR_UNIX), "."));
 
   // The result borrows from the input: no copy, and it is a suffix of the
   // path (after the trailing separators are removed).
   {
-    const Slice_u8 path = test_slice("/a/b/c.zip");
-    const Slice_u8 got = path_last_component(path, PATH_SEPARATOR_UNIX);
+    const Bytes path = bytes_from_cstr("/a/b/c.zip");
+    const Bytes got = path_last_component(path, PATH_SEPARATOR_UNIX);
     assert(path.data + path.len - got.len == got.data);
   }
-  // The input is passed by value, so the caller's slice is untouched even
+  // The input is passed by value, so the caller's `Bytes` is untouched even
   // though the function trims trailing separators.
   {
-    Slice_u8 path = test_slice("/a/b/");
-    const Slice_u8 got = path_last_component(path, PATH_SEPARATOR_UNIX);
-    assert(slice_u8_eq_cstr(got, "b"));
+    Bytes path = bytes_from_cstr("/a/b/");
+    const Bytes got = path_last_component(path, PATH_SEPARATOR_UNIX);
+    assert(bytes_eq_cstr(got, "b"));
     assert(5 == path.len);
   }
 }
 
 static void test_path_get_ext(void) {
   // Expectations generated with Go's `filepath.Ext`. A `NULL` expectation
-  // means "no extension": `slice_u8_eq_cstr` reads it as "empty", and an
+  // means "no extension": `bytes_eq_cstr` reads it as "empty", and an
   // empty C string cannot be used here because a zero length one is not a
   // valid argument to it.
   const struct {
@@ -3459,28 +3453,28 @@ static void test_path_get_ext(void) {
   };
 
   for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-    const Slice_u8 path = test_slice(cases[i].input);
-    const Slice_u8 got = path_get_ext(path, PATH_SEPARATOR_UNIX);
+    const Bytes path = bytes_from_cstr(cases[i].input);
+    const Bytes got = path_get_ext(path, PATH_SEPARATOR_UNIX);
 
-    assert(slice_u8_eq_cstr(got, cases[i].expected));
+    assert(bytes_eq_cstr(got, cases[i].expected));
 
     // Nothing is copied: a non-empty result is always a suffix of the input.
-    if (!slice_u8_is_empty(got)) {
+    if (!bytes_is_empty(got)) {
       assert(got.data >= path.data);
       assert(got.data + got.len == path.data + path.len);
       assert('.' == got.data[0]);
     }
   }
 
-  // A null slice is the same as an empty one.
-  assert(slice_u8_is_empty(
-      path_get_ext(slice_u8_make(NULL, 0), PATH_SEPARATOR_UNIX)));
+  // A NULL `Bytes` is the same as an empty one.
+  assert(
+      bytes_is_empty(path_get_ext(bytes_make(NULL, 0), PATH_SEPARATOR_UNIX)));
 
-  // The input is passed by value, so the caller's slice is untouched.
+  // The input is passed by value, so the caller's `Bytes` is untouched.
   {
-    Slice_u8 path = test_slice("/a/b/c.zip");
-    const Slice_u8 got = path_get_ext(path, PATH_SEPARATOR_UNIX);
-    assert(slice_u8_eq_cstr(got, ".zip"));
+    Bytes path = bytes_from_cstr("/a/b/c.zip");
+    const Bytes got = path_get_ext(path, PATH_SEPARATOR_UNIX);
+    assert(bytes_eq_cstr(got, ".zip"));
     assert(10 == path.len);
   }
 }
@@ -3542,35 +3536,35 @@ static void test_path_with_ext(void) {
 
   for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
     Arena arena = test_arena(256);
-    Slice_u8 got = {0};
+    Bytes got = {0};
 
-    assert(ErrKindNone == path_with_ext(test_slice(cases[i].input),
-                                        test_slice(cases[i].ext),
+    assert(ErrKindNone == path_with_ext(bytes_from_cstr(cases[i].input),
+                                        bytes_from_cstr(cases[i].ext),
                                         PATH_SEPARATOR_UNIX, &got, &arena)
                               .kind);
-    assert(slice_u8_eq_cstr(got, cases[i].expected));
+    assert(bytes_eq_cstr(got, cases[i].expected));
 
     // The result is a fresh copy, never a view into the input.
-    assert(got.data != test_slice(cases[i].input).data);
+    assert(got.data != bytes_from_cstr(cases[i].input).data);
   }
 
   // An empty path has no name to extend.
   {
     Arena arena = test_arena(256);
-    Slice_u8 got = {0};
+    Bytes got = {0};
     assert(ErrKindInvalidData ==
-           path_with_ext(test_slice(""), test_slice("torrent"),
+           path_with_ext(bytes_from_cstr(""), bytes_from_cstr("torrent"),
                          PATH_SEPARATOR_UNIX, &got, &arena)
                .kind);
-    assert(slice_u8_is_empty(got));
+    assert(bytes_is_empty(got));
   }
 
-  // A null slice is the same as an empty one.
+  // A NULL `Bytes` is the same as an empty one.
   {
     Arena arena = test_arena(256);
-    Slice_u8 got = {0};
+    Bytes got = {0};
     assert(ErrKindInvalidData ==
-           path_with_ext(slice_u8_make(NULL, 0), test_slice("torrent"),
+           path_with_ext(bytes_make(NULL, 0), bytes_from_cstr("torrent"),
                          PATH_SEPARATOR_UNIX, &got, &arena)
                .kind);
   }
@@ -3581,11 +3575,12 @@ static void test_path_with_ext(void) {
 
     for (usize i = 0; i < sizeof(inputs) / sizeof(inputs[0]); i++) {
       Arena arena = test_arena(256);
-      Slice_u8 got = {0};
-      assert(ErrKindInvalidData ==
-             path_with_ext(test_slice(inputs[i]), test_slice("torrent"),
-                           PATH_SEPARATOR_UNIX, &got, &arena)
-                 .kind);
+      Bytes got = {0};
+      assert(ErrKindInvalidData == path_with_ext(bytes_from_cstr(inputs[i]),
+                                                 bytes_from_cstr("torrent"),
+                                                 PATH_SEPARATOR_UNIX, &got,
+                                                 &arena)
+                                       .kind);
     }
   }
 
@@ -3593,29 +3588,29 @@ static void test_path_with_ext(void) {
   {
     u8 mem[8] = {0};
     Arena arena = arena_from_mem(mem, sizeof(mem));
-    Slice_u8 got = {0};
+    Bytes got = {0};
 
     // "a.torrent" is nine bytes, one more than the arena holds.
-    assert(ErrKindOOM == path_with_ext(test_slice("a.pdf"),
-                                       test_slice("torrent"),
+    assert(ErrKindOOM == path_with_ext(bytes_from_cstr("a.pdf"),
+                                       bytes_from_cstr("torrent"),
                                        PATH_SEPARATOR_UNIX, &got, &arena)
                              .kind);
-    assert(slice_u8_is_empty(got));
+    assert(bytes_is_empty(got));
   }
 
-  // The input is passed by value and only read: the caller's slice and the
+  // The input is passed by value and only read: the caller's `Bytes` and the
   // bytes behind it are untouched.
   {
     Arena arena = test_arena(256);
     char input[] = "/a/b/c.zip";
-    const Slice_u8 path = slice_u8_make((u8 *)input, sizeof(input) - 1);
-    Slice_u8 got = {0};
+    const Bytes path = bytes_make((u8 *)input, sizeof(input) - 1);
+    Bytes got = {0};
 
-    assert(ErrKindNone == path_with_ext(path, test_slice("torrent"),
+    assert(ErrKindNone == path_with_ext(path, bytes_from_cstr("torrent"),
                                         PATH_SEPARATOR_UNIX, &got, &arena)
                               .kind);
-    assert(slice_u8_eq_cstr(got, "/a/b/c.torrent"));
-    assert(slice_u8_eq_cstr(path, "/a/b/c.zip"));
+    assert(bytes_eq_cstr(got, "/a/b/c.torrent"));
+    assert(bytes_eq_cstr(path, "/a/b/c.zip"));
     assert(0 == strcmp(input, "/a/b/c.zip"));
   }
 
@@ -3624,10 +3619,10 @@ static void test_path_with_ext(void) {
   {
     Arena arena = test_arena(256);
     const u8 *const before = arena.start;
-    Slice_u8 got = {0};
+    Bytes got = {0};
 
-    assert(ErrKindNone == path_with_ext(test_slice("a.pdf"),
-                                        test_slice("torrent"),
+    assert(ErrKindNone == path_with_ext(bytes_from_cstr("a.pdf"),
+                                        bytes_from_cstr("torrent"),
                                         PATH_SEPARATOR_UNIX, &got, &arena)
                               .kind);
     assert(9 == got.len);
@@ -3667,8 +3662,8 @@ static void test_ascii_num_parse(void) {
   };
 
   for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-    Slice_u8 data = slice_u8_make((u8 *)cases[i].input, strlen(cases[i].input));
-    const Slice_u8 before = data;
+    Bytes data = bytes_make((u8 *)cases[i].input, strlen(cases[i].input));
+    const Bytes before = data;
 
     usize num = 0xAA;
     assert(cases[i].expected == ascii_num_parse(&data, &num).kind);
@@ -3688,7 +3683,7 @@ static void test_ascii_num_parse(void) {
 
   // No data at all.
   {
-    Slice_u8 data = slice_u8_make(NULL, 0);
+    Bytes data = bytes_make(NULL, 0);
     usize num = 0;
     assert(ErrKindInvalidData == ascii_num_parse(&data, &num).kind);
   }
@@ -3729,7 +3724,7 @@ static void test_bencode_parse_num(void) {
   };
 
   for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-    Slice_u8 data = test_slice(cases[i].input);
+    Bytes data = bytes_from_cstr(cases[i].input);
 
     // Poisoned so that a write on the failure path is visible.
     BencodeValue value = {.kind = BencodeKindDict};
@@ -3749,11 +3744,11 @@ static void test_bencode_parse_num(void) {
   }
 }
 
-static void test_bencode_parse_string(void) {
+static void test_bencode_parse_bytes(void) {
   const struct {
     const char *input;
     bool ok;
-    const char *str;
+    const char *expected;
     // What the parser leaves behind for the caller.
     usize remaining;
   } cases[] = {
@@ -3776,11 +3771,11 @@ static void test_bencode_parse_string(void) {
   };
 
   for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-    Slice_u8 data = test_slice(cases[i].input);
+    Bytes data = bytes_from_cstr(cases[i].input);
 
     // Poisoned so that a write on the failure path is visible.
     BencodeValue value = {.kind = BencodeKindDict};
-    assert((ErrKindNone == bencode_parse_string(&data, &value).kind) ==
+    assert((ErrKindNone == bencode_parse_bytes(&data, &value).kind) ==
            cases[i].ok);
 
     if (!cases[i].ok) {
@@ -3790,40 +3785,41 @@ static void test_bencode_parse_string(void) {
       continue;
     }
 
-    assert(BencodeKindString == value.kind);
-    assert(strlen(cases[i].str) == value.v.s.len);
-    assert(0 == memcmp(value.v.s.data, cases[i].str, value.v.s.len));
+    assert(BencodeKindBytes == value.kind);
+    assert(strlen(cases[i].expected) == value.v.bytes.len);
+    assert(0 ==
+           memcmp(value.v.bytes.data, cases[i].expected, value.v.bytes.len));
     assert(cases[i].remaining == data.len);
   }
 
-  // The string points into the input, it is not copied.
+  // The bytes point into the input, they are not copied.
   {
     const char *const input = "4:spam";
-    Slice_u8 data = test_slice(input);
+    Bytes data = bytes_from_cstr(input);
 
     BencodeValue value = {0};
-    assert(ErrKindNone == bencode_parse_string(&data, &value).kind);
-    assert((u8 *)input + 2 == value.v.s.data);
+    assert(ErrKindNone == bencode_parse_bytes(&data, &value).kind);
+    assert((u8 *)input + 2 == value.v.bytes.data);
   }
 }
 
 __attribute__((warn_unused_result)) static bool
-test_bencode_is_string(BencodeValue value, const char *expected) {
+test_bencode_is_bytes(BencodeValue value, const char *expected) {
   assert(expected);
 
   const usize len = strlen(expected);
-  return BencodeKindString == value.kind && len == value.v.s.len &&
-         (0 == len || 0 == memcmp(value.v.s.data, expected, len));
+  return BencodeKindBytes == value.kind && len == value.v.bytes.len &&
+         (0 == len || 0 == memcmp(value.v.bytes.data, expected, len));
 }
 
 __attribute__((warn_unused_result)) static BencodeValue
-test_bencode_make_string(const char *data, usize len) {
+test_bencode_make_bytes(const char *data, usize len) {
   if (0 != len) {
     assert(data);
   }
 
-  return (BencodeValue){.kind = BencodeKindString,
-                        .v.s = slice_u8_make((u8 *)data, len)};
+  return (BencodeValue){.kind = BencodeKindBytes,
+                        .v.bytes = bytes_make((u8 *)data, len)};
 }
 
 static void test_bencode_parse(void) {
@@ -3840,8 +3836,8 @@ static void test_bencode_parse(void) {
       // value itself and not a one-element container.
       {"i42e", true, BencodeKindInteger, 0, 0},
       {"i-1e", true, BencodeKindInteger, 0, 0},
-      {"3:abc", true, BencodeKindString, 0, 0},
-      {"0:", true, BencodeKindString, 0, 0},
+      {"3:abc", true, BencodeKindBytes, 0, 0},
+      {"0:", true, BencodeKindBytes, 0, 0},
       // Empty containers allocate nothing.
       {"le", true, BencodeKindList, 0, 0},
       {"de", true, BencodeKindDict, 0, 0},
@@ -3864,7 +3860,7 @@ static void test_bencode_parse(void) {
       // malformed.
       {"d3:keye", false, 0, 0, 0},
       {"di1ee", false, 0, 0, 0},
-      // Dict keys must be strings, sorted by raw byte value, with no
+      // Dict keys must be byte strings, sorted by raw byte value, with no
       // duplicates. `bencode_validate_dict` is applied as each dict closes.
       {"di1ei2ee", false, 0, 0, 0},
       {"d1:a1:x1:b1:ye", true, BencodeKindDict, 4, 0},
@@ -3900,7 +3896,7 @@ static void test_bencode_parse(void) {
     Arena arena = test_arena(4 * KiB);
     Arena scratch = test_arena(4 * KiB);
 
-    Slice_u8 data = test_slice(cases[i].input);
+    Bytes data = bytes_from_cstr(cases[i].input);
     u8 *const arena_start = arena.start;
 
     BencodeValue value = {0};
@@ -3926,14 +3922,14 @@ static void test_bencode_parse(void) {
     }
   }
 
-  // Every digit dispatches to the string parser.
+  // Every digit dispatches to the bytes parser.
   {
     for (u8 c = '0'; c <= '9'; c++) {
       Arena arena = test_arena(1 * KiB);
       Arena scratch = test_arena(1 * KiB);
 
       const char input[] = {(char)c, ':', 0};
-      Slice_u8 data = test_slice(input);
+      Bytes data = bytes_from_cstr(input);
 
       BencodeValue value = {0};
       // Only `0:` has a body short enough to succeed.
@@ -3949,7 +3945,7 @@ static void test_bencode_parse(void) {
     Arena arena = test_arena(4 * KiB);
     Arena scratch = test_arena(4 * KiB);
 
-    Slice_u8 data = test_slice("ld1:a1:beli2eee");
+    Bytes data = bytes_from_cstr("ld1:a1:beli2eee");
     BencodeValue value = {0};
     assert(ErrKindNone == bencode_parse(&data, &arena, scratch, &value).kind);
     assert(BencodeKindList == value.kind);
@@ -3958,8 +3954,8 @@ static void test_bencode_parse(void) {
     const BencodeValue dict = value.v.list.data[0];
     assert(BencodeKindDict == dict.kind);
     assert(2 == dict.v.list.len);
-    assert(test_bencode_is_string(dict.v.list.data[0], "a"));
-    assert(test_bencode_is_string(dict.v.list.data[1], "b"));
+    assert(test_bencode_is_bytes(dict.v.list.data[0], "a"));
+    assert(test_bencode_is_bytes(dict.v.list.data[1], "b"));
 
     const BencodeValue list = value.v.list.data[1];
     assert(BencodeKindList == list.kind);
@@ -3968,16 +3964,16 @@ static void test_bencode_parse(void) {
     assert(2 == list.v.list.data[0].v.num);
   }
 
-  // Strings point into the input, they are not copied.
+  // Byte strings point into the input, they are not copied.
   {
     Arena arena = test_arena(1 * KiB);
     Arena scratch = test_arena(1 * KiB);
 
     const char *const input = "l4:spame";
-    Slice_u8 data = test_slice(input);
+    Bytes data = bytes_from_cstr(input);
     BencodeValue value = {0};
     assert(ErrKindNone == bencode_parse(&data, &arena, scratch, &value).kind);
-    assert((u8 *)input + 3 == value.v.list.data[0].v.s.data);
+    assert((u8 *)input + 3 == value.v.list.data[0].v.bytes.data);
   }
 
   // Nesting is bounded, and the bound is not off by one.
@@ -3992,7 +3988,7 @@ static void test_bencode_parse(void) {
       memset(input, 'l', depth);
       memset(input + depth, 'e', depth);
 
-      Slice_u8 data = slice_u8_make(input, 2 * depth);
+      Bytes data = bytes_make(input, 2 * depth);
       BencodeValue value = {0};
       const bool ok =
           ErrKindNone == bencode_parse(&data, &arena, scratch, &value).kind;
@@ -4020,14 +4016,14 @@ static void test_bencode_parse(void) {
     }
     input[1 + 2 * children_len] = 'e';
 
-    Slice_u8 data = slice_u8_make(input, sizeof(input));
+    Bytes data = bytes_make(input, sizeof(input));
     BencodeValue value = {0};
     assert(ErrKindNone == bencode_parse(&data, &arena, scratch, &value).kind);
     assert(BencodeKindList == value.kind);
     assert(children_len == value.v.list.len);
 
     for (usize i = 0; i < children_len; i++) {
-      assert(test_bencode_is_string(value.v.list.data[i], ""));
+      assert(test_bencode_is_bytes(value.v.list.data[i], ""));
     }
   }
 
@@ -4036,7 +4032,7 @@ static void test_bencode_parse(void) {
     Arena arena = test_arena(4 * KiB);
     Arena scratch = test_arena(8);
 
-    Slice_u8 data = test_slice("li1ei2ee");
+    Bytes data = bytes_from_cstr("li1ei2ee");
     BencodeValue value = {0};
     assert(ErrKindNone != bencode_parse(&data, &arena, scratch, &value).kind);
   }
@@ -4045,12 +4041,12 @@ static void test_bencode_parse(void) {
     Arena arena = test_arena(8);
     Arena scratch = test_arena(4 * KiB);
 
-    Slice_u8 data = test_slice("li1ee");
+    Bytes data = bytes_from_cstr("li1ee");
     BencodeValue value = {0};
     assert(ErrKindNone != bencode_parse(&data, &arena, scratch, &value).kind);
 
     // An empty container needs no allocation at all, so it still succeeds.
-    Slice_u8 data_empty = test_slice("le");
+    Bytes data_empty = bytes_from_cstr("le");
     assert(ErrKindNone ==
            bencode_parse(&data_empty, &arena, scratch, &value).kind);
     assert(0 == value.v.list.len);
@@ -4064,12 +4060,12 @@ static void test_bencode_parse(void) {
     Arena scratch = test_arena(4 * KiB);
     const u8 *const scratch_start = scratch.start;
 
-    Slice_u8 data_a = test_slice("li1ei2ee");
+    Bytes data_a = bytes_from_cstr("li1ei2ee");
     BencodeValue a = {0};
     assert(ErrKindNone == bencode_parse(&data_a, &arena, scratch, &a).kind);
     assert(scratch_start == scratch.start);
 
-    Slice_u8 data_b = test_slice("li3ee");
+    Bytes data_b = bytes_from_cstr("li3ee");
     BencodeValue b = {0};
     assert(ErrKindNone == bencode_parse(&data_b, &arena, scratch, &b).kind);
     assert(scratch_start == scratch.start);
@@ -4087,7 +4083,7 @@ static void test_bencode_parse(void) {
     Arena arena = test_arena(1 * KiB);
     Arena scratch = test_arena(1 * KiB);
 
-    Slice_u8 data = slice_u8_make(NULL, 0);
+    Bytes data = bytes_make(NULL, 0);
     BencodeValue value = {0};
     assert(ErrKindNone != bencode_parse(&data, &arena, scratch, &value).kind);
   }
@@ -4100,26 +4096,26 @@ static void test_bencode_parse(void) {
     u8 *const arena_start = arena.start;
 
     const char *const input = "lli1ee";
-    Slice_u8 data = test_slice(input);
+    Bytes data = bytes_from_cstr(input);
 
     // Poisoned so that a write on the failure path is visible.
-    BencodeValue value = {.kind = BencodeKindString};
+    BencodeValue value = {.kind = BencodeKindBytes};
     assert(ErrKindNone != bencode_parse(&data, &arena, scratch, &value).kind);
 
     assert(arena_start == arena.start);
     assert(strlen(input) == data.len);
-    assert(BencodeKindString == value.kind);
+    assert(BencodeKindBytes == value.kind);
   }
 }
 
 // `bencode_parse` again, for the three things the table above cannot express.
 //
-// Its corpus is built with `test_slice`, which measures with `strlen`, so every
-// case in it is NUL-free seven-bit ASCII. Bencode strings are arbitrary bytes,
-// and it is precisely the bytes `strlen` and a signed `char` cannot carry that
-// break a parser.
+// Its corpus is built with `bytes_from_cstr`, which measures with `strlen`, so
+// every case in it is NUL-free seven-bit ASCII. Bencode byte strings are
+// arbitrary bytes, and it is precisely the bytes `strlen` and a signed `char`
+// cannot carry that break a parser.
 static void test_bencode_parse_binary(void) {
-  // A string body is arbitrary bytes, NUL and 0x80..0xff included, and it
+  // A byte string body is arbitrary bytes, NUL and 0x80..0xff included, and it
   // borrows from the input rather than being copied or terminated.
   {
     Arena arena = test_arena(4 * KiB);
@@ -4127,7 +4123,7 @@ static void test_bencode_parse_binary(void) {
 
     // `l` `5:` <a NUL b 0x80 0xff> `e`
     const u8 input[] = {'l', '5', ':', 'a', 0x00, 'b', 0x80, 0xff, 'e'};
-    Slice_u8 data = slice_u8_make((u8 *)input, sizeof(input));
+    Bytes data = bytes_make((u8 *)input, sizeof(input));
 
     BencodeValue value = {0};
     assert(ErrKindNone == bencode_parse(&data, &arena, scratch, &value).kind);
@@ -4135,12 +4131,12 @@ static void test_bencode_parse_binary(void) {
     assert(BencodeKindList == value.kind);
     assert(1 == value.v.list.len);
 
-    const BencodeValue str = value.v.list.data[0];
-    assert(BencodeKindString == str.kind);
-    assert(5 == str.v.s.len);
+    const BencodeValue bytes = value.v.list.data[0];
+    assert(BencodeKindBytes == bytes.kind);
+    assert(5 == bytes.v.bytes.len);
     // Borrowed, so the body is the input's own bytes and not a copy.
-    assert(input + 3 == str.v.s.data);
-    assert(0 == memcmp(str.v.s.data, input + 3, 5));
+    assert(input + 3 == bytes.v.bytes.data);
+    assert(0 == memcmp(bytes.v.bytes.data, input + 3, 5));
   }
 
   // A NUL inside a *key* is a byte like any other: it neither terminates the
@@ -4152,19 +4148,19 @@ static void test_bencode_parse_binary(void) {
     // `d` `2:a\0` `1:x` `2:ab` `1:y` `e`, in order: "a\0" < "ab".
     const u8 input[] = {'d', '2', ':', 'a', 0x00, '1', ':', 'x',
                         '2', ':', 'a', 'b', '1',  ':', 'y', 'e'};
-    Slice_u8 data = slice_u8_make((u8 *)input, sizeof(input));
+    Bytes data = bytes_make((u8 *)input, sizeof(input));
 
     BencodeValue value = {0};
     assert(ErrKindNone == bencode_parse(&data, &arena, scratch, &value).kind);
     assert(BencodeKindDict == value.kind);
     assert(4 == value.v.list.len);
-    assert(2 == value.v.list.data[0].v.s.len);
-    assert(0 == memcmp(value.v.list.data[0].v.s.data, "a\0", 2));
+    assert(2 == value.v.list.data[0].v.bytes.len);
+    assert(0 == memcmp(value.v.list.data[0].v.bytes.data, "a\0", 2));
   }
 
   // Dict keys are ordered by raw byte value, so 0x01 comes before 0x80. A
   // signed `char` comparison reads 0x80 as -128 and puts it first, which would
-  // accept the reversed pair and reject this one; `slice_u8_cmp` is checked on
+  // accept the reversed pair and reject this one; `bytes_cmp` is checked on
   // its own, this checks that `bencode_parse` actually routes dict keys through
   // it.
   {
@@ -4188,7 +4184,7 @@ static void test_bencode_parse_binary(void) {
       const u8 input[] = {'d', '1', ':', cases[i].first_key,  '1', ':',
                           'x', '1', ':', cases[i].second_key, '1', ':',
                           'y', 'e'};
-      Slice_u8 data = slice_u8_make((u8 *)input, sizeof(input));
+      Bytes data = bytes_make((u8 *)input, sizeof(input));
 
       BencodeValue value = {0};
       assert(
@@ -4226,7 +4222,7 @@ static void test_bencode_parse_dict_keys(void) {
     Arena arena = test_arena(4 * KiB);
     Arena scratch = test_arena(4 * KiB);
 
-    Slice_u8 data = test_slice(cases[i].input);
+    Bytes data = bytes_from_cstr(cases[i].input);
 
     BencodeValue value = {0};
     assert((ErrKindNone ==
@@ -4266,7 +4262,7 @@ static void test_bencode_parse_deep_dicts(void) {
     }
     assert(len <= sizeof(input));
 
-    Slice_u8 data = slice_u8_make(input, len);
+    Bytes data = bytes_make(input, len);
     BencodeValue value = {0};
     const bool ok =
         ErrKindNone == bencode_parse(&data, &arena, scratch, &value).kind;
@@ -4285,7 +4281,7 @@ static void test_bencode_parse_deep_dicts(void) {
     Arena arena = test_arena(4 * KiB);
     Arena scratch = test_arena(4 * KiB);
 
-    Slice_u8 data = test_slice("ld1:ali1eeee");
+    Bytes data = bytes_from_cstr("ld1:ali1eeee");
     BencodeValue value = {0};
     assert(ErrKindNone == bencode_parse(&data, &arena, scratch, &value).kind);
     assert(0 == data.len);
@@ -4296,7 +4292,7 @@ static void test_bencode_parse_deep_dicts(void) {
     const BencodeValue dict = value.v.list.data[0];
     assert(BencodeKindDict == dict.kind);
     assert(2 == dict.v.list.len);
-    assert(test_bencode_is_string(dict.v.list.data[0], "a"));
+    assert(test_bencode_is_bytes(dict.v.list.data[0], "a"));
 
     const BencodeValue list = dict.v.list.data[1];
     assert(BencodeKindList == list.kind);
@@ -4306,8 +4302,8 @@ static void test_bencode_parse_deep_dicts(void) {
   }
 }
 
-static void test_slice_u8_cmp(void) {
-  // A corpus in the order `slice_u8_cmp` must put it in. The embedded zeroes
+static void test_bytes_cmp(void) {
+  // A corpus in the order `bytes_cmp` must put it in. The embedded zeroes
   // and the bytes above 0x7f are there on purpose: neither `strcmp` nor a
   // signed char comparison orders these correctly.
   const struct {
@@ -4336,10 +4332,10 @@ static void test_slice_u8_cmp(void) {
 
   for (usize i = 0; i < count; i++) {
     for (usize j = 0; j < count; j++) {
-      const Slice_u8 a = slice_u8_make((u8 *)sorted[i].data, sorted[i].len);
-      const Slice_u8 b = slice_u8_make((u8 *)sorted[j].data, sorted[j].len);
+      const Bytes a = bytes_make((u8 *)sorted[i].data, sorted[i].len);
+      const Bytes b = bytes_make((u8 *)sorted[j].data, sorted[j].len);
 
-      const i32 res = slice_u8_cmp(a, b);
+      const i32 res = bytes_cmp(a, b);
       if (i < j) {
         assert(res < 0);
       } else if (i > j) {
@@ -4349,7 +4345,7 @@ static void test_slice_u8_cmp(void) {
       }
 
       // Antisymmetric: swapping the arguments flips the sign.
-      const i32 swapped = slice_u8_cmp(b, a);
+      const i32 swapped = bytes_cmp(b, a);
       assert((res < 0) == (swapped > 0));
       assert((res > 0) == (swapped < 0));
       assert((0 == res) == (0 == swapped));
@@ -4359,11 +4355,11 @@ static void test_slice_u8_cmp(void) {
   // A NULL pointer is legal as long as the length is zero, and every empty
   // byte string is equal to every other one.
   {
-    const Slice_u8 null_empty = slice_u8_make(NULL, 0);
-    assert(0 == slice_u8_cmp(null_empty, null_empty));
-    assert(0 == slice_u8_cmp(null_empty, test_slice("")));
-    assert(slice_u8_cmp(null_empty, test_slice("a")) < 0);
-    assert(slice_u8_cmp(test_slice("a"), null_empty) > 0);
+    const Bytes null_empty = bytes_make(NULL, 0);
+    assert(0 == bytes_cmp(null_empty, null_empty));
+    assert(0 == bytes_cmp(null_empty, bytes_from_cstr("")));
+    assert(bytes_cmp(null_empty, bytes_from_cstr("a")) < 0);
+    assert(bytes_cmp(bytes_from_cstr("a"), null_empty) > 0);
   }
 
   // Longer than a word, differing only in the last byte.
@@ -4374,20 +4370,20 @@ static void test_slice_u8_cmp(void) {
     memset(y, 'z', sizeof(y));
     y[sizeof(y) - 1] = 'z' + 1;
 
-    const Slice_u8 sx = slice_u8_make(x, sizeof(x));
-    const Slice_u8 sy = slice_u8_make(y, sizeof(y));
+    const Bytes sx = bytes_make(x, sizeof(x));
+    const Bytes sy = bytes_make(y, sizeof(y));
 
-    assert(slice_u8_cmp(sx, sy) < 0);
-    assert(slice_u8_cmp(sy, sx) > 0);
+    assert(bytes_cmp(sx, sy) < 0);
+    assert(bytes_cmp(sy, sx) > 0);
 
     // Against itself, and against a prefix of itself.
-    assert(0 == slice_u8_cmp(sx, sx));
-    assert(slice_u8_cmp(slice_u8_take(sx, sizeof(x) - 1), sx) < 0);
-    assert(slice_u8_cmp(sx, slice_u8_take(sx, sizeof(x) - 1)) > 0);
+    assert(0 == bytes_cmp(sx, sx));
+    assert(bytes_cmp(bytes_take(sx, sizeof(x) - 1), sx) < 0);
+    assert(bytes_cmp(sx, bytes_take(sx, sizeof(x) - 1)) > 0);
   }
 }
 
-static void test_slice_u8_find_slice(void) {
+static void test_bytes_find(void) {
   const struct {
     const char *haystack;
     const char *needle;
@@ -4415,16 +4411,16 @@ static void test_slice_u8_find_slice(void) {
   };
 
   for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-    const Slice_u8 haystack = test_slice(cases[i].haystack);
-    const Slice_u8 needle = test_slice(cases[i].needle);
+    const Bytes haystack = bytes_from_cstr(cases[i].haystack);
+    const Bytes needle = bytes_from_cstr(cases[i].needle);
 
     const Find start =
-        slice_u8_find_slice(haystack, needle, FindOptionsIndexAtNeedleStart);
+        bytes_find(haystack, needle, FindOptionsIndexAtNeedleStart);
     assert(cases[i].found == start.found);
     assert(cases[i].idx == start.idx);
 
     const Find end =
-        slice_u8_find_slice(haystack, needle, FindOptionsIndexAfterNeedleEnd);
+        bytes_find(haystack, needle, FindOptionsIndexAfterNeedleEnd);
     assert(cases[i].found == end.found);
     if (cases[i].found) {
       assert(cases[i].idx + needle.len == end.idx);
@@ -4438,28 +4434,27 @@ static void test_slice_u8_find_slice(void) {
   {
     const u8 haystack_data[] = {'a', 0, 'b', 0, 'c'};
     const u8 needle_data[] = {0, 'c'};
-    const Slice_u8 haystack =
-        slice_u8_make((u8 *)haystack_data, sizeof(haystack_data));
-    const Slice_u8 needle =
-        slice_u8_make((u8 *)needle_data, sizeof(needle_data));
+    const Bytes haystack =
+        bytes_make((u8 *)haystack_data, sizeof(haystack_data));
+    const Bytes needle = bytes_make((u8 *)needle_data, sizeof(needle_data));
 
     const Find find =
-        slice_u8_find_slice(haystack, needle, FindOptionsIndexAtNeedleStart);
+        bytes_find(haystack, needle, FindOptionsIndexAtNeedleStart);
     assert(find.found);
     assert(3 == find.idx);
   }
 
   // A NULL pointer is legal as long as the length is zero.
   {
-    const Slice_u8 null_empty = slice_u8_make(NULL, 0);
+    const Bytes null_empty = bytes_make(NULL, 0);
 
-    const Find in_null = slice_u8_find_slice(null_empty, null_empty,
-                                             FindOptionsIndexAtNeedleStart);
+    const Find in_null =
+        bytes_find(null_empty, null_empty, FindOptionsIndexAtNeedleStart);
     assert(in_null.found);
     assert(0 == in_null.idx);
 
-    const Find not_in_null = slice_u8_find_slice(null_empty, test_slice("a"),
-                                                 FindOptionsIndexAtNeedleStart);
+    const Find not_in_null = bytes_find(null_empty, bytes_from_cstr("a"),
+                                        FindOptionsIndexAtNeedleStart);
     assert(!not_in_null.found);
   }
 
@@ -4468,18 +4463,17 @@ static void test_slice_u8_find_slice(void) {
     u8 haystack_data[64];
     memset(haystack_data, 'z', sizeof(haystack_data));
     haystack_data[sizeof(haystack_data) - 1] = 'y';
-    const Slice_u8 haystack =
-        slice_u8_make(haystack_data, sizeof(haystack_data));
+    const Bytes haystack = bytes_make(haystack_data, sizeof(haystack_data));
 
-    const Find find = slice_u8_find_slice(haystack, test_slice("zy"),
-                                          FindOptionsIndexAfterNeedleEnd);
+    const Find find = bytes_find(haystack, bytes_from_cstr("zy"),
+                                 FindOptionsIndexAfterNeedleEnd);
     assert(find.found);
     assert(sizeof(haystack_data) == find.idx);
   }
 }
 
 // Expected pieces come from Go's `strings.Split`.
-static void test_slice_u8_split(void) {
+static void test_bytes_split(void) {
   const struct {
     const char *haystack;
     const char *needle;
@@ -4507,21 +4501,21 @@ static void test_slice_u8_split(void) {
   };
 
   for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-    const Slice_u8 haystack = test_slice(cases[i].haystack);
-    const Slice_u8 needle = test_slice(cases[i].needle);
+    const Bytes haystack = bytes_from_cstr(cases[i].haystack);
+    const Bytes needle = bytes_from_cstr(cases[i].needle);
 
-    Slice_u8 rest = haystack;
+    Bytes rest = haystack;
     usize pieces_len = 0;
     // Each split eats at least one byte, so this bounds the pieces.
     for (usize j = 0; j <= haystack.len; j++) {
-      const Split split = slice_u8_split(rest, needle);
+      const Split split = bytes_split(rest, needle);
 
       assert(pieces_len < cases[i].pieces_len);
-      assert(slice_u8_eq_cstr(split.left, cases[i].pieces[pieces_len]));
+      assert(bytes_eq_cstr(split.left, cases[i].pieces[pieces_len]));
       pieces_len++;
 
       if (!split.found) {
-        assert(slice_u8_eq(split.left, rest));
+        assert(bytes_eq(split.left, rest));
         assert(0 == split.right.len);
         break;
       }
@@ -4537,30 +4531,28 @@ static void test_slice_u8_split(void) {
   {
     const u8 haystack_data[] = {'a', 0, 'b', 0, 'c'};
     const u8 needle_data[] = {0};
-    const Slice_u8 haystack =
-        slice_u8_make((u8 *)haystack_data, sizeof(haystack_data));
-    const Slice_u8 needle =
-        slice_u8_make((u8 *)needle_data, sizeof(needle_data));
+    const Bytes haystack =
+        bytes_make((u8 *)haystack_data, sizeof(haystack_data));
+    const Bytes needle = bytes_make((u8 *)needle_data, sizeof(needle_data));
 
-    const Split first = slice_u8_split(haystack, needle);
+    const Split first = bytes_split(haystack, needle);
     assert(first.found);
-    assert(slice_u8_eq_cstr(first.left, "a"));
+    assert(bytes_eq_cstr(first.left, "a"));
     assert(first.right.data == haystack.data + 2);
     assert(3 == first.right.len);
 
-    const Split second = slice_u8_split(first.right, needle);
+    const Split second = bytes_split(first.right, needle);
     assert(second.found);
-    assert(slice_u8_eq_cstr(second.left, "b"));
-    assert(slice_u8_eq_cstr(second.right, "c"));
+    assert(bytes_eq_cstr(second.left, "b"));
+    assert(bytes_eq_cstr(second.right, "c"));
   }
 
   // A NULL pointer is legal as long as the length is zero.
   {
-    const Split split =
-        slice_u8_split(slice_u8_make(NULL, 0), test_slice(","));
+    const Split split = bytes_split(bytes_make(NULL, 0), bytes_from_cstr(","));
     assert(!split.found);
-    assert(slice_u8_is_empty(split.left));
-    assert(slice_u8_is_empty(split.right));
+    assert(bytes_is_empty(split.left));
+    assert(bytes_is_empty(split.right));
   }
 }
 
@@ -4575,9 +4567,9 @@ static void test_bencode_validate_dict(void) {
   // Keys strictly increasing.
   {
     BencodeValue children[] = {
-        test_bencode_make_string("a", 1), num,
-        test_bencode_make_string("b", 1), num,
-        test_bencode_make_string("c", 1), num,
+        test_bencode_make_bytes("a", 1), num,
+        test_bencode_make_bytes("b", 1), num,
+        test_bencode_make_bytes("c", 1), num,
     };
     const BencodeList list = {.len = 6, .data = children};
     assert(ErrKindNone == bencode_validate_dict(list).kind);
@@ -4585,9 +4577,9 @@ static void test_bencode_validate_dict(void) {
   // Out of order, anywhere in the dict.
   {
     BencodeValue children[] = {
-        test_bencode_make_string("b", 1),
+        test_bencode_make_bytes("b", 1),
         num,
-        test_bencode_make_string("a", 1),
+        test_bencode_make_bytes("a", 1),
         num,
     };
     const BencodeList list = {.len = 4, .data = children};
@@ -4595,9 +4587,9 @@ static void test_bencode_validate_dict(void) {
   }
   {
     BencodeValue children[] = {
-        test_bencode_make_string("a", 1), num,
-        test_bencode_make_string("c", 1), num,
-        test_bencode_make_string("b", 1), num,
+        test_bencode_make_bytes("a", 1), num,
+        test_bencode_make_bytes("c", 1), num,
+        test_bencode_make_bytes("b", 1), num,
     };
     const BencodeList list = {.len = 6, .data = children};
     assert(ErrKindNone != bencode_validate_dict(list).kind);
@@ -4605,23 +4597,23 @@ static void test_bencode_validate_dict(void) {
   // Duplicate keys: sorted is not enough, the order has to be strict.
   {
     BencodeValue children[] = {
-        test_bencode_make_string("a", 1),
+        test_bencode_make_bytes("a", 1),
         num,
-        test_bencode_make_string("a", 1),
+        test_bencode_make_bytes("a", 1),
         num,
     };
     const BencodeList list = {.len = 4, .data = children};
     assert(ErrKindNone != bencode_validate_dict(list).kind);
   }
-  // Keys must be strings.
+  // Keys must be byte strings.
   {
     BencodeValue children[] = {num, num};
     const BencodeList list = {.len = 2, .data = children};
     assert(ErrKindNone != bencode_validate_dict(list).kind);
   }
-  // ... including a non-string key that is not the first one.
+  // ... including a non-byte-string key that is not the first one.
   {
-    BencodeValue children[] = {test_bencode_make_string("a", 1), num, num, num};
+    BencodeValue children[] = {test_bencode_make_bytes("a", 1), num, num, num};
     const BencodeList list = {.len = 4, .data = children};
     assert(ErrKindNone != bencode_validate_dict(list).kind);
   }
@@ -4630,9 +4622,9 @@ static void test_bencode_validate_dict(void) {
     const BencodeValue nested_list = {.kind = BencodeKindList};
     const BencodeValue nested_dict = {.kind = BencodeKindDict};
     BencodeValue children[] = {
-        test_bencode_make_string("a", 1),
+        test_bencode_make_bytes("a", 1),
         nested_list,
-        test_bencode_make_string("b", 1),
+        test_bencode_make_bytes("b", 1),
         nested_dict,
     };
     const BencodeList list = {.len = 4, .data = children};
@@ -4640,22 +4632,22 @@ static void test_bencode_validate_dict(void) {
   }
   // An odd number of children is not key/value pairs.
   {
-    BencodeValue children[] = {test_bencode_make_string("a", 1), num,
-                               test_bencode_make_string("b", 1)};
+    BencodeValue children[] = {test_bencode_make_bytes("a", 1), num,
+                               test_bencode_make_bytes("b", 1)};
     const BencodeList list = {.len = 3, .data = children};
     assert(ErrKindNone != bencode_validate_dict(list).kind);
   }
   {
-    BencodeValue children[] = {test_bencode_make_string("a", 1)};
+    BencodeValue children[] = {test_bencode_make_bytes("a", 1)};
     const BencodeList list = {.len = 1, .data = children};
     assert(ErrKindNone != bencode_validate_dict(list).kind);
   }
   // The empty key is legal and sorts before every other key.
   {
     BencodeValue children[] = {
-        test_bencode_make_string("", 0),
+        test_bencode_make_bytes("", 0),
         num,
-        test_bencode_make_string("a", 1),
+        test_bencode_make_bytes("a", 1),
         num,
     };
     const BencodeList list = {.len = 4, .data = children};
@@ -4664,9 +4656,9 @@ static void test_bencode_validate_dict(void) {
   // A key that is a prefix of the next one is in order; the reverse is not.
   {
     BencodeValue children[] = {
-        test_bencode_make_string("a", 1),
+        test_bencode_make_bytes("a", 1),
         num,
-        test_bencode_make_string("ab", 2),
+        test_bencode_make_bytes("ab", 2),
         num,
     };
     const BencodeList list = {.len = 4, .data = children};
@@ -4674,9 +4666,9 @@ static void test_bencode_validate_dict(void) {
   }
   {
     BencodeValue children[] = {
-        test_bencode_make_string("ab", 2),
+        test_bencode_make_bytes("ab", 2),
         num,
-        test_bencode_make_string("a", 1),
+        test_bencode_make_bytes("a", 1),
         num,
     };
     const BencodeList list = {.len = 4, .data = children};
@@ -4686,9 +4678,9 @@ static void test_bencode_validate_dict(void) {
   // comparison would get this pair backwards.
   {
     BencodeValue children[] = {
-        test_bencode_make_string("\x7f", 1),
+        test_bencode_make_bytes("\x7f", 1),
         num,
-        test_bencode_make_string("\x80", 1),
+        test_bencode_make_bytes("\x80", 1),
         num,
     };
     const BencodeList list = {.len = 4, .data = children};
@@ -4696,9 +4688,9 @@ static void test_bencode_validate_dict(void) {
   }
   {
     BencodeValue children[] = {
-        test_bencode_make_string("\x80", 1),
+        test_bencode_make_bytes("\x80", 1),
         num,
-        test_bencode_make_string("\x7f", 1),
+        test_bencode_make_bytes("\x7f", 1),
         num,
     };
     const BencodeList list = {.len = 4, .data = children};
@@ -4707,13 +4699,13 @@ static void test_bencode_validate_dict(void) {
   // Keys are compared over their whole length, zero bytes included.
   {
     BencodeValue children[] = {
-        test_bencode_make_string("a\x00"
-                                 "a",
-                                 3),
+        test_bencode_make_bytes("a\x00"
+                                "a",
+                                3),
         num,
-        test_bencode_make_string("a\x00"
-                                 "b",
-                                 3),
+        test_bencode_make_bytes("a\x00"
+                                "b",
+                                3),
         num,
     };
     const BencodeList list = {.len = 4, .data = children};
@@ -4722,7 +4714,7 @@ static void test_bencode_validate_dict(void) {
 }
 
 // Hash `data` in one `Update` call, the simplest possible use of the API.
-static void test_sha256_once(Slice_u8 data, u8 res[SHA256_DIGEST_LENGTH]) {
+static void test_sha256_once(Bytes data, u8 res[SHA256_DIGEST_LENGTH]) {
   Sha256Ctx ctx = {0};
   sha256_init(&ctx);
   sha256_update(&ctx, data.data, data.len);
@@ -4743,7 +4735,7 @@ static void test_digest_from_hex(const char *hex,
   }
 }
 
-static void test_sha256_expect_hex(Slice_u8 data, const char *expected_hex) {
+static void test_sha256_expect_hex(Bytes data, const char *expected_hex) {
   u8 expected[SHA256_DIGEST_LENGTH] = {0};
   test_digest_from_hex(expected_hex, expected);
 
@@ -4756,24 +4748,26 @@ static void test_sha256_expect_hex(Slice_u8 data, const char *expected_hex) {
 static void test_sha256_vectors(void) {
   // FIPS 180-2 / NIST CAVP vectors.
   test_sha256_expect_hex(
-      test_slice(""),
+      bytes_from_cstr(""),
       "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
   test_sha256_expect_hex(
-      test_slice("abc"),
+      bytes_from_cstr("abc"),
       "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
   // 56 bytes: the shortest message whose padding needs a second block.
   test_sha256_expect_hex(
-      test_slice("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+      bytes_from_cstr(
+          "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
       "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
   test_sha256_expect_hex(
-      test_slice("abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijk"
-                 "lmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu"),
+      bytes_from_cstr(
+          "abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijk"
+          "lmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu"),
       "cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1");
 
   // A NUL byte is data like any other: the API takes a length, never a C
   // string.
   test_sha256_expect_hex(
-      slice_u8_make((u8 *)"\x00", 1),
+      bytes_make((u8 *)"\x00", 1),
       "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d");
 }
 
@@ -4809,7 +4803,7 @@ static void test_sha256_incremental(void) {
   }
 
   u8 expected[SHA256_DIGEST_LENGTH] = {0};
-  test_sha256_once(slice_u8_make(input, sizeof(input)), expected);
+  test_sha256_once(bytes_make(input, sizeof(input)), expected);
 
   {
     Sha256Ctx ctx = {0};
@@ -4828,7 +4822,7 @@ static void test_sha256_incremental(void) {
     sha256_init(&ctx);
     sha256_update(&ctx, input, split);
     // An empty `Update` in the middle must be a no-op, including when the
-    // slice has no data pointer at all.
+    // input has no data pointer at all.
     sha256_update(&ctx, NULL, 0);
     sha256_update(&ctx, input + split, sizeof(input) - split);
 
@@ -4853,7 +4847,7 @@ static void test_sha256_lengths(void) {
 
   for (usize len = 0; len < sizeof(input); len++) {
     u8 digest[SHA256_DIGEST_LENGTH] = {0};
-    test_sha256_once(slice_u8_make(input, len), digest);
+    test_sha256_once(bytes_make(input, len), digest);
     sha256_update(&outer, digest, sizeof(digest));
   }
 
@@ -4872,18 +4866,18 @@ static void test_sha256_lengths(void) {
 // starting from a fresh `{0}` one.
 static void test_sha256_reuse(void) {
   u8 expected[SHA256_DIGEST_LENGTH] = {0};
-  test_sha256_once(test_slice("abc"), expected);
+  test_sha256_once(bytes_from_cstr("abc"), expected);
 
   Sha256Ctx ctx = {0};
   sha256_init(&ctx);
-  const Slice_u8 other = test_slice("some other message entirely");
+  const Bytes other = bytes_from_cstr("some other message entirely");
   sha256_update(&ctx, other.data, other.len);
 
   u8 discarded[SHA256_DIGEST_LENGTH] = {0};
   sha256_final(&ctx, discarded);
 
   sha256_init(&ctx);
-  const Slice_u8 abc = test_slice("abc");
+  const Bytes abc = bytes_from_cstr("abc");
   sha256_update(&ctx, abc.data, abc.len);
 
   u8 actual[SHA256_DIGEST_LENGTH] = {0};
@@ -4903,7 +4897,7 @@ static void test_sha256_reuse(void) {
 // block distinct content. The expected roots below come from libtorrent 2.1.1
 // fed the exact same bytes, checked at both a 16KiB and a 256KiB piece size
 // since `pieces root` must not depend on the piece size.
-__attribute__((warn_unused_result)) static Slice_u8
+__attribute__((warn_unused_result)) static Bytes
 test_merkle_data(Arena *arena) {
   u8 *const buf = arena_alloc(arena, 1, 1, TEST_MERKLE_MAX_LEN);
   assert(buf);
@@ -4916,7 +4910,7 @@ test_merkle_data(Arena *arena) {
     buf[i] = (u8)(x >> 24);
   }
 
-  return slice_u8_make(buf, TEST_MERKLE_MAX_LEN);
+  return bytes_make(buf, TEST_MERKLE_MAX_LEN);
 }
 
 // Known answer tests. Sizes bracket every boundary the tree construction has:
@@ -4929,7 +4923,7 @@ static void test_torrent_merkle_vectors(void) {
   assert(ErrKindNone ==
          arena_valloc(env, TEST_MERKLE_MAX_LEN + 4 * KiB, &data_arena).kind);
   assert(data_arena.start);
-  const Slice_u8 data = test_merkle_data(&data_arena);
+  const Bytes data = test_merkle_data(&data_arena);
 
   const struct {
     usize len;
@@ -4976,7 +4970,7 @@ static void test_torrent_merkle_vectors(void) {
       usize pieces_count = 0;
       u8 root[SHA256_DIGEST_LENGTH] = {0};
       assert(ErrKindNone ==
-             torrent_build_merkle_tree(slice_u8_make(data.data, vectors[i].len),
+             torrent_build_merkle_tree(bytes_make(data.data, vectors[i].len),
                                        piece_lengths_in_bytes[p], &pieces,
                                        &pieces_count, root, &arena)
                  .kind);
@@ -4995,7 +4989,7 @@ static void test_torrent_merkle_piece_layer(void) {
   assert(ErrKindNone ==
          arena_valloc(env, TEST_MERKLE_MAX_LEN + 4 * KiB, &data_arena).kind);
   assert(data_arena.start);
-  const Slice_u8 data = test_merkle_data(&data_arena);
+  const Bytes data = test_merkle_data(&data_arena);
 
   const usize lens[] = {1, 16384, 16385, 40960, 81920, 131072, 212992};
   const usize piece_lengths_in_bytes[] = {16 * KiB, 32 * KiB, 64 * KiB,
@@ -5016,7 +5010,7 @@ static void test_torrent_merkle_piece_layer(void) {
       usize pieces_count = 0;
       u8 root[SHA256_DIGEST_LENGTH] = {0};
       assert(ErrKindNone ==
-             torrent_build_merkle_tree(slice_u8_make(data.data, len),
+             torrent_build_merkle_tree(bytes_make(data.data, len),
                                        piece_length_in_bytes, &pieces,
                                        &pieces_count, root, &arena)
                  .kind);
@@ -5044,7 +5038,7 @@ static void test_torrent_merkle_piece_layer(void) {
           const usize block_len = len - offset < TORRENT_BLOCK_SIZE
                                       ? len - offset
                                       : TORRENT_BLOCK_SIZE;
-          sha256_digest(slice_u8_make(data.data + offset, block_len), layer[l]);
+          sha256_digest(bytes_make(data.data + offset, block_len), layer[l]);
         } // Padding leaves stay zero, per BEP 52.
       }
 
@@ -5103,7 +5097,7 @@ static void test_torrent_merkle_padding(void) {
   u8 root[SHA256_DIGEST_LENGTH] = {0};
   // One block per piece, so the piece layer is the leaf layer and every leaf
   // that holds file data is observable.
-  assert(ErrKindNone == torrent_build_merkle_tree(slice_u8_make(buf, len),
+  assert(ErrKindNone == torrent_build_merkle_tree(bytes_make(buf, len),
                                                   16 * KiB, &pieces,
                                                   &pieces_count, root, &arena)
                             .kind);
@@ -5117,7 +5111,7 @@ static void test_torrent_merkle_padding(void) {
     const usize block_len =
         len - offset < TORRENT_BLOCK_SIZE ? len - offset : TORRENT_BLOCK_SIZE;
     u8 expected[SHA256_DIGEST_LENGTH] = {0};
-    sha256_digest(slice_u8_make(buf + offset, block_len), expected);
+    sha256_digest(bytes_make(buf + offset, block_len), expected);
     assert(0 == memcmp(pieces[l].digest, expected, sizeof(expected)));
   }
 
@@ -5145,7 +5139,7 @@ static void test_torrent_merkle_padding(void) {
   u8 *const zero_block = arena_alloc(&data_arena, 1, 1, TORRENT_BLOCK_SIZE);
   assert(zero_block);
   memset(zero_block, 0, TORRENT_BLOCK_SIZE);
-  sha256_digest(slice_u8_make(zero_block, TORRENT_BLOCK_SIZE), leaf[3]);
+  sha256_digest(bytes_make(zero_block, TORRENT_BLOCK_SIZE), leaf[3]);
 
   u8 wrong_root[SHA256_DIGEST_LENGTH] = {0};
   sha256_digest_pair(leaf[2], leaf[3], right);
@@ -5171,7 +5165,7 @@ static void test_torrent_merkle_empty(void) {
   u8 root[SHA256_DIGEST_LENGTH];
   memset(root, 0xcd, sizeof(root));
 
-  assert(ErrKindNone == torrent_build_merkle_tree((Slice_u8){0}, 256 * KiB,
+  assert(ErrKindNone == torrent_build_merkle_tree((Bytes){0}, 256 * KiB,
                                                   &pieces, &pieces_count, root,
                                                   &arena)
                             .kind);
@@ -5207,7 +5201,7 @@ static void test_torrent_merkle_oom(void) {
   PieceHash *pieces = NULL;
   usize pieces_count = 0;
   u8 root[SHA256_DIGEST_LENGTH] = {0};
-  assert(ErrKindNone != torrent_build_merkle_tree(slice_u8_make(buf, len),
+  assert(ErrKindNone != torrent_build_merkle_tree(bytes_make(buf, len),
                                                   16 * KiB, &pieces,
                                                   &pieces_count, root, &arena)
                             .kind);
@@ -5220,8 +5214,8 @@ static void test_torrent_merkle_oom(void) {
 // ---------------------------------------------------------------------------
 
 // The digits are written at the front of `dst`, so every case checks three
-// things: the text, that the returned slice really does start at `dst.data`,
-// and that nothing outside that slice was touched.
+// things: the text, that the returned `Bytes` really does start at `dst.data`,
+// and that nothing outside that range was touched.
 static void test_usize_digits_base_10(void) {
   assert(1 == usize_digits_base_10(0));
   assert(1 == usize_digits_base_10(9));
@@ -5251,7 +5245,7 @@ static void test_encode_usize_once(usize n, const char *expected) {
   assert(dst_len < sizeof(buf));
   memset(buf, '#', sizeof(buf));
 
-  const usize written = encode_usize_base_10(n, slice_u8_make(buf, dst_len));
+  const usize written = encode_usize_base_10(n, bytes_make(buf, dst_len));
 
   // Comparing from the front of the buffer is what pins the anchoring now
   // that there is no returned pointer: the digits begin at `dst.data`, which
@@ -5299,18 +5293,18 @@ static void test_encode_usize_base_10_exact_fit(void) {
   u8 buf[24];
 
   memset(buf, '#', sizeof(buf));
-  const usize widest = encode_usize_base_10(SIZE_MAX, slice_u8_make(buf, 20));
+  const usize widest = encode_usize_base_10(SIZE_MAX, bytes_make(buf, 20));
   assert(20 == widest);
   assert(0 == memcmp(buf, "18446744073709551615", 20));
 
   memset(buf, '#', sizeof(buf));
-  const usize one = encode_usize_base_10(7, slice_u8_make(buf, 1));
+  const usize one = encode_usize_base_10(7, bytes_make(buf, 1));
   assert(1 == one);
   assert('7' == buf[0]);
   assert('#' == buf[1]);
 
   memset(buf, '#', sizeof(buf));
-  const usize three = encode_usize_base_10(123, slice_u8_make(buf, 3));
+  const usize three = encode_usize_base_10(123, bytes_make(buf, 3));
   assert(3 == three);
   assert(0 == memcmp(buf, "123", 3));
   assert('#' == buf[3]);
@@ -5352,7 +5346,7 @@ static void test_encode_usize_base_10_round_trip(void) {
 
     u8 buf[24];
     memset(buf, '#', sizeof(buf));
-    const usize got = encode_usize_base_10(n, slice_u8_make(buf, sizeof(buf)));
+    const usize got = encode_usize_base_10(n, bytes_make(buf, sizeof(buf)));
 
     char expected[32] = {0};
     const i32 written = snprintf(expected, sizeof(expected), "%zu", n);
@@ -5366,7 +5360,7 @@ static void test_encode_usize_base_10_round_trip(void) {
     memcpy(terminated, buf, got);
     terminated[got] = 'e';
 
-    Slice_u8 to_parse = slice_u8_make(terminated, got + 1);
+    Bytes to_parse = bytes_make(terminated, got + 1);
     usize parsed = 0;
     assert(ErrKindNone == ascii_num_parse(&to_parse, &parsed).kind);
     assert(n == parsed);
@@ -5381,7 +5375,7 @@ static void test_encode_isize_once(isize n, const char *expected) {
   assert(dst_len < sizeof(buf));
   memset(buf, '#', sizeof(buf));
 
-  const usize written = encode_isize_base_10(n, slice_u8_make(buf, dst_len));
+  const usize written = encode_isize_base_10(n, bytes_make(buf, dst_len));
 
   // Comparing from the front of the buffer is what pins the anchoring now
   // that there is no returned pointer: the digits begin at `dst.data`, which
@@ -5427,12 +5421,12 @@ static void test_encode_isize_base_10_exact_fit(void) {
   u8 buf[24];
 
   memset(buf, '#', sizeof(buf));
-  const usize widest = encode_isize_base_10(INT64_MIN, slice_u8_make(buf, 20));
+  const usize widest = encode_isize_base_10(INT64_MIN, bytes_make(buf, 20));
   assert(20 == widest);
   assert(0 == memcmp(buf, "-9223372036854775808", 20));
 
   memset(buf, '#', sizeof(buf));
-  const usize two = encode_isize_base_10(-7, slice_u8_make(buf, 2));
+  const usize two = encode_isize_base_10(-7, bytes_make(buf, 2));
   assert(2 == two);
   assert(0 == memcmp(buf, "-7", 2));
   assert('#' == buf[2]);
@@ -5453,7 +5447,7 @@ static void test_encode_isize_base_10_round_trip(void) {
 
     u8 buf[24];
     memset(buf, '#', sizeof(buf));
-    const usize got = encode_isize_base_10(n, slice_u8_make(buf, sizeof(buf)));
+    const usize got = encode_isize_base_10(n, bytes_make(buf, sizeof(buf)));
 
     char expected[32] = {0};
     const i32 written = snprintf(expected, sizeof(expected), "%zd", n);
@@ -5467,7 +5461,7 @@ static void test_encode_isize_base_10_round_trip(void) {
     memcpy(framed + 1, buf, got);
     framed[1 + got] = 'e';
 
-    Slice_u8 to_parse = slice_u8_make(framed, got + 2);
+    Bytes to_parse = bytes_make(framed, got + 2);
     BencodeValue parsed = {0};
     assert(ErrKindNone == bencode_parse_num(&to_parse, &parsed).kind);
     assert(BencodeKindInteger == parsed.kind);
@@ -5519,9 +5513,9 @@ static void test_torrent_validate_info_dict(void) {
 
     for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
       BencodeValue items[] = {
-          test_bencode_str(cases[i].k0), test_bencode_int(1),
-          test_bencode_str(cases[i].k1), test_bencode_int(2),
-          test_bencode_str(cases[i].k2), test_bencode_int(3),
+          test_bencode_bytes(cases[i].k0), test_bencode_int(1),
+          test_bencode_bytes(cases[i].k1), test_bencode_int(2),
+          test_bencode_bytes(cases[i].k2), test_bencode_int(3),
       };
       const BencodeValue dict =
           test_bencode_dict(items, sizeof(items) / sizeof(items[0]));
@@ -5548,9 +5542,9 @@ static void test_torrent_validate_info_dict(void) {
 
     for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
       BencodeValue items[] = {
-          test_bencode_str(cases[i].k0),
+          test_bencode_bytes(cases[i].k0),
           test_bencode_int(1),
-          test_bencode_str(cases[i].k1),
+          test_bencode_bytes(cases[i].k1),
           test_bencode_int(2),
       };
       const BencodeValue dict =
@@ -5563,7 +5557,7 @@ static void test_torrent_validate_info_dict(void) {
 
   // One pair has no ordering to check and is accepted.
   {
-    BencodeValue items[] = {test_bencode_str("name"), test_bencode_int(1)};
+    BencodeValue items[] = {test_bencode_bytes("name"), test_bencode_int(1)};
     assert(ErrKindNone ==
            torrent_validate_info_dict(test_bencode_dict(items, 2)).kind);
   }
@@ -5576,18 +5570,19 @@ static void test_torrent_validate_info_dict(void) {
 
   // An odd child count is a key without a value.
   {
-    BencodeValue items[] = {test_bencode_str("a"), test_bencode_int(1),
-                            test_bencode_str("b")};
+    BencodeValue items[] = {test_bencode_bytes("a"), test_bencode_int(1),
+                            test_bencode_bytes("b")};
     assert(ErrKindInvalidData ==
            torrent_validate_info_dict(test_bencode_dict(items, 3)).kind);
   }
 
-  // Keys are strings, at every position, whatever else they might be.
+  // Keys are byte strings, at every position, whatever else they might be.
   {
     for (usize bad = 0; bad < 3; bad++) {
       BencodeValue items[] = {
-          test_bencode_str("a"), test_bencode_int(1),   test_bencode_str("b"),
-          test_bencode_int(2),   test_bencode_str("c"), test_bencode_int(3),
+          test_bencode_bytes("a"), test_bencode_int(1),
+          test_bencode_bytes("b"), test_bencode_int(2),
+          test_bencode_bytes("c"), test_bencode_int(3),
       };
       // An integer where the key should be.
       items[bad * 2] = test_bencode_int(7);
@@ -5602,11 +5597,11 @@ static void test_torrent_validate_info_dict(void) {
   // A value may be anything, including a dict or a list: only keys are
   // constrained.
   {
-    BencodeValue inner[] = {test_bencode_str("length"), test_bencode_int(1)};
+    BencodeValue inner[] = {test_bencode_bytes("length"), test_bencode_int(1)};
     BencodeValue items[] = {
-        test_bencode_str("file tree"),    test_bencode_dict(inner, 2),
-        test_bencode_str("name"),         test_bencode_str("x"),
-        test_bencode_str("piece length"), test_bencode_int(262144),
+        test_bencode_bytes("file tree"),    test_bencode_dict(inner, 2),
+        test_bencode_bytes("name"),         test_bencode_bytes("x"),
+        test_bencode_bytes("piece length"), test_bencode_int(262144),
     };
     assert(ErrKindNone ==
            torrent_validate_info_dict(test_bencode_dict(items, 6)).kind);
@@ -5617,14 +5612,14 @@ static void test_torrent_validate_info_dict(void) {
 // reached from `main`, so the suite never ran a line of either until now.
 
 static void test_torrent_find_info_dict_in_metainfo(void) {
-  BencodeValue info_children[] = {test_bencode_str("name"),
-                                  test_bencode_str("x")};
+  BencodeValue info_children[] = {test_bencode_bytes("name"),
+                                  test_bencode_bytes("x")};
   const BencodeValue info = test_bencode_dict(info_children, 2);
 
   // Found, wherever in the dict it sits.
   {
-    BencodeValue first[] = {test_bencode_str("info"), info,
-                            test_bencode_str("zzz"), test_bencode_int(1)};
+    BencodeValue first[] = {test_bencode_bytes("info"), info,
+                            test_bencode_bytes("zzz"), test_bencode_int(1)};
     BencodeValue *const got =
         torrent_find_info_dict_in_metainfo(test_bencode_dict(first, 4));
     assert(got == &first[1]);
@@ -5632,9 +5627,9 @@ static void test_torrent_find_info_dict_in_metainfo(void) {
   }
   {
     BencodeValue later[] = {
-        test_bencode_str("announce"), test_bencode_str("http://x"),
-        test_bencode_str("info"),     info,
-        test_bencode_str("zzz"),      test_bencode_int(1)};
+        test_bencode_bytes("announce"), test_bencode_bytes("http://x"),
+        test_bencode_bytes("info"),     info,
+        test_bencode_bytes("zzz"),      test_bencode_int(1)};
     assert(&later[3] ==
            torrent_find_info_dict_in_metainfo(test_bencode_dict(later, 6)));
   }
@@ -5642,7 +5637,7 @@ static void test_torrent_find_info_dict_in_metainfo(void) {
   // A pointer into the caller's list, not a copy: `main` hashes what it finds,
   // so it has to be the same value the metainfo holds.
   {
-    BencodeValue items[] = {test_bencode_str("info"), info};
+    BencodeValue items[] = {test_bencode_bytes("info"), info};
     BencodeValue *const got =
         torrent_find_info_dict_in_metainfo(test_bencode_dict(items, 2));
     assert(got == &items[1]);
@@ -5653,29 +5648,30 @@ static void test_torrent_find_info_dict_in_metainfo(void) {
   // Not found.
   {
     // No such key.
-    BencodeValue none[] = {test_bencode_str("announce"), test_bencode_int(1)};
+    BencodeValue none[] = {test_bencode_bytes("announce"), test_bencode_int(1)};
     assert(NULL ==
            torrent_find_info_dict_in_metainfo(test_bencode_dict(none, 2)));
 
     // The key is there but the value is not a dict.
-    BencodeValue not_dict[] = {test_bencode_str("info"), test_bencode_int(1)};
+    BencodeValue not_dict[] = {test_bencode_bytes("info"), test_bencode_int(1)};
     assert(NULL ==
            torrent_find_info_dict_in_metainfo(test_bencode_dict(not_dict, 2)));
 
-    // A key that is not a string cannot be "info".
+    // A key that is not a byte string cannot be "info".
     BencodeValue bad_key[] = {test_bencode_int(1), info};
     assert(NULL ==
            torrent_find_info_dict_in_metainfo(test_bencode_dict(bad_key, 2)));
 
     // "info" as a *value* is not a key.
-    BencodeValue as_value[] = {test_bencode_str("a"), test_bencode_str("info"),
-                               test_bencode_str("b"), info};
+    BencodeValue as_value[] = {test_bencode_bytes("a"),
+                               test_bencode_bytes("info"),
+                               test_bencode_bytes("b"), info};
     assert(NULL ==
            torrent_find_info_dict_in_metainfo(test_bencode_dict(as_value, 4)));
 
     // A near miss, and an empty metainfo. (Not `near`: `windows.h` still
     // defines that, and `far`, from the 16-bit memory models.)
-    BencodeValue almost[] = {test_bencode_str("infos"), info};
+    BencodeValue almost[] = {test_bencode_bytes("infos"), info};
     assert(NULL ==
            torrent_find_info_dict_in_metainfo(test_bencode_dict(almost, 2)));
     assert(NULL ==
@@ -5787,11 +5783,11 @@ static void test_torrent_check_handshake(void) {
   u8 info_hash_bytes[20] = {0x00, 0xff, 0x01, 0x02, 0x03, 0x04, 0x05,
                             0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
                             0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x00};
-  const Slice_u8 info_hash = slice_u8_make(info_hash_bytes, 20);
+  const Bytes info_hash = bytes_make(info_hash_bytes, 20);
 
   u8 peer_id_bytes[20] = {'-', 'F', 'S', '0', '0', '0', '1', 0x00, 0xff, 0x2a,
                           1,   2,   3,   4,   5,   6,   7,   8,    9,    10};
-  const Slice_u8 peer_id_expected = slice_u8_make(peer_id_bytes, 20);
+  const Bytes peer_id_expected = bytes_make(peer_id_bytes, 20);
 
   // The whole point: a handshake whose info hash is the one we asked for is
   // accepted, and `*peer_id` comes back as the 20 bytes that follow it.
@@ -5799,10 +5795,10 @@ static void test_torrent_check_handshake(void) {
     u8 data[TEST_HANDSHAKE_LEN] = {0};
     test_handshake_fill(data, info_hash, peer_id_expected);
 
-    Slice_u8 peer_id = {0};
-    assert(torrent_check_handshake(slice_u8_make(data, sizeof(data)), info_hash,
+    Bytes peer_id = {0};
+    assert(torrent_check_handshake(bytes_make(data, sizeof(data)), info_hash,
                                    &peer_id));
-    assert(slice_u8_eq(peer_id_expected, peer_id));
+    assert(bytes_eq(peer_id_expected, peer_id));
 
     // A view into the caller's buffer, not a copy: the peer id starts at the
     // 49th byte, right after the info hash.
@@ -5817,10 +5813,10 @@ static void test_torrent_check_handshake(void) {
     test_handshake_fill(data, info_hash, peer_id_expected);
     memset(data + 20, 0xff, 8);
 
-    Slice_u8 peer_id = {0};
-    assert(torrent_check_handshake(slice_u8_make(data, sizeof(data)), info_hash,
+    Bytes peer_id = {0};
+    assert(torrent_check_handshake(bytes_make(data, sizeof(data)), info_hash,
                                    &peer_id));
-    assert(slice_u8_eq(peer_id_expected, peer_id));
+    assert(bytes_eq(peer_id_expected, peer_id));
   }
 
   // A peer that answered with someone else's torrent. One differing byte is
@@ -5832,11 +5828,11 @@ static void test_torrent_check_handshake(void) {
       test_handshake_fill(data, info_hash, peer_id_expected);
       data[28 + positions[i]] ^= 0x01;
 
-      Slice_u8 peer_id = {0};
-      assert(!torrent_check_handshake(slice_u8_make(data, sizeof(data)),
-                                      info_hash, &peer_id));
+      Bytes peer_id = {0};
+      assert(!torrent_check_handshake(bytes_make(data, sizeof(data)), info_hash,
+                                      &peer_id));
       // Untouched on rejection, so a caller that forgets to check the return
-      // value gets an obviously empty slice rather than someone else's bytes.
+      // value gets an obviously empty `Bytes` rather than someone else's bytes.
       assert(NULL == peer_id.data);
       assert(0 == peer_id.len);
     }
@@ -5868,9 +5864,9 @@ static void test_torrent_check_handshake(void) {
       test_handshake_fill(data, info_hash, peer_id_expected);
       memcpy(data, headers[i], 20);
 
-      Slice_u8 peer_id = {0};
-      assert(!torrent_check_handshake(slice_u8_make(data, sizeof(data)),
-                                      info_hash, &peer_id));
+      Bytes peer_id = {0};
+      assert(!torrent_check_handshake(bytes_make(data, sizeof(data)), info_hash,
+                                      &peer_id));
       assert(NULL == peer_id.data);
     }
   }
@@ -5878,7 +5874,7 @@ static void test_torrent_check_handshake(void) {
   // Every length but 68 is refused, and refused by the length check rather
   // than by reading off the end: a short read is not a handshake yet, and a
   // long one has the next message glued to it. The loop starts at 1 because a
-  // zero-length slice has no buffer to point at.
+  // zero-length `Bytes` has no buffer to point at.
   {
     u8 data[TEST_HANDSHAKE_LEN + 4] = {0};
     test_handshake_fill(data, info_hash, peer_id_expected);
@@ -5889,18 +5885,17 @@ static void test_torrent_check_handshake(void) {
         continue;
       }
 
-      Slice_u8 peer_id = {0};
-      assert(!torrent_check_handshake(slice_u8_make(data, len), info_hash,
-                                      &peer_id));
+      Bytes peer_id = {0};
+      assert(
+          !torrent_check_handshake(bytes_make(data, len), info_hash, &peer_id));
       assert(NULL == peer_id.data);
     }
   }
 
-  // The empty slice, which has no data pointer at all.
+  // The empty `Bytes`, which has no data pointer at all.
   {
-    Slice_u8 peer_id = {0};
-    assert(
-        !torrent_check_handshake(slice_u8_make(NULL, 0), info_hash, &peer_id));
+    Bytes peer_id = {0};
+    assert(!torrent_check_handshake(bytes_make(NULL, 0), info_hash, &peer_id));
     assert(NULL == peer_id.data);
   }
 
@@ -5908,37 +5903,37 @@ static void test_torrent_check_handshake(void) {
   // be special-cased into a mismatch by anything comparing against NUL.
   {
     u8 zero_hash_bytes[20] = {0};
-    const Slice_u8 zero_hash = slice_u8_make(zero_hash_bytes, 20);
+    const Bytes zero_hash = bytes_make(zero_hash_bytes, 20);
 
     u8 data[TEST_HANDSHAKE_LEN] = {0};
     test_handshake_fill(data, zero_hash, peer_id_expected);
 
-    Slice_u8 peer_id = {0};
-    assert(torrent_check_handshake(slice_u8_make(data, sizeof(data)), zero_hash,
+    Bytes peer_id = {0};
+    assert(torrent_check_handshake(bytes_make(data, sizeof(data)), zero_hash,
                                    &peer_id));
-    assert(slice_u8_eq(peer_id_expected, peer_id));
+    assert(bytes_eq(peer_id_expected, peer_id));
 
     // ...and the non-zero hash must not match that same handshake.
-    Slice_u8 peer_id_other = {0};
-    assert(!torrent_check_handshake(slice_u8_make(data, sizeof(data)),
-                                    info_hash, &peer_id_other));
+    Bytes peer_id_other = {0};
+    assert(!torrent_check_handshake(bytes_make(data, sizeof(data)), info_hash,
+                                    &peer_id_other));
     assert(NULL == peer_id_other.data);
   }
 
   // An all-zero peer id is equally legitimate, and comes back as 20 bytes
-  // rather than as an empty slice.
+  // rather than as an empty `Bytes`.
   {
     u8 zero_peer_id_bytes[20] = {0};
-    const Slice_u8 zero_peer_id = slice_u8_make(zero_peer_id_bytes, 20);
+    const Bytes zero_peer_id = bytes_make(zero_peer_id_bytes, 20);
 
     u8 data[TEST_HANDSHAKE_LEN] = {0};
     test_handshake_fill(data, info_hash, zero_peer_id);
 
-    Slice_u8 peer_id = {0};
-    assert(torrent_check_handshake(slice_u8_make(data, sizeof(data)), info_hash,
+    Bytes peer_id = {0};
+    assert(torrent_check_handshake(bytes_make(data, sizeof(data)), info_hash,
                                    &peer_id));
     assert(20 == peer_id.len);
-    assert(slice_u8_eq(zero_peer_id, peer_id));
+    assert(bytes_eq(zero_peer_id, peer_id));
   }
 
   // `*peer_id` is overwritten, not merged into: a caller reusing one variable
@@ -5946,21 +5941,21 @@ static void test_torrent_check_handshake(void) {
   {
     u8 other_peer_id_bytes[20] = {0};
     memset(other_peer_id_bytes, 0x5a, sizeof(other_peer_id_bytes));
-    const Slice_u8 other_peer_id = slice_u8_make(other_peer_id_bytes, 20);
+    const Bytes other_peer_id = bytes_make(other_peer_id_bytes, 20);
 
     u8 first[TEST_HANDSHAKE_LEN] = {0};
     test_handshake_fill(first, info_hash, peer_id_expected);
     u8 second[TEST_HANDSHAKE_LEN] = {0};
     test_handshake_fill(second, info_hash, other_peer_id);
 
-    Slice_u8 peer_id = {0};
-    assert(torrent_check_handshake(slice_u8_make(first, sizeof(first)),
-                                   info_hash, &peer_id));
-    assert(slice_u8_eq(peer_id_expected, peer_id));
+    Bytes peer_id = {0};
+    assert(torrent_check_handshake(bytes_make(first, sizeof(first)), info_hash,
+                                   &peer_id));
+    assert(bytes_eq(peer_id_expected, peer_id));
 
-    assert(torrent_check_handshake(slice_u8_make(second, sizeof(second)),
+    assert(torrent_check_handshake(bytes_make(second, sizeof(second)),
                                    info_hash, &peer_id));
-    assert(slice_u8_eq(other_peer_id, peer_id));
+    assert(bytes_eq(other_peer_id, peer_id));
   }
 }
 
@@ -5977,10 +5972,10 @@ static void test_torrent_make_udp_broadcast_message(void) {
   {
     Arena arena = test_arena(4 * KiB);
 
-    Slice_u8 msg = {0};
+    Bytes msg = {0};
     assert(ErrKindNone == torrent_make_udp_broadcast_message(
-                              test_slice("239.192.152.143:6771"), 6881,
-                              test_slice(TEST_LSD_INFOHASH), &arena, &msg)
+                              bytes_from_cstr("239.192.152.143:6771"), 6881,
+                              bytes_from_cstr(TEST_LSD_INFOHASH), &arena, &msg)
                               .kind);
 
     const char *const expected = "BT-SEARCH * HTTP/1.1\r\n"
@@ -5990,7 +5985,7 @@ static void test_torrent_make_udp_broadcast_message(void) {
                                  "cookie: fixme\r\n"
                                  "\r\n"
                                  "\r\n";
-    assert(slice_u8_eq_cstr(msg, expected));
+    assert(bytes_eq_cstr(msg, expected));
     assert(strlen(expected) == msg.len);
   }
 
@@ -6001,18 +5996,18 @@ static void test_torrent_make_udp_broadcast_message(void) {
   {
     Arena arena = test_arena(4 * KiB);
 
-    Slice_u8 msg = {0};
+    Bytes msg = {0};
     assert(ErrKindNone == torrent_make_udp_broadcast_message(
-                              test_slice("239.192.152.143:6771"), 6881,
-                              test_slice(TEST_LSD_INFOHASH), &arena, &msg)
+                              bytes_from_cstr("239.192.152.143:6771"), 6881,
+                              bytes_from_cstr(TEST_LSD_INFOHASH), &arena, &msg)
                               .kind);
 
-    const Slice_u8 first_line = slice_u8_take(msg, 22);
-    assert(slice_u8_eq_cstr(first_line, "BT-SEARCH * HTTP/1.1\r\n"));
+    const Bytes first_line = bytes_take(msg, 22);
+    assert(bytes_eq_cstr(first_line, "BT-SEARCH * HTTP/1.1\r\n"));
 
     assert(msg.len >= 6);
-    const Slice_u8 tail = {.data = msg.data + msg.len - 6, .len = 6};
-    assert(slice_u8_eq_cstr(tail, "\r\n\r\n\r\n"));
+    const Bytes tail = {.data = msg.data + msg.len - 6, .len = 6};
+    assert(bytes_eq_cstr(tail, "\r\n\r\n\r\n"));
   }
 
   // The port is written as decimal digits, at both ends of a `u16`.
@@ -6031,13 +6026,14 @@ static void test_torrent_make_udp_broadcast_message(void) {
     for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
       Arena arena = test_arena(4 * KiB);
 
-      Slice_u8 msg = {0};
+      Bytes msg = {0};
       assert(ErrKindNone == torrent_make_udp_broadcast_message(
-                                test_slice("host"), cases[i].port,
-                                test_slice(TEST_LSD_INFOHASH), &arena, &msg)
+                                bytes_from_cstr("host"), cases[i].port,
+                                bytes_from_cstr(TEST_LSD_INFOHASH), &arena,
+                                &msg)
                                 .kind);
 
-      assert(test_slice_contains(msg, test_slice(cases[i].expected_line)));
+      assert(test_bytes_contains(msg, bytes_from_cstr(cases[i].expected_line)));
     }
   }
 
@@ -6049,15 +6045,15 @@ static void test_torrent_make_udp_broadcast_message(void) {
 
     u8 long_url[512] = {0};
     memset(long_url, 'h', sizeof(long_url));
-    const Slice_u8 url = slice_u8_make(long_url, sizeof(long_url));
+    const Bytes url = bytes_make(long_url, sizeof(long_url));
 
-    Slice_u8 msg = {0};
+    Bytes msg = {0};
     assert(ErrKindNone ==
            torrent_make_udp_broadcast_message(
-               url, 65535, test_slice(TEST_LSD_INFOHASH), &arena, &msg)
+               url, 65535, bytes_from_cstr(TEST_LSD_INFOHASH), &arena, &msg)
                .kind);
 
-    assert(test_slice_contains(msg, url));
+    assert(test_bytes_contains(msg, url));
     // Everything the message holds besides the host name.
     assert(msg.len ==
            sizeof(long_url) + strlen("BT-SEARCH * HTTP/1.1\r\n"
@@ -6066,35 +6062,35 @@ static void test_torrent_make_udp_broadcast_message(void) {
                                      "\r\ncookie: fixme\r\n\r\n\r\n"));
   }
 
-  // An empty host and an empty info hash: `sb_extend_within_cap` takes an empty
-  // slice as a no-op, so the message is still well formed, just missing those
-  // two values.
+  // An empty host and an empty info hash: `bytes_buffer_extend_within_cap`
+  // takes an empty `Bytes` as a no-op, so the message is still well formed,
+  // just missing those two values.
   {
     Arena arena = test_arena(4 * KiB);
 
-    Slice_u8 msg = {0};
-    assert(ErrKindNone == torrent_make_udp_broadcast_message(
-                              slice_u8_make(NULL, 0), 6881,
-                              slice_u8_make(NULL, 0), &arena, &msg)
-                              .kind);
+    Bytes msg = {0};
+    assert(ErrKindNone ==
+           torrent_make_udp_broadcast_message(bytes_make(NULL, 0), 6881,
+                                              bytes_make(NULL, 0), &arena, &msg)
+               .kind);
 
-    assert(slice_u8_eq_cstr(msg, "BT-SEARCH * HTTP/1.1\r\n"
-                                 "Host: \r\n"
-                                 "Port: 6881\r\n"
-                                 "Infohash: \r\n"
-                                 "cookie: fixme\r\n"
-                                 "\r\n"
-                                 "\r\n"));
+    assert(bytes_eq_cstr(msg, "BT-SEARCH * HTTP/1.1\r\n"
+                              "Host: \r\n"
+                              "Port: 6881\r\n"
+                              "Infohash: \r\n"
+                              "cookie: fixme\r\n"
+                              "\r\n"
+                              "\r\n"));
   }
 
   // Out of arena: reported, and `*dst` is left as the caller had it.
   {
     Arena arena = test_arena(8);
 
-    Slice_u8 msg = {.data = (u8 *)&arena, .len = 123};
+    Bytes msg = {.data = (u8 *)&arena, .len = 123};
     assert(ErrKindOOM == torrent_make_udp_broadcast_message(
-                             test_slice("239.192.152.143:6771"), 6881,
-                             test_slice(TEST_LSD_INFOHASH), &arena, &msg)
+                             bytes_from_cstr("239.192.152.143:6771"), 6881,
+                             bytes_from_cstr(TEST_LSD_INFOHASH), &arena, &msg)
                              .kind);
 
     assert((u8 *)&arena == msg.data);
@@ -6106,10 +6102,10 @@ static void test_torrent_make_udp_broadcast_message(void) {
     Arena arena = test_arena(4 * KiB);
     const u8 *const before = arena.start;
 
-    Slice_u8 msg = {0};
+    Bytes msg = {0};
     assert(ErrKindNone ==
-           torrent_make_udp_broadcast_message(test_slice("host"), 1,
-                                              test_slice("aa"), &arena, &msg)
+           torrent_make_udp_broadcast_message(
+               bytes_from_cstr("host"), 1, bytes_from_cstr("aa"), &arena, &msg)
                .kind);
 
     assert(msg.data >= before);
@@ -6118,67 +6114,67 @@ static void test_torrent_make_udp_broadcast_message(void) {
 }
 
 // ---------------------------------------------------------------------------
-// StringBuffer
+// BytesBuffer
 // ---------------------------------------------------------------------------
 
 // The bytes built so far. Every caller wants this and there is no accessor for
 // it, so the shape is spelled out once here instead of at each call site.
-__attribute__((warn_unused_result)) static Slice_u8
-test_sb_built(StringBuffer sb) {
-  return slice_u8_take(sb.container, sb.len);
+__attribute__((warn_unused_result)) static Bytes test_sb_built(BytesBuffer bb) {
+  return bytes_take(bb.container, bb.len);
 }
 
-// A capacity of 0 is not tested: `sb_make` forwards it to `arena_alloc`, which
-// asserts `elem_count > 0`, so it aborts rather than failing.
+// A capacity of 0 is not tested: `bytes_buffer_make` forwards it to
+// `arena_alloc`, which asserts `elem_count > 0`, so it aborts rather than
+// failing.
 static void test_sb_make(void) {
   // A fresh buffer owns its capacity and holds nothing.
   {
     Arena arena = test_arena(4 * KiB);
-    StringBuffer sb = {0};
-    assert(ErrKindNone == sb_make(16, &arena, &sb).kind);
+    BytesBuffer bb = {0};
+    assert(ErrKindNone == bytes_buffer_make(16, &arena, &bb).kind);
 
-    assert(sb.container.data);
-    assert(16 == sb.container.len);
-    assert(0 == sb.len);
-    assert(16 == sb_space(sb));
-    assert(slice_u8_is_empty(test_sb_built(sb)));
+    assert(bb.container.data);
+    assert(16 == bb.container.len);
+    assert(0 == bb.len);
+    assert(16 == bytes_buffer_space(bb));
+    assert(bytes_is_empty(test_sb_built(bb)));
   }
 
   // Out of arena: reported, and `*dst` is left exactly as the caller had it.
   {
     Arena arena = test_arena(8);
     u8 poison[6] = {0};
-    StringBuffer sb = {.container = {.data = poison, .len = sizeof(poison)},
-                       .len = 3};
-    assert(ErrKindOOM == sb_make(4 * KiB, &arena, &sb).kind);
+    BytesBuffer bb = {.container = {.data = poison, .len = sizeof(poison)},
+                      .len = 3};
+    assert(ErrKindOOM == bytes_buffer_make(4 * KiB, &arena, &bb).kind);
 
-    assert(poison == sb.container.data);
-    assert(sizeof(poison) == sb.container.len);
-    assert(3 == sb.len);
+    assert(poison == bb.container.data);
+    assert(sizeof(poison) == bb.container.len);
+    assert(3 == bb.len);
   }
 
-  // Reusing a `StringBuffer` that already holds something: `sb_make` hands back
-  // a buffer that is empty, not one that looks part-filled.
+  // Reusing a `BytesBuffer` that already holds something: `bytes_buffer_make`
+  // hands back a buffer that is empty, not one that looks part-filled.
   {
     Arena arena = test_arena(4 * KiB);
-    StringBuffer sb = {0};
-    assert(ErrKindNone == sb_make(8, &arena, &sb).kind);
-    assert(sb_extend_within_cap(&sb, test_slice("stale")));
-    assert(5 == sb.len);
+    BytesBuffer bb = {0};
+    assert(ErrKindNone == bytes_buffer_make(8, &arena, &bb).kind);
+    assert(bytes_buffer_extend_within_cap(&bb, bytes_from_cstr("stale")));
+    assert(5 == bb.len);
 
-    assert(ErrKindNone == sb_make(8, &arena, &sb).kind);
-    assert(0 == sb.len);
-    assert(8 == sb_space(sb));
-    assert(slice_u8_is_empty(test_sb_built(sb)));
+    assert(ErrKindNone == bytes_buffer_make(8, &arena, &bb).kind);
+    assert(0 == bb.len);
+    assert(8 == bytes_buffer_space(bb));
+    assert(bytes_is_empty(test_sb_built(bb)));
   }
 
   // Two buffers from one arena do not overlap.
   {
     Arena arena = test_arena(4 * KiB);
-    StringBuffer a = {0};
-    StringBuffer b = {0};
-    assert(ErrKindNone == sb_make(8, &arena, &a).kind);
-    assert(ErrKindNone == sb_make(8, &arena, &b).kind);
+    BytesBuffer a = {0};
+    BytesBuffer b = {0};
+    assert(ErrKindNone == bytes_buffer_make(8, &arena, &a).kind);
+    assert(ErrKindNone == bytes_buffer_make(8, &arena, &b).kind);
 
     assert(a.container.data != b.container.data);
     assert(a.container.data + 8 <= b.container.data ||
@@ -6190,79 +6186,80 @@ static void test_sb_extend_within_cap(void) {
   // Appending in pieces is the same as appending the whole.
   {
     Arena arena = test_arena(4 * KiB);
-    StringBuffer sb = {0};
-    assert(ErrKindNone == sb_make(16, &arena, &sb).kind);
+    BytesBuffer bb = {0};
+    assert(ErrKindNone == bytes_buffer_make(16, &arena, &bb).kind);
 
-    assert(sb_extend_within_cap(&sb, test_slice("ab")));
-    assert(2 == sb.len);
-    assert(14 == sb_space(sb));
+    assert(bytes_buffer_extend_within_cap(&bb, bytes_from_cstr("ab")));
+    assert(2 == bb.len);
+    assert(14 == bytes_buffer_space(bb));
 
-    assert(sb_extend_within_cap(&sb, test_slice("cde")));
-    assert(5 == sb.len);
-    assert(slice_u8_eq_cstr(test_sb_built(sb), "abcde"));
+    assert(bytes_buffer_extend_within_cap(&bb, bytes_from_cstr("cde")));
+    assert(5 == bb.len);
+    assert(bytes_eq_cstr(test_sb_built(bb), "abcde"));
   }
 
   // Filling the capacity exactly is allowed; one byte more is not.
   {
     Arena arena = test_arena(4 * KiB);
-    StringBuffer sb = {0};
-    assert(ErrKindNone == sb_make(5, &arena, &sb).kind);
+    BytesBuffer bb = {0};
+    assert(ErrKindNone == bytes_buffer_make(5, &arena, &bb).kind);
 
-    assert(sb_extend_within_cap(&sb, test_slice("abcde")));
-    assert(5 == sb.len);
-    assert(0 == sb_space(sb));
+    assert(bytes_buffer_extend_within_cap(&bb, bytes_from_cstr("abcde")));
+    assert(5 == bb.len);
+    assert(0 == bytes_buffer_space(bb));
 
     // Full: even one byte is refused, and nothing changes.
-    assert(!sb_extend_within_cap(&sb, test_slice("f")));
-    assert(5 == sb.len);
-    assert(slice_u8_eq_cstr(test_sb_built(sb), "abcde"));
+    assert(!bytes_buffer_extend_within_cap(&bb, bytes_from_cstr("f")));
+    assert(5 == bb.len);
+    assert(bytes_eq_cstr(test_sb_built(bb), "abcde"));
   }
 
   // A refusal is all-or-nothing: no prefix of the input is written, and the
   // bytes past `len` are left as they were.
   {
     Arena arena = test_arena(4 * KiB);
-    StringBuffer sb = {0};
-    assert(ErrKindNone == sb_make(8, &arena, &sb).kind);
-    memset(sb.container.data, '#', sb.container.len);
+    BytesBuffer bb = {0};
+    assert(ErrKindNone == bytes_buffer_make(8, &arena, &bb).kind);
+    memset(bb.container.data, '#', bb.container.len);
 
-    assert(sb_extend_within_cap(&sb, test_slice("abc")));
-    assert(!sb_extend_within_cap(&sb, test_slice("defghi")));
+    assert(bytes_buffer_extend_within_cap(&bb, bytes_from_cstr("abc")));
+    assert(!bytes_buffer_extend_within_cap(&bb, bytes_from_cstr("defghi")));
 
-    assert(3 == sb.len);
-    assert(slice_u8_eq_cstr(test_sb_built(sb), "abc"));
-    for (usize i = 3; i < sb.container.len; i++) {
-      assert('#' == sb.container.data[i]);
+    assert(3 == bb.len);
+    assert(bytes_eq_cstr(test_sb_built(bb), "abc"));
+    for (usize i = 3; i < bb.container.len; i++) {
+      assert('#' == bb.container.data[i]);
     }
   }
 
   // Appending nothing always succeeds and moves nothing, on a full buffer too.
   {
     Arena arena = test_arena(4 * KiB);
-    StringBuffer sb = {0};
-    assert(ErrKindNone == sb_make(2, &arena, &sb).kind);
+    BytesBuffer bb = {0};
+    assert(ErrKindNone == bytes_buffer_make(2, &arena, &bb).kind);
 
-    assert(sb_extend_within_cap(&sb, slice_u8_make(NULL, 0)));
-    assert(0 == sb.len);
+    assert(bytes_buffer_extend_within_cap(&bb, bytes_make(NULL, 0)));
+    assert(0 == bb.len);
 
-    assert(sb_extend_within_cap(&sb, test_slice("xy")));
-    assert(0 == sb_space(sb));
-    assert(sb_extend_within_cap(&sb, slice_u8_make(NULL, 0)));
-    assert(2 == sb.len);
+    assert(bytes_buffer_extend_within_cap(&bb, bytes_from_cstr("xy")));
+    assert(0 == bytes_buffer_space(bb));
+    assert(bytes_buffer_extend_within_cap(&bb, bytes_make(NULL, 0)));
+    assert(2 == bb.len);
   }
 
   // A body is bytes, not text: NUL and 0x80..0xff go through unchanged, and
   // the NUL does not terminate anything.
   {
     Arena arena = test_arena(4 * KiB);
-    StringBuffer sb = {0};
-    assert(ErrKindNone == sb_make(8, &arena, &sb).kind);
+    BytesBuffer bb = {0};
+    assert(ErrKindNone == bytes_buffer_make(8, &arena, &bb).kind);
 
     const u8 raw[] = {'a', 0x00, 0x80, 0xff, 'b'};
-    assert(sb_extend_within_cap(&sb, slice_u8_make((u8 *)raw, sizeof(raw))));
+    assert(bytes_buffer_extend_within_cap(&bb,
+                                          bytes_make((u8 *)raw, sizeof(raw))));
 
-    assert(sizeof(raw) == sb.len);
-    assert(0 == memcmp(sb.container.data, raw, sizeof(raw)));
+    assert(sizeof(raw) == bb.len);
+    assert(0 == memcmp(bb.container.data, raw, sizeof(raw)));
   }
 }
 
@@ -6281,15 +6278,15 @@ static void test_sb_append_usize_within_cap(void) {
 
     for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
       Arena arena = test_arena(4 * KiB);
-      StringBuffer sb = {0};
-      assert(ErrKindNone == sb_make(32, &arena, &sb).kind);
+      BytesBuffer bb = {0};
+      assert(ErrKindNone == bytes_buffer_make(32, &arena, &bb).kind);
 
       // A prefix first, so the digits are not written at offset 0.
-      assert(sb_extend_within_cap(&sb, test_slice("n=")));
-      assert(sb_append_usize_within_cap(&sb, cases[i].n));
+      assert(bytes_buffer_extend_within_cap(&bb, bytes_from_cstr("n=")));
+      assert(bytes_buffer_append_usize_within_cap(&bb, cases[i].n));
 
-      assert(2 + strlen(cases[i].expected) == sb.len);
-      assert(0 == memcmp(sb.container.data + 2, cases[i].expected,
+      assert(2 + strlen(cases[i].expected) == bb.len);
+      assert(0 == memcmp(bb.container.data + 2, cases[i].expected,
                          strlen(cases[i].expected)));
     }
   }
@@ -6297,42 +6294,42 @@ static void test_sb_append_usize_within_cap(void) {
   // The digits fit exactly, and one digit short is refused whole.
   {
     Arena arena = test_arena(4 * KiB);
-    StringBuffer sb = {0};
-    assert(ErrKindNone == sb_make(3, &arena, &sb).kind);
+    BytesBuffer bb = {0};
+    assert(ErrKindNone == bytes_buffer_make(3, &arena, &bb).kind);
 
-    assert(sb_append_usize_within_cap(&sb, 123));
-    assert(3 == sb.len);
-    assert(slice_u8_eq_cstr(test_sb_built(sb), "123"));
+    assert(bytes_buffer_append_usize_within_cap(&bb, 123));
+    assert(3 == bb.len);
+    assert(bytes_eq_cstr(test_sb_built(bb), "123"));
   }
   {
     Arena arena = test_arena(4 * KiB);
-    StringBuffer sb = {0};
-    assert(ErrKindNone == sb_make(3, &arena, &sb).kind);
-    memset(sb.container.data, '#', sb.container.len);
+    BytesBuffer bb = {0};
+    assert(ErrKindNone == bytes_buffer_make(3, &arena, &bb).kind);
+    memset(bb.container.data, '#', bb.container.len);
 
     // Four digits into three bytes: refused, and no digit is written.
-    assert(!sb_append_usize_within_cap(&sb, 1234));
-    assert(0 == sb.len);
-    for (usize i = 0; i < sb.container.len; i++) {
-      assert('#' == sb.container.data[i]);
+    assert(!bytes_buffer_append_usize_within_cap(&bb, 1234));
+    assert(0 == bb.len);
+    for (usize i = 0; i < bb.container.len; i++) {
+      assert('#' == bb.container.data[i]);
     }
 
     // `0` is one digit wide, not zero, so it still needs room.
-    assert(sb_append_usize_within_cap(&sb, 0));
-    assert(1 == sb.len);
+    assert(bytes_buffer_append_usize_within_cap(&bb, 0));
+    assert(1 == bb.len);
   }
 
   // A full buffer refuses even the narrowest number.
   {
     Arena arena = test_arena(4 * KiB);
-    StringBuffer sb = {0};
-    assert(ErrKindNone == sb_make(1, &arena, &sb).kind);
+    BytesBuffer bb = {0};
+    assert(ErrKindNone == bytes_buffer_make(1, &arena, &bb).kind);
 
-    assert(sb_append_usize_within_cap(&sb, 5));
-    assert(0 == sb_space(sb));
-    assert(!sb_append_usize_within_cap(&sb, 0));
-    assert(1 == sb.len);
-    assert(slice_u8_eq_cstr(test_sb_built(sb), "5"));
+    assert(bytes_buffer_append_usize_within_cap(&bb, 5));
+    assert(0 == bytes_buffer_space(bb));
+    assert(!bytes_buffer_append_usize_within_cap(&bb, 0));
+    assert(1 == bb.len);
+    assert(bytes_eq_cstr(test_sb_built(bb), "5"));
   }
 }
 
@@ -6341,19 +6338,19 @@ static void test_sb_append_usize_within_cap(void) {
 // spare, so a refusal here would be a bug and not a bound.
 static void test_sb_build(void) {
   Arena arena = test_arena(4 * KiB);
-  StringBuffer sb = {0};
-  assert(ErrKindNone == sb_make(64, &arena, &sb).kind);
+  BytesBuffer bb = {0};
+  assert(ErrKindNone == bytes_buffer_make(64, &arena, &bb).kind);
 
-  assert(sb_extend_within_cap(&sb, test_slice("Host: ")));
-  assert(sb_extend_within_cap(&sb, test_slice("localhost")));
-  assert(sb_extend_within_cap(&sb, test_slice("\r\nPort: ")));
-  assert(sb_append_usize_within_cap(&sb, 12345));
-  assert(sb_extend_within_cap(&sb, test_slice("\r\n")));
+  assert(bytes_buffer_extend_within_cap(&bb, bytes_from_cstr("Host: ")));
+  assert(bytes_buffer_extend_within_cap(&bb, bytes_from_cstr("localhost")));
+  assert(bytes_buffer_extend_within_cap(&bb, bytes_from_cstr("\r\nPort: ")));
+  assert(bytes_buffer_append_usize_within_cap(&bb, 12345));
+  assert(bytes_buffer_extend_within_cap(&bb, bytes_from_cstr("\r\n")));
 
   const char *const expected = "Host: localhost\r\nPort: 12345\r\n";
-  assert(strlen(expected) == sb.len);
-  assert(slice_u8_eq_cstr(test_sb_built(sb), expected));
-  assert(64 - strlen(expected) == sb_space(sb));
+  assert(strlen(expected) == bb.len);
+  assert(bytes_eq_cstr(test_sb_built(bb), expected));
+  assert(64 - strlen(expected) == bytes_buffer_space(bb));
 }
 
 // ---------------------------------------------------------------------------
@@ -6375,12 +6372,12 @@ static void test_bencode_encode_once(BencodeValue b, const char *expected) {
   const usize cap = size + 1;
 
   Arena arena = test_arena(64 * KiB);
-  Slice_u8 dst = {.data = arena_alloc(&arena, __alignof__(u8), sizeof(u8), cap),
-                  .len = cap};
+  Bytes dst = {.data = arena_alloc(&arena, __alignof__(u8), sizeof(u8), cap),
+               .len = cap};
   assert(dst.data);
   memset(dst.data, '#', cap);
 
-  const usize written = bencode_encode_in_place(b, slice_u8_take(dst, size));
+  const usize written = bencode_encode_in_place(b, bytes_take(dst, size));
 
   // Comparing from the front of `dst` pins the anchoring.
   assert(expected_len == written);
@@ -6403,28 +6400,29 @@ static void test_bencode_encode_leaves(void) {
   test_bencode_encode_once(test_bencode_int(INT64_MIN),
                            "i-9223372036854775808e");
 
-  test_bencode_encode_once(test_bencode_str(""), "0:");
-  test_bencode_encode_once(test_bencode_str("a"), "1:a");
-  test_bencode_encode_once(test_bencode_str("spam"), "4:spam");
-  test_bencode_encode_once(test_bencode_str("piece length"), "12:piece length");
+  test_bencode_encode_once(test_bencode_bytes(""), "0:");
+  test_bencode_encode_once(test_bencode_bytes("a"), "1:a");
+  test_bencode_encode_once(test_bencode_bytes("spam"), "4:spam");
+  test_bencode_encode_once(test_bencode_bytes("piece length"),
+                           "12:piece length");
 
-  // A string whose `data` is null, which is how the `""` key of a v2 file
+  // A byte string whose `data` is null, which is how the `""` key of a v2 file
   // tree is built. `memcpy` wants valid pointers even for a zero byte copy.
-  const BencodeValue null_str = {.kind = BencodeKindString, .v.s = {0}};
-  test_bencode_encode_once(null_str, "0:");
+  const BencodeValue null_bytes = {.kind = BencodeKindBytes, .v.bytes = {0}};
+  test_bencode_encode_once(null_bytes, "0:");
 }
 
 // Strings are byte strings: NULs and high bytes pass through untouched, and
 // the length prefix counts bytes rather than stopping at a terminator.
-static void test_bencode_encode_binary_string(void) {
+static void test_bencode_encode_non_ascii_bytes(void) {
   u8 raw[6] = {0x00, 0xff, 'a', 0x00, 0x80, '\n'};
-  const BencodeValue b = {.kind = BencodeKindString,
-                          .v.s = slice_u8_make(raw, sizeof(raw))};
+  const BencodeValue b = {.kind = BencodeKindBytes,
+                          .v.bytes = bytes_make(raw, sizeof(raw))};
 
   Arena arena = test_arena(64 * KiB);
   const usize cap = bencode_encode_exact_size(b, 0);
-  Slice_u8 dst = {.data = arena_alloc(&arena, __alignof__(u8), sizeof(u8), cap),
-                  .len = cap};
+  Bytes dst = {.data = arena_alloc(&arena, __alignof__(u8), sizeof(u8), cap),
+               .len = cap};
   assert(dst.data);
 
   const usize written = bencode_encode_in_place(b, dst);
@@ -6448,7 +6446,7 @@ static void test_bencode_encode_containers(void) {
   BencodeValue *items =
       arena_alloc(&arena, __alignof__(BencodeValue), sizeof(BencodeValue), 2);
   assert(items);
-  items[0] = test_bencode_str("spam");
+  items[0] = test_bencode_bytes("spam");
   items[1] = test_bencode_int(42);
   const BencodeValue list = {
       .kind = BencodeKindList, .v.list.len = 2, .v.list.data = items};
@@ -6458,7 +6456,7 @@ static void test_bencode_encode_containers(void) {
   BencodeValue *pair =
       arena_alloc(&arena, __alignof__(BencodeValue), sizeof(BencodeValue), 2);
   assert(pair);
-  pair[0] = test_bencode_str("key");
+  pair[0] = test_bencode_bytes("key");
   pair[1] = list;
   const BencodeValue dict = {
       .kind = BencodeKindDict, .v.list.len = 2, .v.list.data = pair};
@@ -6486,7 +6484,7 @@ static void test_bencode_encode_wide_dict(void) {
     key[3] = (u8)('0' + i % 10);
 
     entries[2 * i] =
-        (BencodeValue){.kind = BencodeKindString, .v.s = slice_u8_make(key, 4)};
+        (BencodeValue){.kind = BencodeKindBytes, .v.bytes = bytes_make(key, 4)};
     entries[2 * i + 1] = test_bencode_int((isize)i);
   }
 
@@ -6494,8 +6492,8 @@ static void test_bencode_encode_wide_dict(void) {
       .kind = BencodeKindDict, .v.list.len = pairs * 2, .v.list.data = entries};
 
   const usize cap = bencode_encode_exact_size(dict, 0);
-  Slice_u8 dst = {.data = arena_alloc(&arena, __alignof__(u8), sizeof(u8), cap),
-                  .len = cap};
+  Bytes dst = {.data = arena_alloc(&arena, __alignof__(u8), sizeof(u8), cap),
+               .len = cap};
   assert(dst.data);
 
   const usize written = bencode_encode_in_place(dict, dst);
@@ -6509,7 +6507,7 @@ static void test_bencode_encode_wide_dict(void) {
   // It is real bencode, with every pair still there.
   Arena parse_arena = test_arena(1 * MiB);
   Arena scratch = test_arena(1 * MiB);
-  Slice_u8 to_parse = slice_u8_take(dst, written);
+  Bytes to_parse = bytes_take(dst, written);
   BencodeValue parsed = {0};
   assert(ErrKindNone ==
          bencode_parse(&to_parse, &parse_arena, scratch, &parsed).kind);
@@ -6543,8 +6541,8 @@ static void test_bencode_encode_round_trip(void) {
     Arena arena = test_arena(64 * KiB);
     Arena scratch = test_arena(64 * KiB);
 
-    Slice_u8 input = test_slice(documents[i]);
-    const Slice_u8 original = input;
+    Bytes input = bytes_from_cstr(documents[i]);
+    const Bytes original = input;
 
     BencodeValue parsed = {0};
     assert(ErrKindNone == bencode_parse(&input, &arena, scratch, &parsed).kind);
@@ -6568,24 +6566,24 @@ static void test_bencode_encode_torrent_info(void) {
   assert(file_data);
   memset(file_data, 'x', file_len);
 
-  const Slice_u8 name = test_slice("f.bin");
+  const Bytes name = bytes_from_cstr("f.bin");
   BencodeValue info = {0};
   PieceHash *piece_hashes = NULL;
   usize piece_hashes_count = 0;
-  Slice_u8 pieces_root_slice = {0};
+  Bytes pieces_root_bytes = {0};
   assert(ErrKindNone ==
          torrent_make_info_dict_v2(name, 16 * TORRENT_BLOCK_SIZE,
-                                   slice_u8_make(file_data, file_len), name,
-                                   &info, &pieces_root_slice, &piece_hashes,
+                                   bytes_make(file_data, file_len), name, &info,
+                                   &pieces_root_bytes, &piece_hashes,
                                    &piece_hashes_count, &arena)
              .kind);
 
   const usize cap = bencode_encode_exact_size(info, 0);
-  Slice_u8 dst = {.data = arena_alloc(&arena, __alignof__(u8), sizeof(u8), cap),
-                  .len = cap};
+  Bytes dst = {.data = arena_alloc(&arena, __alignof__(u8), sizeof(u8), cap),
+               .len = cap};
   assert(dst.data);
 
-  const Slice_u8 got = slice_u8_take(dst, bencode_encode_in_place(info, dst));
+  const Bytes got = bytes_take(dst, bencode_encode_in_place(info, dst));
   assert(bencode_encode_exact_size(info, 0) == got.len);
 
   // The digest is raw bytes, so build the expectation around it rather than
@@ -6625,7 +6623,7 @@ static void test_bencode_encode_torrent_info(void) {
 // Decode a run of concatenated hex digests, the form `piece layers` values
 // are published in. `test_digest_from_hex` takes exactly one digest, so feed
 // it one 64 character window at a time.
-static void test_digests_from_hex(const char *hex, Slice_u8 dst) {
+static void test_digests_from_hex(const char *hex, Bytes dst) {
   assert(hex);
   assert(0 == dst.len % SHA256_DIGEST_LENGTH);
   assert(2 * dst.len == strlen(hex));
@@ -6655,17 +6653,17 @@ static void test_torrent_metainfo_once(usize file_len,
   assert(file_data);
   memset(file_data, 'x', file_len);
 
-  const Slice_u8 name = test_slice("f.bin");
-  const Slice_u8 announce = test_slice("http://localhost:12345");
+  const Bytes name = bytes_from_cstr("f.bin");
+  const Bytes announce = bytes_from_cstr("http://localhost:12345");
 
   BencodeValue info = {0};
-  Slice_u8 pieces_root = {0};
+  Bytes pieces_root = {0};
   PieceHash *piece_hashes = NULL;
   usize piece_hashes_count = 0;
   assert(ErrKindNone ==
          torrent_make_info_dict_v2(name, 16 * TORRENT_BLOCK_SIZE,
-                                   slice_u8_make(file_data, file_len), name,
-                                   &info, &pieces_root, &piece_hashes,
+                                   bytes_make(file_data, file_len), name, &info,
+                                   &pieces_root, &piece_hashes,
                                    &piece_hashes_count, &arena)
              .kind);
 
@@ -6688,14 +6686,14 @@ static void test_torrent_metainfo_once(usize file_len,
   // layers.
   assert(BencodeKindDict == metainfo.kind);
   assert(2 * 3 == metainfo.v.list.len);
-  assert(test_bencode_is_string(metainfo.v.list.data[0], "announce"));
-  assert(test_bencode_is_string(metainfo.v.list.data[2], "info"));
-  assert(test_bencode_is_string(metainfo.v.list.data[4], "piece layers"));
+  assert(test_bencode_is_bytes(metainfo.v.list.data[0], "announce"));
+  assert(test_bencode_is_bytes(metainfo.v.list.data[2], "info"));
+  assert(test_bencode_is_bytes(metainfo.v.list.data[4], "piece layers"));
 
   const BencodeValue announce_value = metainfo.v.list.data[1];
-  assert(BencodeKindString == announce_value.kind);
-  assert(announce.len == announce_value.v.s.len);
-  assert(0 == memcmp(announce_value.v.s.data, announce.data, announce.len));
+  assert(BencodeKindBytes == announce_value.kind);
+  assert(announce.len == announce_value.v.bytes.len);
+  assert(0 == memcmp(announce_value.v.bytes.data, announce.data, announce.len));
 
   // `info` is nested by value: the same tree, not a re-encoding of it.
   const BencodeValue info_value = metainfo.v.list.data[3];
@@ -6717,34 +6715,34 @@ static void test_torrent_metainfo_once(usize file_len,
     // Keyed by the merkle root. Emphatically not by the file name: that is
     // the mistake this pins down, and it is invisible in a hex dump.
     const BencodeValue layer_key = layers.v.list.data[0];
-    assert(BencodeKindString == layer_key.kind);
-    assert(SHA256_DIGEST_LENGTH == layer_key.v.s.len);
+    assert(BencodeKindBytes == layer_key.kind);
+    assert(SHA256_DIGEST_LENGTH == layer_key.v.bytes.len);
     assert(0 ==
-           memcmp(layer_key.v.s.data, expected_root, SHA256_DIGEST_LENGTH));
-    assert(!slice_u8_eq_cstr(layer_key.v.s, "f.bin"));
+           memcmp(layer_key.v.bytes.data, expected_root, SHA256_DIGEST_LENGTH));
+    assert(!bytes_eq_cstr(layer_key.v.bytes, "f.bin"));
 
     const BencodeValue layer_value = layers.v.list.data[1];
-    assert(BencodeKindString == layer_value.kind);
-    assert(expected_layer_len == layer_value.v.s.len);
+    assert(BencodeKindBytes == layer_value.kind);
+    assert(expected_layer_len == layer_value.v.bytes.len);
 
-    Slice_u8 expected_layer = {.data =
-                                   arena_alloc(&arena, __alignof__(u8),
-                                               sizeof(u8), expected_layer_len),
-                               .len = expected_layer_len};
+    Bytes expected_layer = {.data = arena_alloc(&arena, __alignof__(u8),
+                                                sizeof(u8), expected_layer_len),
+                            .len = expected_layer_len};
     assert(expected_layer.data);
     test_digests_from_hex(expected_layer_hex, expected_layer);
-    assert(0 == memcmp(layer_value.v.s.data, expected_layer.data,
+    assert(0 == memcmp(layer_value.v.bytes.data, expected_layer.data,
                        expected_layer_len));
 
     // And it is exactly the piece hashes the merkle build handed over,
     // concatenated, in order, with nothing inserted between them.
-    assert(0 == memcmp(layer_value.v.s.data, piece_hashes, expected_layer_len));
+    assert(0 ==
+           memcmp(layer_value.v.bytes.data, piece_hashes, expected_layer_len));
   }
 
   // The infohash is over the info dict alone, so encoding it on its own and
   // then finding those exact bytes inside the metainfo encoding is the
   // property everything downstream depends on: nesting must not perturb them.
-  Slice_u8 info_encoded = {0};
+  Bytes info_encoded = {0};
   assert(ErrKindNone == bencode_encode(info, &info_encoded, &arena).kind);
 
   u8 infohash[SHA256_DIGEST_LENGTH] = {0};
@@ -6753,11 +6751,11 @@ static void test_torrent_metainfo_once(usize file_len,
   test_digest_from_hex(expected_infohash_hex, expected_infohash);
   assert(0 == memcmp(infohash, expected_infohash, sizeof(infohash)));
 
-  Slice_u8 metainfo_encoded = {0};
+  Bytes metainfo_encoded = {0};
   assert(ErrKindNone ==
          bencode_encode(metainfo, &metainfo_encoded, &arena).kind);
   assert(metainfo_encoded.len > info_encoded.len);
-  assert(test_slice_contains(metainfo_encoded, info_encoded));
+  assert(test_bytes_contains(metainfo_encoded, info_encoded));
 
   // The envelope is what it claims to be, and an empty layer dict really does
   // encode as the two bytes `de` rather than vanishing.
@@ -6774,7 +6772,7 @@ static void test_torrent_metainfo_once(usize file_len,
   // Re-parsing is the ordering check. `bencode_parse` validates that each
   // dict's keys are sorted and unique as it closes, which the encoder itself
   // never does, so a mis-ordered key only ever shows up here.
-  Slice_u8 to_parse = metainfo_encoded;
+  Bytes to_parse = metainfo_encoded;
   BencodeValue reparsed = {0};
   assert(ErrKindNone ==
          bencode_parse(&to_parse, &arena, scratch, &reparsed).kind);
@@ -6922,7 +6920,7 @@ static void test_sha256_neon_lengths(void) {
   for (usize len = 0; len <= max_len; len++) {
     // The dispatcher picks the vector path here.
     u8 dispatched[SHA256_DIGEST_LENGTH] = {0};
-    sha256_digest(slice_u8_make(data, len), dispatched);
+    sha256_digest(bytes_make(data, len), dispatched);
 
     // The same message, forced through the scalar block function.
     Sha256Ctx ctx = {0};
@@ -6968,8 +6966,8 @@ __attribute__((warn_unused_result)) static IO *test_io_real(Arena *arena) {
 // Removing a scratch file the harness itself made. It goes to the real platform
 // for the same reason `test_stdout_silence` does: the file is on the real
 // filesystem whatever `io` the test under it happens to be driving.
-__attribute__((warn_unused_result)) static Error
-test_remove_file(IO *io, Slice_u8 path) {
+__attribute__((warn_unused_result)) static Error test_remove_file(IO *io,
+                                                                  Bytes path) {
   assert(io);
 
   IoOnce once = {0};
@@ -6988,7 +6986,7 @@ test_remove_file(IO *io, Slice_u8 path) {
 // rather than doing anything with the descriptor. The descriptor is handed back
 // through `*dst_fd` when there is one, and left alone when there is not.
 __attribute__((warn_unused_result)) static Error
-test_open(IO *io, Slice_u8 path, FileOpenOptions opts, i32 *dst_fd) {
+test_open(IO *io, Bytes path, FileOpenOptions opts, i32 *dst_fd) {
   assert(io);
   assert(dst_fd);
 
@@ -7011,7 +7009,7 @@ test_open(IO *io, Slice_u8 path, FileOpenOptions opts, i32 *dst_fd) {
 
 // A path under `TMPDIR` unique to this process, so a test run does not
 // collide with a stale file or with another run.
-__attribute__((warn_unused_result)) static Slice_u8
+__attribute__((warn_unused_result)) static Bytes
 test_tmp_path(char *buf, usize buf_len, const char *name) {
   const Env *const env = env_platform_make();
 
@@ -7021,7 +7019,7 @@ test_tmp_path(char *buf, usize buf_len, const char *name) {
   assert(n > 0);
   assert((usize)n < buf_len);
 
-  return slice_u8_make((u8 *)buf, (usize)n);
+  return bytes_make((u8 *)buf, (usize)n);
 }
 
 // The failure paths of `open`, which are the ones a caller actually has to
@@ -7035,18 +7033,17 @@ static void test_io_open_errors(void) {
   // An empty path is rejected before the syscall -- but not before the
   // operation is submitted: the check is in the syscall wrapper the loop runs,
   // so it reports through the callback like everything else.
-  assert(
-      ErrKindInvalidData ==
-      test_open(io, slice_u8_make(NULL, 0), FileOpenOptionsReadOnly, &fd).kind);
   assert(ErrKindInvalidData ==
-         test_open(io, test_slice(""), FileOpenOptionsReadOnly, &fd).kind);
+         test_open(io, bytes_make(NULL, 0), FileOpenOptionsReadOnly, &fd).kind);
+  assert(ErrKindInvalidData ==
+         test_open(io, bytes_from_cstr(""), FileOpenOptionsReadOnly, &fd).kind);
 
   // So is one too long for the fixed buffer, and the limit rides along in
   // `data` rather than an `errno` that was never set.
   {
     char long_path[5000] = {0};
     memset(long_path, 'a', sizeof(long_path) - 1);
-    const Slice_u8 path = slice_u8_make((u8 *)long_path, sizeof(long_path) - 1);
+    const Bytes path = bytes_make((u8 *)long_path, sizeof(long_path) - 1);
 
     const Error err = test_open(io, path, FileOpenOptionsReadOnly, &fd);
     assert(ErrKindRange == err.kind);
@@ -7056,7 +7053,7 @@ static void test_io_open_errors(void) {
   // A missing file is the OS's complaint, carried verbatim.
   {
     char buf[256] = {0};
-    const Slice_u8 path = test_tmp_path(buf, sizeof(buf), "does_not_exist");
+    const Bytes path = test_tmp_path(buf, sizeof(buf), "does_not_exist");
     (void)test_remove_file(io, path);
 
     const Error err = test_open(io, path, FileOpenOptionsReadOnly, &fd);
@@ -7076,17 +7073,17 @@ static void test_io_file_round_trip(void) {
   IO *const io = test_io_real(&arena);
 
   char buf[256] = {0};
-  const Slice_u8 path = test_tmp_path(buf, sizeof(buf), "round_trip");
+  const Bytes path = test_tmp_path(buf, sizeof(buf), "round_trip");
   (void)test_remove_file(io, path);
 
   // Bencode is binary, so a NUL in the middle must survive.
   const u8 payload[] = {'d', '3', ':', 'a', 'b', 'c', 0x00, 'e'};
-  const Slice_u8 data = slice_u8_make((u8 *)payload, sizeof(payload));
+  const Bytes data = bytes_make((u8 *)payload, sizeof(payload));
 
   assert(ErrKindNone == io_write_all_to_file_blocking(io, path, data).kind);
 
   {
-    Slice_u8 got = {0};
+    Bytes got = {0};
     assert(ErrKindNone ==
            io_map_file_blocking(io, path, FileOpenOptionsReadOnly, &got).kind);
     assert(data.len == got.len);
@@ -7097,11 +7094,11 @@ static void test_io_file_round_trip(void) {
   // would still be there, which for a bencode file is silent corruption.
   {
     const u8 shorter[] = {'i', '1', 'e'};
-    const Slice_u8 data_shorter = slice_u8_make((u8 *)shorter, sizeof(shorter));
+    const Bytes data_shorter = bytes_make((u8 *)shorter, sizeof(shorter));
     assert(ErrKindNone ==
            io_write_all_to_file_blocking(io, path, data_shorter).kind);
 
-    Slice_u8 got = {0};
+    Bytes got = {0};
     assert(ErrKindNone ==
            io_map_file_blocking(io, path, FileOpenOptionsReadOnly, &got).kind);
     assert(sizeof(shorter) == got.len);
@@ -7111,11 +7108,10 @@ static void test_io_file_round_trip(void) {
   // Writing nothing is a no-op, not a truncation: the file is left as it was,
   // and nothing is ever submitted.
   {
-    assert(
-        ErrKindNone ==
-        io_write_all_to_file_blocking(io, path, slice_u8_make(NULL, 0)).kind);
+    assert(ErrKindNone ==
+           io_write_all_to_file_blocking(io, path, bytes_make(NULL, 0)).kind);
 
-    Slice_u8 got = {0};
+    Bytes got = {0};
     assert(ErrKindNone ==
            io_map_file_blocking(io, path, FileOpenOptionsReadOnly, &got).kind);
     assert(3 == got.len);
@@ -7124,18 +7120,18 @@ static void test_io_file_round_trip(void) {
   assert(ErrKindNone == test_remove_file(io, path).kind);
 
   // Mapping what is no longer there fails rather than handing back an empty
-  // slice.
+  // `Bytes`.
   {
-    Slice_u8 got = {0};
+    Bytes got = {0};
     assert(ErrKindNone !=
            io_map_file_blocking(io, path, FileOpenOptionsReadOnly, &got).kind);
   }
 
   // An empty file has nothing to map: `mmap` rejects a zero length, and that
-  // is reported rather than handed back as an empty slice.
+  // is reported rather than handed back as an empty `Bytes`.
   {
     char empty_buf[256] = {0};
-    const Slice_u8 empty_path =
+    const Bytes empty_path =
         test_tmp_path(empty_buf, sizeof(empty_buf), "empty");
     (void)test_remove_file(io, empty_path);
 
@@ -7153,11 +7149,11 @@ static void test_io_file_round_trip(void) {
       assert(ErrKindNone == io_once_wait(io, &once).kind);
     }
 
-    Slice_u8 got = {0};
+    Bytes got = {0};
     assert(ErrKindNone !=
            io_map_file_blocking(io, empty_path, FileOpenOptionsReadOnly, &got)
                .kind);
-    assert(slice_u8_is_empty(got));
+    assert(bytes_is_empty(got));
 
     assert(ErrKindNone == test_remove_file(io, empty_path).kind);
   }
@@ -7165,8 +7161,8 @@ static void test_io_file_round_trip(void) {
   // A directory opens but cannot be mapped, which walks the `mmap` failure
   // path with the descriptor already in hand.
   {
-    Slice_u8 got = {0};
-    assert(ErrKindNone != io_map_file_blocking(io, test_slice("/tmp"),
+    Bytes got = {0};
+    assert(ErrKindNone != io_map_file_blocking(io, bytes_from_cstr("/tmp"),
                                                FileOpenOptionsReadOnly, &got)
                               .kind);
   }
@@ -7176,17 +7172,16 @@ static void test_io_file_round_trip(void) {
   {
     char long_path[5000] = {0};
     memset(long_path, 'a', sizeof(long_path) - 1);
-    const Slice_u8 too_long =
-        slice_u8_make((u8 *)long_path, sizeof(long_path) - 1);
+    const Bytes too_long = bytes_make((u8 *)long_path, sizeof(long_path) - 1);
 
-    Slice_u8 got = {0};
+    Bytes got = {0};
     assert(
         ErrKindRange ==
         io_map_file_blocking(io, too_long, FileOpenOptionsReadOnly, &got).kind);
 
     const u8 byte = 'x';
     assert(ErrKindRange == io_write_all_to_file_blocking(
-                               io, too_long, slice_u8_make((u8 *)&byte, 1))
+                               io, too_long, bytes_make((u8 *)&byte, 1))
                                .kind);
   }
 }
@@ -7196,8 +7191,8 @@ static void test_io_file_round_trip(void) {
 // what matters is that each step reports rather than aborting, and that a
 // caller never sees a half built torrent.
 static void test_torrent_gen_torrent_file_data_oom(void) {
-  const Slice_u8 file_path = test_slice("some_dir/payload.bin");
-  const Slice_u8 announce = test_slice("http://localhost:12345");
+  const Bytes file_path = bytes_from_cstr("some_dir/payload.bin");
+  const Bytes announce = bytes_from_cstr("http://localhost:12345");
 
   Arena data_arena = test_arena(64 * KiB);
   const usize data_len = 40 * KiB;
@@ -7206,7 +7201,7 @@ static void test_torrent_gen_torrent_file_data_oom(void) {
   for (usize i = 0; i < data_len; i++) {
     data_bytes[i] = (u8)(i * 31);
   }
-  const Slice_u8 file_data = slice_u8_make(data_bytes, data_len);
+  const Bytes file_data = bytes_make(data_bytes, data_len);
 
   // The whole thing succeeds when there is room, which is what makes the
   // failures below meaningful.
@@ -7215,14 +7210,14 @@ static void test_torrent_gen_torrent_file_data_oom(void) {
     Arena arena = test_arena(64 * KiB);
     Arena scratch = test_arena(64 * KiB);
     const u8 *const scratch_start = scratch.start;
-    Slice_u8 torrent = {0};
+    Bytes torrent = {0};
     u8 info_hash[SHA256_DIGEST_LENGTH] = {0};
 
     assert(ErrKindNone ==
            torrent_gen_torrent_file_data(file_path, file_data, announce,
                                          &torrent, info_hash, scratch, &arena)
                .kind);
-    assert(!slice_u8_is_empty(torrent));
+    assert(!bytes_is_empty(torrent));
 
     // The caller's scratch is passed by value, so its offset is untouched.
     assert(scratch_start == scratch.start);
@@ -7236,7 +7231,7 @@ static void test_torrent_gen_torrent_file_data_oom(void) {
   for (usize cap = 64; cap < 16 * KiB; cap *= 2) {
     Arena arena = test_arena(64 * KiB);
     Arena scratch = test_arena(cap);
-    Slice_u8 torrent = {.data = (u8 *)0xAA, .len = 1};
+    Bytes torrent = {.data = (u8 *)0xAA, .len = 1};
     u8 info_hash[SHA256_DIGEST_LENGTH] = {0};
 
     const Error err = torrent_gen_torrent_file_data(
@@ -7258,7 +7253,7 @@ static void test_torrent_gen_torrent_file_data_oom(void) {
   {
     Arena arena = test_arena(64);
     Arena scratch = test_arena(64 * KiB);
-    Slice_u8 torrent = {0};
+    Bytes torrent = {0};
     u8 info_hash[SHA256_DIGEST_LENGTH] = {0};
 
     assert(ErrKindOOM ==
@@ -7325,10 +7320,10 @@ static void test_error_kind_to_cstr(void) {
     assert(1 == supported);
   }
 
-  // `slice_u8_from_cstr` only ever runs on these in anger, so it rides along
+  // `bytes_from_cstr` only ever runs on these in anger, so it rides along
   // here rather than earning a test of its own.
-  assert(slice_u8_eq_cstr(slice_u8_from_cstr((char *)"torrent"), "torrent"));
-  assert(slice_u8_is_empty(slice_u8_from_cstr((char *)"")));
+  assert(bytes_eq_cstr(bytes_from_cstr((char *)"torrent"), "torrent"));
+  assert(bytes_is_empty(bytes_from_cstr((char *)"")));
 
   for (usize i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
     const char *const got = error_kind_to_cstr(kinds[i]);
@@ -7392,23 +7387,23 @@ static void test_io_syscall_failures(void) {
     assert(ErrKindNone != err.kind);
   }
 
-  // An empty slice contains nothing, without reading through a null pointer.
-  assert(!slice_u8_contains_byte(slice_u8_make(NULL, 0), 'x'));
+  // An empty `Bytes` contains nothing, without reading through a null pointer.
+  assert(!bytes_contains_byte(bytes_make(NULL, 0), 'x'));
 
   // Mapping for writing takes the other protection branch. The file is still
   // opened read only and the mapping is private, so the bytes on disk are
   // safe either way.
   {
     char buf[256] = {0};
-    const Slice_u8 path = test_tmp_path(buf, sizeof(buf), "map_write");
+    const Bytes path = test_tmp_path(buf, sizeof(buf), "map_write");
     const u8 payload[] = {'a', 'b', 'c'};
 
     assert(ErrKindNone ==
            io_write_all_to_file_blocking(
-               io, path, slice_u8_make((u8 *)payload, sizeof(payload)))
+               io, path, bytes_make((u8 *)payload, sizeof(payload)))
                .kind);
 
-    Slice_u8 got = {0};
+    Bytes got = {0};
     assert(ErrKindNone ==
            io_map_file_blocking(io, path, FileOpenOptionsWriteOnly, &got).kind);
     assert(sizeof(payload) == got.len);
@@ -7422,8 +7417,8 @@ static void test_io_syscall_failures(void) {
 // trips which is not the point, only that every one reports instead of
 // aborting or half building something.
 static void test_torrent_make_dicts_oom(void) {
-  const Slice_u8 name = test_slice("payload.bin");
-  const Slice_u8 announce = test_slice("http://localhost:12345");
+  const Bytes name = bytes_from_cstr("payload.bin");
+  const Bytes announce = bytes_from_cstr("http://localhost:12345");
 
   Arena data_arena = test_arena(2 * MiB);
   // More than one 256 KiB piece, so there is a piece layer to allocate and
@@ -7434,12 +7429,12 @@ static void test_torrent_make_dicts_oom(void) {
   for (usize i = 0; i < data_len; i++) {
     bytes[i] = (u8)(i * 31);
   }
-  const Slice_u8 file_data = slice_u8_make(bytes, data_len);
+  const Bytes file_data = bytes_make(bytes, data_len);
 
   // One run with room to spare, to build what the metainfo builder needs.
   Arena big = test_arena(1 * MiB);
   BencodeValue info_dict = {0};
-  Slice_u8 pieces_root = {0};
+  Bytes pieces_root = {0};
   PieceHash *piece_hashes = NULL;
   usize piece_hashes_count = 0;
   assert(ErrKindNone == torrent_make_info_dict_v2(name, TORRENT_BLOCK_SIZE * 16,
@@ -7453,7 +7448,7 @@ static void test_torrent_make_dicts_oom(void) {
   for (usize cap = 64; cap < 6 * KiB; cap += 64) {
     Arena arena = test_arena(cap);
     BencodeValue dict = {0};
-    Slice_u8 root = {0};
+    Bytes root = {0};
     PieceHash *hashes = NULL;
     usize hashes_count = 0;
 
@@ -7575,11 +7570,11 @@ static TestIoPerformResult test_file_perform(TestIo *test_io,
       return TestIoPerformDone;
     }
 
-    const Slice_u8 data = completion->action.v.write.data;
+    const Bytes data = completion->action.v.write.data;
     const usize chunk = (0 != c->write_chunk && c->write_chunk < data.len)
                             ? c->write_chunk
                             : data.len;
-    *dst_err = unix_write(fd, slice_u8_take(data, chunk), dst_res);
+    *dst_err = unix_write(fd, bytes_take(data, chunk), dst_res);
     return TestIoPerformDone;
   }
 
@@ -7605,16 +7600,16 @@ static void test_io_composites_mocked(void) {
   const Env *const env = env_platform_make();
 
   char buf[256] = {0};
-  const Slice_u8 path = test_tmp_path(buf, sizeof(buf), "composites");
+  const Bytes path = test_tmp_path(buf, sizeof(buf), "composites");
   const u8 payload[] = {'d', '3', ':', 'a', 'b', 'c', 0x00, 'e'};
-  const Slice_u8 data = slice_u8_make((u8 *)payload, sizeof(payload));
+  const Bytes data = bytes_make((u8 *)payload, sizeof(payload));
 
   // A failed `open` stops `map_file` before anything else is tried.
   {
     TestFileCtx ctx = {.open_fails_with = ErrKindTooManyFiles};
     TestIo test_io = {0};
     test_io_make(&test_io, env, test_file_perform, &ctx);
-    Slice_u8 got = {0};
+    Bytes got = {0};
 
     assert(ErrKindTooManyFiles == io_map_file_blocking(&test_io.io, path,
                                                        FileOpenOptionsReadOnly,
@@ -7624,7 +7619,7 @@ static void test_io_composites_mocked(void) {
     assert(0 == ctx.file_size_calls);
     // Nothing was opened, so nothing is closed.
     assert(0 == ctx.close_calls);
-    assert(slice_u8_is_empty(got));
+    assert(bytes_is_empty(got));
   }
 
   // The same for `write_all_to_file`.
@@ -7657,14 +7652,14 @@ static void test_io_composites_mocked(void) {
     TestFileCtx ctx = {.file_size_fails_with = ErrKindRange};
     TestIo test_io = {0};
     test_io_make(&test_io, env, test_file_perform, &ctx);
-    Slice_u8 got = {0};
+    Bytes got = {0};
 
     assert(ErrKindRange == io_map_file_blocking(&test_io.io, path,
                                                 FileOpenOptionsReadOnly, &got)
                                .kind);
     assert(1 == ctx.file_size_calls);
     assert(1 == ctx.close_calls);
-    assert(slice_u8_is_empty(got));
+    assert(bytes_is_empty(got));
   }
 
   // A short write keeps its place and submits the rest, again and again until
@@ -7678,7 +7673,7 @@ static void test_io_composites_mocked(void) {
            io_write_all_to_file_blocking(&test_io.io, path, data).kind);
     assert(sizeof(payload) == ctx.write_calls);
 
-    Slice_u8 got = {0};
+    Bytes got = {0};
     assert(
         ErrKindNone ==
         io_map_file_blocking(real, path, FileOpenOptionsReadOnly, &got).kind);
@@ -7698,7 +7693,7 @@ static void test_io_composites_mocked(void) {
     // Four chunks of two, plus the interrupted call that carried nothing.
     assert(5 == ctx.write_calls);
 
-    Slice_u8 got = {0};
+    Bytes got = {0};
     assert(
         ErrKindNone ==
         io_map_file_blocking(real, path, FileOpenOptionsReadOnly, &got).kind);
@@ -7739,7 +7734,7 @@ static void test_io_composites_mocked(void) {
     test_io_make(&test_io, env, test_file_perform, &ctx);
     test_io.submit_fails_for = IoActionKindFileSize;
     test_io.submit_fails_with = ErrKindAgain;
-    Slice_u8 got = {0};
+    Bytes got = {0};
 
     assert(ErrKindAgain == io_map_file_blocking(&test_io.io, path,
                                                 FileOpenOptionsReadOnly, &got)
@@ -7749,7 +7744,7 @@ static void test_io_composites_mocked(void) {
     assert(1 == ctx.open_calls);
     assert(0 == ctx.file_size_calls);
     assert(1 == ctx.close_calls);
-    assert(slice_u8_is_empty(got));
+    assert(bytes_is_empty(got));
   }
 
   assert(ErrKindNone == test_remove_file(real, path).kind);
@@ -7790,22 +7785,22 @@ static void test(const char *filter) {
       {"io_file_round_trip", test_io_file_round_trip},
       {"torrent_gen_torrent_file_data_oom",
        test_torrent_gen_torrent_file_data_oom},
-      {"slice_u8", test_slice_u8},
-      {"slice_u8_consume_u32_be", test_slice_u8_consume_u32_be},
-      {"slice_u8_consume_u8", test_slice_u8_consume_u8},
+      {"bytes", test_bytes},
+      {"bytes_consume_u32_be", test_bytes_consume_u32_be},
+      {"bytes_consume_u8", test_bytes_consume_u8},
       {"path_last_component", test_path_last_component},
       {"path_get_ext", test_path_get_ext},
       {"path_with_ext", test_path_with_ext},
       {"ascii_num_parse", test_ascii_num_parse},
       {"bencode_parse_num", test_bencode_parse_num},
-      {"bencode_parse_string", test_bencode_parse_string},
+      {"bencode_parse_bytes", test_bencode_parse_bytes},
       {"bencode_parse", test_bencode_parse},
       {"bencode_parse_binary", test_bencode_parse_binary},
       {"bencode_parse_dict_keys", test_bencode_parse_dict_keys},
       {"bencode_parse_deep_dicts", test_bencode_parse_deep_dicts},
-      {"slice_u8_cmp", test_slice_u8_cmp},
-      {"slice_u8_find_slice", test_slice_u8_find_slice},
-      {"slice_u8_split", test_slice_u8_split},
+      {"bytes_cmp", test_bytes_cmp},
+      {"bytes_find", test_bytes_find},
+      {"bytes_split", test_bytes_split},
       {"bencode_validate_dict", test_bencode_validate_dict},
       {"sha256_vectors", test_sha256_vectors},
       {"sha256_million_a", test_sha256_million_a},
@@ -7833,12 +7828,12 @@ static void test(const char *filter) {
       {"torrent_make_udp_broadcast_message",
        test_torrent_make_udp_broadcast_message},
       {"torrent_check_handshake", test_torrent_check_handshake},
-      {"sb_make", test_sb_make},
-      {"sb_extend_within_cap", test_sb_extend_within_cap},
-      {"sb_append_usize_within_cap", test_sb_append_usize_within_cap},
-      {"sb_build", test_sb_build},
+      {"bytes_buffer_make", test_sb_make},
+      {"bytes_buffer_extend_within_cap", test_sb_extend_within_cap},
+      {"bytes_buffer_append_usize_within_cap", test_sb_append_usize_within_cap},
+      {"bytes_buffer_build", test_sb_build},
       {"bencode_encode_leaves", test_bencode_encode_leaves},
-      {"bencode_encode_binary_string", test_bencode_encode_binary_string},
+      {"bencode_encode_non_ascii_bytes", test_bencode_encode_non_ascii_bytes},
       {"bencode_encode_containers", test_bencode_encode_containers},
       {"bencode_encode_wide_dict", test_bencode_encode_wide_dict},
       {"bencode_encode_round_trip", test_bencode_encode_round_trip},

@@ -23,7 +23,7 @@ int main(i32 argc, char *argv[]) {
   assert(argv);
 
   const Env *const env = env_platform_make();
-  const Logger logger = logger_make(LogLevelAll, slice_u8_from_cstr("[main]"));
+  const Logger logger = logger_make(LogLevelAll, bytes_from_cstr("[main]"));
 
   const char *const cmd = argc >= 2 ? argv[1] : "";
   const usize arena_cap = 32 * MiB;
@@ -73,8 +73,8 @@ int main(i32 argc, char *argv[]) {
       return 1;
     }
 
-    const Slice_u8 file_path = {.data = (u8 *)argv[2], .len = strlen(argv[2])};
-    Slice_u8 input = {0};
+    const Bytes file_path = {.data = (u8 *)argv[2], .len = strlen(argv[2])};
+    Bytes input = {0};
 
     err = io_map_file_blocking(io, file_path, FileOpenOptionsReadOnly, &input);
     if (ErrKindNone != err.kind) {
@@ -83,10 +83,10 @@ int main(i32 argc, char *argv[]) {
     }
 
     u8 announce_url_cstr[] = "http://localhost:12345";
-    Slice_u8 announce_url =
-        slice_u8_make(announce_url_cstr, sizeof(announce_url_cstr) - 1);
+    Bytes announce_url =
+        bytes_make(announce_url_cstr, sizeof(announce_url_cstr) - 1);
 
-    Slice_u8 torrent_file_data = {0};
+    Bytes torrent_file_data = {0};
     u8 info_hash[SHA256_DIGEST_LENGTH] = {0};
     err = torrent_gen_torrent_file_data(file_path, input, announce_url,
                                         &torrent_file_data, info_hash, scratch,
@@ -96,8 +96,8 @@ int main(i32 argc, char *argv[]) {
       return 1;
     }
 
-    Slice_u8 torrent_file_path = {0};
-    err = path_with_ext(file_path, slice_u8_from_cstr((char *)"torrent"),
+    Bytes torrent_file_path = {0};
+    err = path_with_ext(file_path, bytes_from_cstr((char *)"torrent"),
                         PATH_SEPARATOR_UNIX, &torrent_file_path, &arena);
     if (ErrKindNone != err.kind) {
       log_err(&logger, "failed to compute the torrent path", err);
@@ -115,15 +115,15 @@ int main(i32 argc, char *argv[]) {
       fprintf(stderr, "missing argument\n");
       return 1;
     }
-    const Slice_u8 file_path = slice_u8_from_cstr(argv[2]);
+    const Bytes file_path = bytes_from_cstr(argv[2]);
 
-    const Slice_u8 file_ext = path_get_ext(file_path, PATH_SEPARATOR_UNIX);
-    if (!slice_u8_eq_cstr(file_ext, ".torrent")) {
+    const Bytes file_ext = path_get_ext(file_path, PATH_SEPARATOR_UNIX);
+    if (!bytes_eq_cstr(file_ext, ".torrent")) {
       fprintf(stderr, "provided file is not a .torrent file: %s\n", argv[2]);
       return 1;
     }
 
-    Slice_u8 input = {0};
+    Bytes input = {0};
 
     err = io_map_file_blocking(io, file_path, FileOpenOptionsReadOnly, &input);
     if (ErrKindNone != err.kind) {
@@ -147,7 +147,7 @@ int main(i32 argc, char *argv[]) {
       return 1;
     }
     // TODO: More validation on `metainfo_dict`.
-    Slice_u8 info_hash_hex_trunc_slice = {0};
+    Bytes info_hash_hex_trunc_bytes = {0};
     u8 info_hash_hex_trunc[40] = {0};
 
     const BencodeValue *const info_dict =
@@ -163,7 +163,7 @@ int main(i32 argc, char *argv[]) {
       return 1;
     }
 
-    Slice_u8 info_encoded = {0};
+    Bytes info_encoded = {0};
     err = bencode_encode(*info_dict, &info_encoded, &scratch);
     if (ErrKindNone != err.kind) {
       log_err(&logger, "failed to encode info", err);
@@ -175,9 +175,9 @@ int main(i32 argc, char *argv[]) {
 
     sha256_encode_hex_trunc(info_hash, info_hash_hex_trunc);
 
-    info_hash_hex_trunc_slice = (Slice_u8){.data = info_hash_hex_trunc,
-                                           .len = sizeof(info_hash_hex_trunc)};
-    fwrite(info_hash_hex_trunc_slice.data, 1, info_hash_hex_trunc_slice.len,
+    info_hash_hex_trunc_bytes = (Bytes){.data = info_hash_hex_trunc,
+                                        .len = sizeof(info_hash_hex_trunc)};
+    fwrite(info_hash_hex_trunc_bytes.data, 1, info_hash_hex_trunc_bytes.len,
            stdout);
     puts("");
 
@@ -192,10 +192,10 @@ int main(i32 argc, char *argv[]) {
 
     const usize peer_port = 12345;
 
-    Slice_u8 udp_msg = {0};
+    Bytes udp_msg = {0};
     err = torrent_make_udp_broadcast_message(
-        slice_u8_from_cstr("239.192.152.143:6771"), peer_port,
-        info_hash_hex_trunc_slice, &arena, &udp_msg);
+        bytes_from_cstr("239.192.152.143:6771"), peer_port,
+        info_hash_hex_trunc_bytes, &arena, &udp_msg);
     if (ErrKindNone != err.kind) {
       log_err(&logger, "failed to craft UDP multicast message", err);
       return 1;
@@ -227,12 +227,12 @@ int main(i32 argc, char *argv[]) {
     }
 
     const Ipv4Addr listen_addr = {.port = peer_port, .ip = 0};
-    // The raw truncated digest, not `info_hash_hex_trunc_slice`: LSD announces
+    // The raw truncated digest, not `info_hash_hex_trunc_bytes`: LSD announces
     // the info hash as 40 hex characters, but a peer handshake carries the 20
     // bytes those characters spell. `info_hash` outlives the event loop below,
-    // so the slice onto it stays good for as long as any connection does.
+    // so the `Bytes` onto it stays good for as long as any connection does.
     TorrentNetworkCtx ctx = {
-        .info_hash = slice_u8_make(info_hash, TORRENT_INFO_HASH_LEN),
+        .info_hash = bytes_make(info_hash, TORRENT_INFO_HASH_LEN),
         .log_level_mask = LogLevelError | LogLevelInfo | LogLevelDebug,
     };
     IoServer server = {0};

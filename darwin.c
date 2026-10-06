@@ -280,7 +280,7 @@ __attribute__((warn_unused_result)) static Error darwin_run_for_ns(IO *io,
 // say reaches the callback.
 
 __attribute__((warn_unused_result)) static Error
-darwin_open(IO *io, IoCompletion *completion, Slice_u8 path,
+darwin_open(IO *io, IoCompletion *completion, Bytes path,
             FileOpenOptions options, IoCallback cb) {
   assert(io);
   assert(completion);
@@ -306,7 +306,7 @@ darwin_close(IO *io, IoCompletion *completion, i32 fd, IoCallback cb) {
 }
 
 __attribute__((warn_unused_result)) static Error
-darwin_read(IO *io, IoCompletion *completion, i32 fd, Slice_u8 data,
+darwin_read(IO *io, IoCompletion *completion, i32 fd, Bytes data,
             IoCallback cb) {
   assert(io);
   assert(completion);
@@ -321,7 +321,7 @@ darwin_read(IO *io, IoCompletion *completion, i32 fd, Slice_u8 data,
 }
 
 __attribute__((warn_unused_result)) static Error
-darwin_write(IO *io, IoCompletion *completion, i32 fd, Slice_u8 data,
+darwin_write(IO *io, IoCompletion *completion, i32 fd, Bytes data,
              IoCallback cb) {
   assert(io);
   assert(completion);
@@ -365,7 +365,7 @@ darwin_connect(IO *io, IoCompletion *completion, i32 fd, Ipv4Addr addr,
 
 __attribute__((warn_unused_result)) static Error
 darwin_send_to(IO *io, IoCompletion *completion, i32 fd, Ipv4Addr addr,
-               Slice_u8 data, IoCallback cb) {
+               Bytes data, IoCallback cb) {
   assert(io);
   assert(completion);
   assert(cb);
@@ -392,7 +392,7 @@ darwin_file_size(IO *io, IoCompletion *completion, i32 fd, IoCallback cb) {
 }
 
 __attribute__((warn_unused_result)) static Error
-darwin_remove_file(IO *io, IoCompletion *completion, Slice_u8 path,
+darwin_remove_file(IO *io, IoCompletion *completion, Bytes path,
                    IoCallback cb) {
   assert(io);
   assert(completion);

@@ -363,7 +363,7 @@ static void sha256_final(Sha256Ctx *ctx, u8 res[SHA256_DIGEST_LENGTH]) {
   *ctx = (Sha256Ctx){0};
 }
 
-static void sha256_digest(Slice_u8 data, u8 dst[SHA256_DIGEST_LENGTH]) {
+static void sha256_digest(Bytes data, u8 dst[SHA256_DIGEST_LENGTH]) {
   Sha256Ctx sha = {0};
   sha256_init(&sha);
   sha256_update(&sha, data.data, data.len);
