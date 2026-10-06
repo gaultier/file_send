@@ -277,9 +277,18 @@ int main(i32 argc, char *argv[]) {
     printf("mem unused: %zu\n", unused_bytes);
   } else if (0 == strcmp(cmd, "otel")) {
     const Ipv4Addr listen_addr = {0};
-    HttpServer ctx = {
-        .log_level_mask = LogLevelError | LogLevelInfo | LogLevelDebug,
-    };
+    Arena http_arena = {0};
+    assert(ErrKindNone == arena_valloc(env, 16 * MiB, &http_arena).kind);
+
+    HttpServer ctx = {0};
+    {
+      const Error err_init = http_server_init(
+          &ctx, http_arena, 1024, LogLevelError | LogLevelInfo | LogLevelDebug);
+      if (ErrKindNone != err_init.kind) {
+        log_err(&logger, "failed to create the http server", err_init);
+        return 1;
+      }
+    }
     IoServer server = {0};
     Error err_listen = io_listen_and_serve_tcp_ipv4(
         io, &server, &ctx, listen_addr, &logger, otel_on_accept);

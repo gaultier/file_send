@@ -4757,6 +4757,97 @@ static void test_http_parse_headers(void) {
   }
 }
 
+static void test_http_server_pool(void) {
+  // Rounded up to a whole group, and every slot can be taken exactly once.
+  {
+    HttpServer server = {0};
+    assert(ErrKindNone ==
+           http_server_init(&server, test_arena(1 * MiB), 1, LogLevelAll).kind);
+    assert(HTTP_POOL_SLOTS_PER_GROUP == server.pool.slots_len);
+
+    HttpServer two_groups = {0};
+    assert(ErrKindNone == http_server_init(&two_groups, test_arena(1 * MiB),
+                                           HTTP_POOL_SLOTS_PER_GROUP + 1,
+                                           LogLevelAll)
+                              .kind);
+    assert(2 * HTTP_POOL_SLOTS_PER_GROUP == two_groups.pool.slots_len);
+
+    HttpHandler *taken[2 * HTTP_POOL_SLOTS_PER_GROUP] = {0};
+    for (usize i = 0; i < two_groups.pool.slots_len; i++) {
+      taken[i] = http_handler_pool_acquire(&two_groups.pool);
+      assert(taken[i]);
+      // Slots are handed out in order, first group first.
+      assert(&two_groups.pool.slots[i] == taken[i]);
+    }
+    assert(NULL == http_handler_pool_acquire(&two_groups.pool));
+
+    // A slot freed in the second group is found past the full first one.
+    HttpHandler *const last = taken[two_groups.pool.slots_len - 1];
+    http_handler_pool_release(&two_groups.pool, last);
+    assert(last == http_handler_pool_acquire(&two_groups.pool));
+    assert(NULL == http_handler_pool_acquire(&two_groups.pool));
+
+    // A released slot comes back zeroed.
+    taken[0]->socket = 42;
+    http_handler_pool_release(&two_groups.pool, taken[0]);
+    HttpHandler *const again = http_handler_pool_acquire(&two_groups.pool);
+    assert(taken[0] == again);
+    assert(0 == again->socket);
+
+    // A taken slot is set up for one connection.
+    const Ipv4Addr addr = {.ip = 0x7f000001, .port = 8080};
+    http_handler_init(again, &two_groups, addr, 7);
+    assert(7 == again->socket);
+    assert(&two_groups == again->server);
+    assert(again == again->completion_close.ctx);
+    assert(LogLevelAll == again->logger.level_mask);
+    assert(0 == strcmp("[peer 127.0.0.1:8080] ", (char *)again->logger.prefix));
+  }
+
+  // The pool lives in the server's arena, and does not fit in a small one.
+  {
+    HttpServer server = {0};
+    assert(
+        ErrKindOOM ==
+        http_server_init(&server, test_arena(4 * KiB), 1024, LogLevelAll).kind);
+
+    // No room even for the bitset.
+    Arena empty = test_arena(8);
+    empty.start = empty.end;
+    HttpServer occupied_oom = {0};
+    assert(ErrKindOOM == http_server_init(&occupied_oom, empty,
+                                          HTTP_POOL_SLOTS_PER_GROUP,
+                                          LogLevelAll)
+                             .kind);
+
+    // Room for the bitset but not for the slots.
+    HttpServer slots_oom = {0};
+    assert(ErrKindOOM ==
+           http_server_init(
+               &slots_oom,
+               test_arena(sizeof(HttpPoolSlotGroup) + sizeof(HttpHandler)),
+               HTTP_POOL_SLOTS_PER_GROUP, LogLevelAll)
+               .kind);
+  }
+
+  // Exactly enough room: both arrays come out of the arena given.
+  {
+    const usize needed = sizeof(HttpPoolSlotGroup) +
+                         HTTP_POOL_SLOTS_PER_GROUP * sizeof(HttpHandler);
+    Arena arena = test_arena(needed);
+    // Already aligned for both arrays.
+    assert(0 == (usize)arena.start % __alignof__(HttpHandler));
+
+    HttpServer server = {0};
+    assert(ErrKindNone == http_server_init(&server, arena,
+                                           HTTP_POOL_SLOTS_PER_GROUP,
+                                           LogLevelAll)
+                              .kind);
+    assert(server.arena.start == server.arena.end);
+    assert((u8 *)server.pool.occupied == arena.start);
+  }
+}
+
 static void test_bencode_validate_dict(void) {
   const BencodeValue num = {.kind = BencodeKindInteger, .v.num = 42};
 
@@ -8004,6 +8095,7 @@ static void test(const char *filter) {
       {"bytes_split", test_bytes_split},
       {"http_find_headers_end", test_http_find_headers_end},
       {"http_parse_headers", test_http_parse_headers},
+      {"http_server_pool", test_http_server_pool},
       {"bencode_validate_dict", test_bencode_validate_dict},
       {"sha256_vectors", test_sha256_vectors},
       {"sha256_million_a", test_sha256_million_a},

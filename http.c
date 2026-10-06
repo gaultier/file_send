@@ -162,3 +162,161 @@ http_parse_headers(Bytes src, HttpHeader *headers, usize *headers_len,
   assert(0 && "unreachable");
   __builtin_unreachable();
 }
+
+// ---------- Server ----------
+
+typedef u64 HttpPoolSlotGroup;
+
+// Unit is bits. Fixed by the type, not a setting.
+#define HTTP_POOL_SLOTS_PER_GROUP (sizeof(HttpPoolSlotGroup) * 8)
+
+typedef struct HttpServer HttpServer;
+
+typedef struct {
+  Logger logger;
+  i32 socket;
+  Arena arena;
+  IO *io;
+  HttpServer *server;
+  IoCompletion completion_close;
+} HttpHandler;
+
+// Both arrays live in the server's arena.
+typedef struct {
+  // Bitset, `slots_len / HTTP_POOL_SLOTS_PER_GROUP` groups.
+  // Bit `i` of group `g` means: `slots[g * HTTP_POOL_SLOTS_PER_GROUP + i]` is
+  // occupied.
+  HttpPoolSlotGroup *occupied;
+  HttpHandler *slots;
+  // A multiple of `HTTP_POOL_SLOTS_PER_GROUP`.
+  usize slots_len;
+} HttpHandlerPool;
+
+struct HttpServer {
+  u32 log_level_mask;
+  // Owned by the server. The pool is carved out of it.
+  Arena arena;
+  HttpHandlerPool pool;
+};
+
+// `inflight_requests_max` is rounded up to a whole slot group.
+__attribute__((warn_unused_result)) static Error
+http_server_init(HttpServer *server, Arena arena, usize inflight_requests_max,
+                 u32 log_level_mask) {
+  assert(server);
+  assert(inflight_requests_max > 0);
+
+  *server = (HttpServer){.log_level_mask = log_level_mask, .arena = arena};
+
+  const usize slots_len = usize_round_up_multiple_of(inflight_requests_max,
+                                                     HTTP_POOL_SLOTS_PER_GROUP);
+  const usize groups_len = slots_len / HTTP_POOL_SLOTS_PER_GROUP;
+  assert(groups_len > 0);
+  assert(groups_len * HTTP_POOL_SLOTS_PER_GROUP == slots_len);
+
+  HttpPoolSlotGroup *const occupied =
+      arena_alloc(&server->arena, __alignof__(HttpPoolSlotGroup),
+                  sizeof(HttpPoolSlotGroup), groups_len);
+  if (!occupied) {
+    return (Error){.kind = ErrKindOOM};
+  }
+
+  HttpHandler *const slots = arena_alloc(
+      &server->arena, __alignof__(HttpHandler), sizeof(HttpHandler), slots_len);
+  if (!slots) {
+    return (Error){.kind = ErrKindOOM};
+  }
+
+  // The arena does not promise zeroed memory.
+  memset(occupied, 0, groups_len * sizeof(HttpPoolSlotGroup));
+  memset(slots, 0, slots_len * sizeof(HttpHandler));
+
+  server->pool = (HttpHandlerPool){
+      .occupied = occupied,
+      .slots = slots,
+      .slots_len = slots_len,
+  };
+  assert(server->pool.slots_len >= inflight_requests_max);
+
+  return (Error){.kind = ErrKindNone};
+}
+
+__attribute__((warn_unused_result)) static HttpHandler *
+http_handler_pool_acquire(HttpHandlerPool *pool) {
+  assert(pool);
+  assert(pool->occupied);
+  assert(pool->slots);
+  assert(pool->slots_len > 0);
+  assert(0 == pool->slots_len % HTTP_POOL_SLOTS_PER_GROUP);
+
+  const usize groups_len = pool->slots_len / HTTP_POOL_SLOTS_PER_GROUP;
+  for (usize i = 0; i < groups_len; i++) {
+    const HttpPoolSlotGroup slot_group = pool->occupied[i];
+
+    const i32 first_unset_bit = __builtin_ffsll((i64)~slot_group);
+
+    // This group is full; there may be a free slot in a later one.
+    if (0 == first_unset_bit) {
+      continue;
+    }
+
+    const u32 bit_idx = (u32)(first_unset_bit - 1);
+    const HttpPoolSlotGroup mask = 1ULL << bit_idx;
+
+    // The read above is still good: one thread runs the loop, and between that
+    // read and this write there is nothing for it to have been doing but this.
+    assert(0 == (pool->occupied[i] & mask));
+    pool->occupied[i] |= mask;
+
+    const usize slot_idx = i * HTTP_POOL_SLOTS_PER_GROUP + bit_idx;
+    assert(slot_idx < pool->slots_len);
+
+    HttpHandler *res = &pool->slots[slot_idx];
+    assert(0 == res->io);
+    assert(0 == res->socket);
+    return res;
+  }
+
+  return NULL;
+}
+
+static void http_handler_init(HttpHandler *handler, HttpServer *server,
+                              Ipv4Addr addr, i32 socket) {
+  assert(handler);
+
+  char log_prefix[32] = {0};
+  const u32 ip = addr.ip;
+
+  snprintf(log_prefix, sizeof(log_prefix), "[peer %u.%u.%u.%u:%hu] ",
+           ip >> 24 & 0xff, ip >> 16 & 0xff, ip >> 8 & 0xff, ip >> 0 & 0xff,
+           addr.port);
+
+  handler->logger =
+      logger_make(server->log_level_mask, bytes_from_cstr(log_prefix));
+  handler->socket = socket;
+  handler->server = server;
+  handler->completion_close.ctx = handler;
+}
+
+static void http_handler_pool_release(HttpHandlerPool *pool,
+                                      HttpHandler *slot) {
+  assert(pool);
+  assert(slot);
+
+  assert(slot >= pool->slots);
+  const usize slot_idx = (usize)(slot - pool->slots);
+  assert(slot_idx < pool->slots_len);
+
+  const usize slot_group_idx = slot_idx / HTTP_POOL_SLOTS_PER_GROUP;
+  assert(slot_group_idx < pool->slots_len / HTTP_POOL_SLOTS_PER_GROUP);
+  const u32 bit_idx = slot_idx % HTTP_POOL_SLOTS_PER_GROUP;
+
+  // We are still the owner so we are responsible for zeroing it.
+  memset(slot, 0, sizeof(*slot));
+
+  const HttpPoolSlotGroup mask = 1ULL << bit_idx;
+
+  // Sanity check against double release of the same slot: it was occupied.
+  assert(0 != (pool->occupied[slot_group_idx] & mask));
+  pool->occupied[slot_group_idx] &= ~mask;
+}
