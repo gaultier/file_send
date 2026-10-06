@@ -1698,3 +1698,23 @@ sb_append_usize_within_cap(StringBuffer *sb, usize n) {
 
   return true;
 }
+
+typedef struct {
+  usize idx;
+  bool found;
+} Find;
+
+__attribute__((warn_unused_result)) static Find
+slice_u8_find_slice(Slice_u8 haystack, Slice_u8 needle) {
+  if (needle.len > haystack.len) {
+    return (Find){0};
+  }
+
+  for (usize i = 0; i < haystack.len - needle.len; i++) {
+    if (0 == memcmp(&haystack[i], &needle[i], needle.len)) {
+      return (Find){.found = true, .idx = i};
+    }
+  }
+
+  return (Find){0};
+}
