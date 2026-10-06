@@ -4478,6 +4478,92 @@ static void test_slice_u8_find_slice(void) {
   }
 }
 
+// Expected pieces come from Go's `strings.Split`.
+static void test_slice_u8_split(void) {
+  const struct {
+    const char *haystack;
+    const char *needle;
+    usize pieces_len;
+    const char *pieces[4];
+  } cases[] = {
+      {"", ",", 1, {""}},
+      {"abcd", "z", 1, {"abcd"}},
+      {"abc", "abcd", 1, {"abc"}},
+      {"abcd", "a", 2, {"", "bcd"}},
+      {"abcd", "d", 2, {"abc", ""}},
+      {"abcd", "bc", 2, {"a", "d"}},
+      {"abcd", "abcd", 2, {"", ""}},
+      {",", ",", 2, {"", ""}},
+      {"1,2,3,4", ",", 4, {"1", "2", "3", "4"}},
+      {"a,,b", ",", 3, {"a", "", "b"}},
+      {",,", ",", 3, {"", "", ""}},
+      // Matches do not overlap.
+      {"aaaa", "aa", 3, {"", "", ""}},
+      {"aaa", "aa", 2, {"", "a"}},
+      {"GET / HTTP/1.1\r\nHost: x\r\n\r\nbody",
+       "\r\n\r\n",
+       2,
+       {"GET / HTTP/1.1\r\nHost: x", "body"}},
+  };
+
+  for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    const Slice_u8 haystack = test_slice(cases[i].haystack);
+    const Slice_u8 needle = test_slice(cases[i].needle);
+
+    Slice_u8 rest = haystack;
+    usize pieces_len = 0;
+    // Each split eats at least one byte, so this bounds the pieces.
+    for (usize j = 0; j <= haystack.len; j++) {
+      const Split split = slice_u8_split(rest, needle);
+
+      assert(pieces_len < cases[i].pieces_len);
+      assert(slice_u8_eq_cstr(split.left, cases[i].pieces[pieces_len]));
+      pieces_len++;
+
+      if (!split.found) {
+        assert(slice_u8_eq(split.left, rest));
+        assert(0 == split.right.len);
+        break;
+      }
+
+      assert(split.left.data == rest.data);
+      assert(split.left.len + needle.len + split.right.len == rest.len);
+      rest = split.right;
+    }
+    assert(cases[i].pieces_len == pieces_len);
+  }
+
+  // Embedded zeroes: `strstr` would stop at the first one.
+  {
+    const u8 haystack_data[] = {'a', 0, 'b', 0, 'c'};
+    const u8 needle_data[] = {0};
+    const Slice_u8 haystack =
+        slice_u8_make((u8 *)haystack_data, sizeof(haystack_data));
+    const Slice_u8 needle =
+        slice_u8_make((u8 *)needle_data, sizeof(needle_data));
+
+    const Split first = slice_u8_split(haystack, needle);
+    assert(first.found);
+    assert(slice_u8_eq_cstr(first.left, "a"));
+    assert(first.right.data == haystack.data + 2);
+    assert(3 == first.right.len);
+
+    const Split second = slice_u8_split(first.right, needle);
+    assert(second.found);
+    assert(slice_u8_eq_cstr(second.left, "b"));
+    assert(slice_u8_eq_cstr(second.right, "c"));
+  }
+
+  // A NULL pointer is legal as long as the length is zero.
+  {
+    const Split split =
+        slice_u8_split(slice_u8_make(NULL, 0), test_slice(","));
+    assert(!split.found);
+    assert(slice_u8_is_empty(split.left));
+    assert(slice_u8_is_empty(split.right));
+  }
+}
+
 static void test_bencode_validate_dict(void) {
   const BencodeValue num = {.kind = BencodeKindInteger, .v.num = 42};
 
@@ -7719,6 +7805,7 @@ static void test(const char *filter) {
       {"bencode_parse_deep_dicts", test_bencode_parse_deep_dicts},
       {"slice_u8_cmp", test_slice_u8_cmp},
       {"slice_u8_find_slice", test_slice_u8_find_slice},
+      {"slice_u8_split", test_slice_u8_split},
       {"bencode_validate_dict", test_bencode_validate_dict},
       {"sha256_vectors", test_sha256_vectors},
       {"sha256_million_a", test_sha256_million_a},

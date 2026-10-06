@@ -1741,34 +1741,40 @@ slice_u8_find_slice(Slice_u8 haystack, Slice_u8 needle, FindOptions options) {
   return (Find){0};
 }
 
+// Like Go's `strings.Cut`: split around the first `needle`. Calling it again on
+// `right` while `found` gives the same pieces as Go's `strings.Split`.
 typedef struct {
   Slice_u8 left;
   Slice_u8 right;
+  bool found;
 } Split;
 
 __attribute__((warn_unused_result)) static Split
 slice_u8_split(Slice_u8 haystack, Slice_u8 needle) {
-  if (0 == haystack.len || 0 == needle.len || needle.len > haystack.len) {
-    return (Split){0};
-  }
+  // Go splits per rune on an empty needle. Bytes have no runes, so it is a bug.
+  assert(needle.len > 0);
+  assert(needle.data);
 
   const Find find =
       slice_u8_find_slice(haystack, needle, FindOptionsIndexAtNeedleStart);
 
   if (!find.found) {
-    return (Split){0};
+    return (Split){.left = haystack};
   }
+
+  assert(find.idx + needle.len <= haystack.len);
 
   const Split res = {
       .left = slice_u8_take(haystack, find.idx),
       .right.data = haystack.data + find.idx + needle.len,
       .right.len = haystack.len - find.idx - needle.len,
+      .found = true,
   };
-  assert(res.left.data);
-  assert(res.right.data);
-  assert(res.left.len < haystack.len);
-  assert(res.right.len < haystack.len);
-  assert(res.left.data + res.left.len < res.right.data);
+  assert(res.left.data == haystack.data);
+  assert(res.left.len + needle.len + res.right.len == haystack.len);
+  assert(res.right.data == res.left.data + res.left.len + needle.len);
+  assert(slice_u8_eq(
+      needle, slice_u8_make(haystack.data + res.left.len, needle.len)));
 
   return res;
 }
