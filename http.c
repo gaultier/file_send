@@ -179,6 +179,10 @@ typedef struct {
   HttpServer *server;
   IoCompletion completion;
   BytesBuffer recv;
+
+  HttpHeader *headers;
+  usize headers_len;
+  usize headers_cap;
 } HttpHandler;
 
 // Both arrays live in the server's arena.
@@ -308,6 +312,10 @@ static void http_handler_init(HttpHandler *handler, HttpServer *server, IO *io,
              .kind);
   assert(ErrKindNone ==
          bytes_buffer_make(8 * KiB, &handler->arena, &handler->recv).kind);
+  handler->headers_cap = 512;
+  handler->headers = arena_alloc(&handler->arena, __alignof__(HttpHeader),
+                                 sizeof(HttpHeader), handler->headers_cap);
+  assert(handler->headers);
 }
 
 static void http_handler_pool_release(HttpHandlerPool *pool,
