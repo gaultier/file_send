@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <limits.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -576,7 +577,7 @@ struct Env {
   Error (*socket)(const Env *env, SocketDomain domain, SocketType type,
                   i32 *fd);
   Error (*listen)(const Env *env, i32 fd, i32 backlog);
-  Error (*tcp_bind_ipv4)(const Env *env, i32 listen_socket, Ipv4Addr addr);
+  Error (*tcp_bind_ipv4)(const Env *env, i32 listen_socket, Ipv4Addr *addr);
   Error (*enable_socket_reuse)(const Env *env, i32 fd);
   Error (*udp_multicast_open_ipv4)(const Env *env, u32 ipv4, i32 *dst_fd);
 
@@ -1218,6 +1219,73 @@ io_write_all_to_file_blocking(IO *io, Bytes path, Bytes data) {
   return ctx.err;
 }
 
+// ---------- Log ----------
+
+typedef enum {
+  LogLevelDebug = 1,
+  LogLevelInfo = 2,
+  LogLevelError = 4,
+  LogLevelAll = LogLevelDebug | LogLevelInfo | LogLevelError,
+} LogLevel;
+
+typedef struct {
+  u32 level_mask;
+  u8 prefix[32];
+} Logger;
+
+__attribute__((warn_unused_result)) static Logger logger_make(u32 level_mask,
+                                                              Bytes prefix) {
+  Logger logger = {.level_mask = level_mask};
+  memcpy(&logger.prefix, prefix.data,
+         prefix.len < sizeof(logger.prefix) ? prefix.len
+                                            : sizeof(logger.prefix));
+
+  return logger;
+}
+
+static void log(const Logger *logger, LogLevel level, const char *fmt, ...)
+    __attribute__((format(printf, 3, 4)));
+
+static void log(const Logger *logger, LogLevel level, const char *fmt, ...) {
+  assert(logger);
+  assert(fmt);
+
+  if (0 == (level & logger->level_mask)) {
+    return;
+  }
+
+  printf("%.*s", (i32)sizeof(logger->prefix), logger->prefix);
+
+  va_list args;
+  va_start(args, fmt);
+  vprintf(fmt, args);
+  va_end(args);
+
+  printf("\n");
+}
+
+static void log_err(const Logger *logger, const char *context, Error err) {
+  assert(context);
+
+  if (0 == err.data) {
+    log(logger, LogLevelError, "%s: %s\n", context,
+        error_kind_to_cstr(err.kind));
+    return;
+  }
+
+  char os_msg[256] = {0};
+
+  if (!platform_error_describe(err.data, os_msg, sizeof(os_msg))) {
+    // The description did not fit or the number is not one the system knows;
+    // the number itself is still worth printing.
+    log(logger, LogLevelError, "%s: %s (errno %" PRIu64 ")\n", context,
+        error_kind_to_cstr(err.kind), err.data);
+    return;
+  }
+
+  log(logger, LogLevelError, "%s: %s (errno %" PRIu64 ": %s)\n", context,
+      error_kind_to_cstr(err.kind), err.data, os_msg);
+}
 // ---------- IO: serving TCP ----------
 
 // `accept_socket` belongs to the callback from the moment it is handed over,
@@ -1338,7 +1406,8 @@ static void io_server_on_accept(IoCompletion *completion, Error err,
 // read `server->err` when `server->done`.
 __attribute__((warn_unused_result)) static Error
 io_listen_and_serve_tcp_ipv4(IO *io, IoServer *server, void *cb_ctx,
-                             Ipv4Addr listen_addr, AcceptCallback on_accept) {
+                             Ipv4Addr listen_addr, u32 log_level_mask,
+                             AcceptCallback on_accept) {
   assert(io);
   assert(server);
   assert(on_accept);
@@ -1374,12 +1443,16 @@ io_listen_and_serve_tcp_ipv4(IO *io, IoServer *server, void *cb_ctx,
     // A port left behind by a previous run is an ordinary answer, not a bug in
     // this process, so it travels back as an `Error`.
     const Error err =
-        env->tcp_bind_ipv4(env, server->listen_socket, listen_addr);
+        env->tcp_bind_ipv4(env, server->listen_socket, &listen_addr);
     if (ErrKindNone != err.kind) {
       io_server_shutdown(server, err);
       return err;
     }
   }
+
+  Logger logger = {.level_mask = log_level_mask};
+  log(&logger, LogLevelInfo, "http server listening on port %hu",
+      listen_addr.port);
 
   {
     const Error err = env->listen(env, server->listen_socket, 1024);

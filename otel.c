@@ -1,7 +1,6 @@
 #pragma once
 
 #include "http.c"
-#include "log.c"
 
 // FIXME
 #define HTTP_INFLIGHT_REQUESTS_MAX (1024)

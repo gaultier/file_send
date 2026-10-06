@@ -1,7 +1,6 @@
 #pragma once
 
 #include "lib.c"
-#include "log.c"
 #include "sha2.c"
 
 // ---------- Bencode ----------
@@ -2322,8 +2321,7 @@ static void torrent_peer_queue_msg_empty(TorrentPeer *peer,
   // The whole message or none of it: half a message on the wire is a length
   // prefix the peer would read the next message as the body of.
   if (TORRENT_PEER_SEND_BUF_CAP - peer->send_len < TORRENT_PEER_MSG_EMPTY_LEN) {
-    log(&peer->logger, LogLevelDebug,
-        "dropped a message: kind=%s send_len=%zu",
+    log(&peer->logger, LogLevelDebug, "dropped a message: kind=%s send_len=%zu",
         torrent_message_kind_to_cstr(kind), peer->send_len);
     return;
   }
@@ -2340,7 +2338,6 @@ static void torrent_peer_queue_msg_empty(TorrentPeer *peer,
   assert(send_len_before + TORRENT_PEER_MSG_EMPTY_LEN == peer->send_len);
   assert(peer->send_len <= TORRENT_PEER_SEND_BUF_CAP);
 }
-
 
 // Hand one event to the peer and carry out whatever it asks for. This is the
 // whole of the bridge's write side: every command turns into bytes in the send

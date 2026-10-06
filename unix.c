@@ -197,7 +197,8 @@ unix_socket(const Env *env, SocketDomain domain, SocketType type, i32 *fd) {
   return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static Error unix_listen(const Env *env, i32 fd, i32 backlog) {
+__attribute__((warn_unused_result)) static Error
+unix_listen(const Env *env, i32 fd, i32 backlog) {
   (void)env;
 
   const i32 ret = listen(fd, backlog);
@@ -260,14 +261,15 @@ unix_open(Bytes path, FileOpenOptions options, i32 *fd) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_tcp_bind_ipv4(const Env *env, i32 listen_socket, Ipv4Addr addr) {
+unix_tcp_bind_ipv4(const Env *env, i32 listen_socket, Ipv4Addr *addr) {
 
   (void)env;
+  assert(addr);
 
   struct sockaddr_in sock_addr_in = {
       .sin_family = AF_INET,
-      .sin_port = htons(addr.port),
-      .sin_addr.s_addr = htonl(addr.ip),
+      .sin_port = htons(addr->port),
+      .sin_addr.s_addr = htonl(addr->ip),
   };
 
   i32 ret = 0;
@@ -280,11 +282,22 @@ unix_tcp_bind_ipv4(const Env *env, i32 listen_socket, Ipv4Addr addr) {
     return unix_error_from_errno(errno);
   }
 
+  socklen_t sock_size = sizeof(sock_addr_in);
+  ret =
+      getsockname(listen_socket, (struct sockaddr *)&sock_addr_in, &sock_size);
+  if (-1 == ret) {
+    return unix_error_from_errno(ret);
+  }
+  addr->ip = sock_addr_in.sin_addr.s_addr;
+  addr->port = sock_addr_in.sin_port;
+  assert(addr->port);
+
   return (Error){.kind = ErrKindNone};
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_accept(i32 listen_socket, i32 *dst_accept_socket, Ipv4Addr *dst_accept_addr) {
+unix_accept(i32 listen_socket, i32 *dst_accept_socket,
+            Ipv4Addr *dst_accept_addr) {
 
   assert(dst_accept_socket);
   assert(dst_accept_addr);
@@ -659,8 +672,8 @@ unix_map_fd(const Env *env, i32 fd, usize size, FileOpenOptions opts,
 
 // Shared by every Unix backend built on readiness -- kqueue on Darwin, epoll on
 // Linux -- because once the multiplexer has said a descriptor is ready, what is
-// left is the same syscall either way. Only the saying differs, and that is what
-// stays in the platform file.
+// left is the same syscall either way. Only the saying differs, and that is
+// what stays in the platform file.
 //
 // A future io_uring backend uses neither of these: there the kernel makes the
 // syscall, so it builds a submission entry out of the same `IoAction` rather
@@ -742,9 +755,8 @@ unix_io_perform(IoCompletion *completion, i32 fd, usize *dst_res) {
     break;
 
   case IoActionKindSendTo:
-    err =
-        unix_udp_send_to_ipv4(fd, completion->action.v.send_to.addr,
-                              completion->action.v.send_to.data, &res);
+    err = unix_udp_send_to_ipv4(fd, completion->action.v.send_to.addr,
+                                completion->action.v.send_to.data, &res);
     break;
 
   case IoActionKindFileSize:
