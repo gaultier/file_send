@@ -43,8 +43,8 @@ static void otel_on_read(IoCompletion *completion, Error err,
     return;
   }
 
-  assert(!__builtin_add_overflow(handler->recv.container.len, read_count,
-                                 &handler->recv.container.len));
+  assert(!__builtin_add_overflow(handler->recv.len, read_count,
+                                 &handler->recv.len));
   log(&handler->logger, LogLevelDebug, "read %zu bytes", read_count);
   fwrite(handler->recv.container.data, 1, handler->recv.len, stdout);
   puts("");
