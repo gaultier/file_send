@@ -62,10 +62,23 @@ static void otel_on_read(IoCompletion *completion, Error read_err,
   }
 
   Bytes headers = bytes_take(recv, find.idx);
-  read_err = http_parse_headers(headers, handler->headers,
-                                &handler->headers_len, handler->headers_cap);
+  HttpRequestStatusLine sl = {0};
+  usize advanced = 0;
+  Error err = http_parse_req_status_line(headers, &sl, &advanced);
+  if (ErrKindNone != err.kind) {
+    log_err(&handler->logger, "failed to parse http status line", err);
+    (void)io->env->close_socket(io->env, handler->socket);
+    return;
+  }
+
+  bytes_advance(&headers, advanced);
+  fwrite(headers.data, 1, headers.len, stdout);
+  puts("");
+
+  err = http_parse_headers(headers, handler->headers, &handler->headers_len,
+                           handler->headers_cap);
   if (ErrKindNone != read_err.kind) {
-    log_err(&handler->logger, "failed to parse http headers", read_err);
+    log_err(&handler->logger, "failed to parse http headers", err);
     (void)io->env->close_socket(io->env, handler->socket);
     return;
   }

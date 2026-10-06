@@ -8,6 +8,27 @@ typedef struct {
   Bytes value;
 } HttpHeader;
 
+typedef enum {
+  HTTP_METHOD_UNKNOWN,
+  HTTP_METHOD_OPTIONS,
+  HTTP_METHOD_GET,
+  HTTP_METHOD_HEAD,
+  HTTP_METHOD_POST,
+  HTTP_METHOD_PUT,
+  HTTP_METHOD_DELETE,
+  HTTP_METHOD_TRACE,
+  HTTP_METHOD_CONNECT,
+  HTTP_METHOD_EXTENSION,
+} HttpMethod;
+
+// `GET /en-US/docs/Web/HTTP/Messages HTTP/1.1`.
+typedef struct {
+  HttpMethod method;
+  u8 version_minor;
+  u8 version_major;
+  Bytes url; // Does not have a scheme, domain, port.
+} HttpRequestStatusLine;
+
 __attribute__((warn_unused_result)) static Find
 http_find_headers_end(Bytes haystack) {
   return bytes_find(haystack, bytes_from_cstr("\r\n\r\n"),
@@ -339,4 +360,63 @@ static void http_handler_pool_release(HttpHandlerPool *pool,
   // Sanity check against double release of the same slot: it was occupied.
   assert(0 != (pool->occupied[slot_group_idx] & mask));
   pool->occupied[slot_group_idx] &= ~mask;
+}
+
+__attribute__((warn_unused_result)) static Error
+http_parse_req_status_line(Bytes src, HttpRequestStatusLine *res,
+                           usize *advanced) {
+  assert(res);
+  assert(advanced);
+  if (!src.len) {
+    return (Error){0};
+  }
+
+  assert(src.data);
+
+  Bytes remaining = src;
+
+  Split split = bytes_split(remaining, bytes_from_cstr(" "));
+  if (!split.found) {
+    return (Error){.kind = ErrKindInvalidData};
+  }
+
+  // const Bytes method = split.left;
+  //  FIXME
+  res->method = HTTP_METHOD_GET;
+
+  remaining = split.right;
+  split = bytes_split(remaining, bytes_from_cstr(" "));
+  if (!split.found) {
+    return (Error){.kind = ErrKindInvalidData};
+  }
+  if (0 == split.left.len) {
+    return (Error){.kind = ErrKindInvalidData};
+  }
+  res->url = split.left;
+
+  remaining = split.right;
+  split = bytes_split(remaining, bytes_from_cstr("\r\n"));
+  if (!split.found) {
+    return (Error){.kind = ErrKindInvalidData};
+  }
+  if (0 == split.left.len) {
+    return (Error){.kind = ErrKindInvalidData};
+  }
+
+  remaining = split.right;
+
+  const Bytes http_version = split.left;
+  split = bytes_split(http_version, bytes_from_cstr("/"));
+  if (!split.found) {
+    return (Error){.kind = ErrKindInvalidData};
+  }
+  if (!bytes_eq_cstr(split.left, "HTTP")) {
+    return (Error){.kind = ErrKindInvalidData};
+  }
+  // FIXME
+  res->version_major = 1;
+  res->version_minor = 1;
+
+  *advanced = src.len - remaining.len;
+  return (Error){0};
 }
