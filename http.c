@@ -185,11 +185,6 @@ http_parse_headers(Bytes src, HttpHeader *headers, usize *headers_len,
 
 // ---------- Server ----------
 
-typedef u64 HttpPoolSlotGroup;
-
-// Unit is bits. Fixed by the type, not a setting.
-#define HTTP_POOL_SLOTS_PER_GROUP (sizeof(HttpPoolSlotGroup) * 8)
-
 typedef struct HttpServer HttpServer;
 
 typedef struct {
@@ -216,9 +211,8 @@ struct HttpServer {
   Pool memory_blocks_pool;
 };
 
-#define HTTP_HANDLER_ARENA_SIZE 20 * KiB
+#define HTTP_HANDLER_ARENA_SIZE (20 * KiB)
 
-// `inflight_requests_max` is rounded up to a whole slot group.
 __attribute__((warn_unused_result)) static Error
 http_server_init(HttpServer *server, Arena arena, usize inflight_requests_max,
                  u32 log_level_mask, const Env *env) {
@@ -229,29 +223,6 @@ http_server_init(HttpServer *server, Arena arena, usize inflight_requests_max,
       .logger = logger_make(log_level_mask, (Bytes){0}),
       .env = env,
   };
-
-  const usize slots_len = usize_round_up_multiple_of(inflight_requests_max,
-                                                     HTTP_POOL_SLOTS_PER_GROUP);
-  const usize groups_len = slots_len / HTTP_POOL_SLOTS_PER_GROUP;
-  assert(groups_len > 0);
-  assert(groups_len * HTTP_POOL_SLOTS_PER_GROUP == slots_len);
-
-  HttpPoolSlotGroup *const occupied =
-      arena_alloc(&arena, __alignof__(HttpPoolSlotGroup),
-                  sizeof(HttpPoolSlotGroup), groups_len);
-  if (!occupied) {
-    return (Error){.kind = ErrKindOOM};
-  }
-
-  HttpHandler *const slots = arena_alloc(&arena, __alignof__(HttpHandler),
-                                         sizeof(HttpHandler), slots_len);
-  if (!slots) {
-    return (Error){.kind = ErrKindOOM};
-  }
-
-  // The arena does not promise zeroed memory.
-  memset(occupied, 0, groups_len * sizeof(HttpPoolSlotGroup));
-  memset(slots, 0, slots_len * sizeof(HttpHandler));
 
   Error err = pool_make(&server->handler_pool, &arena, sizeof(HttpHandler),
                         inflight_requests_max);
@@ -287,8 +258,7 @@ static void http_handler_init(HttpHandler *handler, HttpServer *server, IO *io,
   handler->completion.ctx = handler;
   u8 *const handler_memory = pool_acquire(&server->memory_blocks_pool);
   assert(handler_memory);
-  handler->arena.start = handler_memory;
-  handler->arena.end = handler_memory + HTTP_HANDLER_ARENA_SIZE;
+  handler->arena = arena_from_mem(handler_memory, HTTP_HANDLER_ARENA_SIZE);
 
   assert(ErrKindNone ==
          bytes_buffer_make(8 * KiB, &handler->arena, &handler->recv).kind);

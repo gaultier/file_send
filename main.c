@@ -271,10 +271,6 @@ int main(i32 argc, char *argv[]) {
       return 1;
     }
 
-    const usize unused_bytes = (usize)arena.end - (usize)arena.start;
-    const usize used_bytes = arena_cap - unused_bytes;
-    printf("mem used: %zu\n", used_bytes);
-    printf("mem unused: %zu\n", unused_bytes);
   } else if (0 == strcmp(cmd, "otel")) {
     const Ipv4Addr listen_addr = {.port = 8081};
     Arena http_arena = {0};
@@ -316,11 +312,6 @@ int main(i32 argc, char *argv[]) {
       log_err(&logger, "the listener stopped", server.err);
       return 1;
     }
-
-    const usize unused_bytes = (usize)arena.end - (usize)arena.start;
-    const usize used_bytes = arena_cap - unused_bytes;
-    printf("mem used: %zu\n", used_bytes);
-    printf("mem unused: %zu\n", unused_bytes);
   } else {
     fprintf(stderr, "unknown command: %s\n", cmd);
     exit(1);

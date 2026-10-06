@@ -17,6 +17,7 @@ static void http_handler_on_close(IoCompletion *completion, Error err,
   log(&handler->logger, LogLevelInfo, "closed");
 
   pool_release(&handler->server->handler_pool, handler);
+  pool_release(&handler->server->memory_blocks_pool, handler->arena.start);
 }
 
 static void otel_on_write(IoCompletion *completion, Error write_err,
