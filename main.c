@@ -12,8 +12,8 @@
 #include "win32.c"
 #endif
 
-#include "http.c"
 #include "log.c"
+#include "otel.c"
 #include "torrent.c"
 
 #ifdef WITH_TESTS
@@ -259,6 +259,42 @@ int main(i32 argc, char *argv[]) {
       const u64 earliest = torrent_peers_deadlines_run(&ctx, io, now_ns);
 
       err_run = io->run_for_ns(io, torrent_peers_wait_ns(earliest, now_ns));
+      if (ErrKindNone != err_run.kind) {
+        break;
+      }
+    }
+    if (ErrKindNone != err_run.kind) {
+      log_err(&logger, "the event loop stopped", err_run);
+      return 1;
+    }
+    if (ErrKindNone != server.err.kind) {
+      log_err(&logger, "the listener stopped", server.err);
+      return 1;
+    }
+
+    const usize unused_bytes = (usize)arena.end - (usize)arena.start;
+    const usize used_bytes = arena_cap - unused_bytes;
+    printf("mem used: %zu\n", used_bytes);
+    printf("mem unused: %zu\n", unused_bytes);
+  } else if (0 == strcmp(cmd, "otel")) {
+    const Ipv4Addr listen_addr = {0};
+    HttpServer ctx = {
+        .log_level_mask = LogLevelError | LogLevelInfo | LogLevelDebug,
+    };
+    IoServer server = {0};
+    Error err_listen = io_listen_and_serve_tcp_ipv4(
+        io, &server, &ctx, listen_addr, otel_on_accept);
+    if (ErrKindNone != err_listen.kind) {
+      log_err(&logger, "failed to listen and serve", err_listen);
+      return 1;
+    }
+
+    Error err_run = {.kind = ErrKindNone};
+    while (!server.done) {
+      // const u64 now_ns = io->monotonic_ns(io);
+      // const u64 earliest = http_server_deadlines_run(&ctx, io, now_ns);
+
+      err_run = io->run_for_ns(io, 1000 * 1000 * 1000 /* FIXME */);
       if (ErrKindNone != err_run.kind) {
         break;
       }
