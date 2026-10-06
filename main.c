@@ -278,7 +278,7 @@ int main(i32 argc, char *argv[]) {
   } else if (0 == strcmp(cmd, "otel")) {
     const Ipv4Addr listen_addr = {.port = 8081};
     Arena http_arena = {0};
-    assert(ErrKindNone == arena_valloc(env, 16 * MiB, &http_arena).kind);
+    assert(ErrKindNone == arena_valloc(env, 24 * MiB, &http_arena).kind);
 
     HttpServer ctx = {0};
     {

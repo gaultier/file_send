@@ -210,11 +210,13 @@ typedef struct {
 
 struct HttpServer {
   Logger logger;
-  // Owned by the server. The pool is carved out of it.
-  Arena arena;
-  Pool handler_pool;
   const Env *env;
+
+  Pool handler_pool;
+  Pool memory_blocks_pool;
 };
+
+#define HTTP_HANDLER_ARENA_SIZE 20 * KiB
 
 // `inflight_requests_max` is rounded up to a whole slot group.
 __attribute__((warn_unused_result)) static Error
@@ -225,7 +227,6 @@ http_server_init(HttpServer *server, Arena arena, usize inflight_requests_max,
 
   *server = (HttpServer){
       .logger = logger_make(log_level_mask, (Bytes){0}),
-      .arena = arena,
       .env = env,
   };
 
@@ -236,14 +237,14 @@ http_server_init(HttpServer *server, Arena arena, usize inflight_requests_max,
   assert(groups_len * HTTP_POOL_SLOTS_PER_GROUP == slots_len);
 
   HttpPoolSlotGroup *const occupied =
-      arena_alloc(&server->arena, __alignof__(HttpPoolSlotGroup),
+      arena_alloc(&arena, __alignof__(HttpPoolSlotGroup),
                   sizeof(HttpPoolSlotGroup), groups_len);
   if (!occupied) {
     return (Error){.kind = ErrKindOOM};
   }
 
-  HttpHandler *const slots = arena_alloc(
-      &server->arena, __alignof__(HttpHandler), sizeof(HttpHandler), slots_len);
+  HttpHandler *const slots = arena_alloc(&arena, __alignof__(HttpHandler),
+                                         sizeof(HttpHandler), slots_len);
   if (!slots) {
     return (Error){.kind = ErrKindOOM};
   }
@@ -252,8 +253,14 @@ http_server_init(HttpServer *server, Arena arena, usize inflight_requests_max,
   memset(occupied, 0, groups_len * sizeof(HttpPoolSlotGroup));
   memset(slots, 0, slots_len * sizeof(HttpHandler));
 
-  Error err =
-      pool_make(&server->handler_pool, &arena, sizeof(HttpHandler), 1 << 14);
+  Error err = pool_make(&server->handler_pool, &arena, sizeof(HttpHandler),
+                        inflight_requests_max);
+  if (ErrKindNone != err.kind) {
+    return err;
+  }
+
+  err = pool_make(&server->memory_blocks_pool, &arena, HTTP_HANDLER_ARENA_SIZE,
+                  inflight_requests_max);
   if (ErrKindNone != err.kind) {
     return err;
   }
@@ -278,13 +285,14 @@ static void http_handler_init(HttpHandler *handler, HttpServer *server, IO *io,
   handler->server = server;
   handler->io = io;
   handler->completion.ctx = handler;
-  // FIXME: Pools.
-  assert(ErrKindNone ==
-         arena_valloc(server->env, 1 * MiB /* TODO: Revisit */, &handler->arena)
-             .kind);
+  u8 *const handler_memory = pool_acquire(&server->memory_blocks_pool);
+  assert(handler_memory);
+  handler->arena.start = handler_memory;
+  handler->arena.end = handler_memory + HTTP_HANDLER_ARENA_SIZE;
+
   assert(ErrKindNone ==
          bytes_buffer_make(8 * KiB, &handler->arena, &handler->recv).kind);
-  handler->headers_cap = 512;
+  handler->headers_cap = 128;
   handler->headers = arena_alloc(&handler->arena, __alignof__(HttpHeader),
                                  sizeof(HttpHeader), handler->headers_cap);
   assert(handler->headers);
