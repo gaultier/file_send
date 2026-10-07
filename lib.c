@@ -2034,6 +2034,7 @@ varint_read(Bytes src, u64 *dst, usize *advanced) {
   return (Error){.kind = ErrKindInvalidData};
 }
 
+// https://protobuf.dev/programming-guides/encoding/
 __attribute__((warn_unused_result)) static Error tlv_read(Bytes src, Tlv *dst,
                                                           usize *dst_advanced) {
   assert(dst);
