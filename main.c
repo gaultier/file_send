@@ -272,7 +272,14 @@ int main(i32 argc, char *argv[]) {
     }
 
   } else if (0 == strcmp(cmd, "otel")) {
-    const Ipv4Addr listen_addr = {.port = 8081};
+    if (3 != argc) {
+      fprintf(stderr, "missing argument\n");
+      return 1;
+    }
+    const char *const port_s = argv[2];
+    char *port_end = NULL;
+    const usize port = strtoull(port_s, &port_end, 10);
+    const Ipv4Addr listen_addr = {.port = (u16)port};
     Arena http_arena = {0};
     assert(ErrKindNone == arena_valloc(env, 24 * MiB, &http_arena).kind);
 
