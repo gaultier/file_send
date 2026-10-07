@@ -203,7 +203,8 @@ otel_parse_protobuf_string(Bytes input, const Logger *logger, Arena *arena,
     return (Error){.kind = ErrKindInvalidData};
   }
 
-  fprintf(stdout, "key=%.*s\n", (i32)tlv.value.len, tlv.value.data);
+  fprintf(stdout, "key=%.*s %#x %#x %#x\n", (i32)tlv.value.len, tlv.value.data,
+          tlv.value.data[0], tlv.value.data[1], tlv.value.data[2]);
 
   return (Error){0};
 }
