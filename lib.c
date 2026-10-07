@@ -15,6 +15,8 @@
 #undef assert
 #endif
 
+#define min(a, b) (((a) < (b)) ? (a) : (b))
+
 #define assert(e)                                                              \
   (__builtin_expect(!(e), 0) ? (fprintf(stderr, "%s:%s:%d:%s\n", __func__,     \
                                         __FILE_NAME__, __LINE__, #e),          \
@@ -2000,29 +2002,58 @@ typedef struct {
   Bytes value;
 } Tlv;
 
-__attribute__((warn_unused_result)) static u64 varint_read(Bytes src, u64 *dst,
-                                                           usize *advanced) {
+__attribute__((warn_unused_result)) static Error
+varint_read(Bytes src, u64 *dst, usize *advanced) {
   assert(dst);
   assert(advanced);
 
   if (0 == src.len) {
-    return 0;
+    return (Error){0};
   }
 
   assert(src.data);
 
-  return 0; // fixme
+  const usize max_bytes = 10;
+  for (usize i = 0; i < min(src.len, max_bytes); i++) {
+    const u8 byte = src.data[i];
+    const bool is_continuation = (byte << 7) != 0;
+
+    const u8 value = byte >> 1;
+
+    if (__builtin_add_overflow(*dst, value, dst)) {
+      return (Error){.kind = ErrKindInvalidData};
+    }
+
+    if (!is_continuation) {
+      break;
+    }
+  }
+
+  return (Error){0}; // fixme
 }
 
-static void tlv_read(Bytes src, Tlv *dst, usize *advanced) {
+__attribute__((warn_unused_result)) static Error tlv_read(Bytes src, Tlv *dst,
+                                                          usize *advanced) {
   assert(dst);
   assert(advanced);
 
   if (0 == src.len) {
-    return;
+    return (Error){0};
   }
 
   assert(src.data);
 
-  const u8 first = src.data[0];
+  u64 varint = 0;
+  Error err = varint_read(src, &varint, advanced);
+  if (ErrKindNone != err.kind) {
+    return err;
+  }
+
+  const u64 field_num = varint >> 3;
+  const u8 wire_type = varint & 7;
+
+  printf("varint=%llu field_num=%llu wire_type=%u\n", varint, field_num,
+         wire_type);
+
+  return (Error){0};
 }

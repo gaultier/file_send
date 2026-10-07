@@ -73,7 +73,7 @@ int main(i32 argc, char *argv[]) {
       return 1;
     }
 
-    const Bytes file_path = {.data = (u8 *)argv[2], .len = strlen(argv[2])};
+    const Bytes file_path = bytes_from_cstr(argv[2]);
     Bytes input = {0};
 
     err = io_map_file_blocking(io, file_path, FileOpenOptionsReadOnly, &input);
@@ -268,6 +268,29 @@ int main(i32 argc, char *argv[]) {
     }
     if (ErrKindNone != server.err.kind) {
       log_err(&logger, "the listener stopped", server.err);
+      return 1;
+    }
+
+  } else if (0 == strcmp(cmd, "proto")) {
+    if (3 != argc) {
+      fprintf(stderr, "missing argument\n");
+      return 1;
+    }
+    const Bytes file_path = bytes_from_cstr(argv[2]);
+
+    Bytes input = {0};
+
+    err = io_map_file_blocking(io, file_path, FileOpenOptionsReadOnly, &input);
+    if (ErrKindNone != err.kind) {
+      log_err(&logger, "failed to open file", err);
+      return 1;
+    }
+
+    Tlv tlv = {0};
+    usize advanced = 0;
+    err = tlv_read(input, &tlv, &advanced);
+    if (ErrKindNone != err.kind) {
+      log_err(&logger, "failed to read tlv", err);
       return 1;
     }
 
