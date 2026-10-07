@@ -286,12 +286,20 @@ int main(i32 argc, char *argv[]) {
       return 1;
     }
 
-    Tlv tlv = {0};
-    usize advanced = 0;
-    err = tlv_read(input, &tlv, &advanced);
-    if (ErrKindNone != err.kind) {
-      log_err(&logger, "failed to read tlv", err);
-      return 1;
+    Bytes remaining = input;
+    for (;;) {
+      if (0 == remaining.len) {
+        break;
+      }
+      Tlv tlv = {0};
+      usize advanced = 0;
+      err = tlv_read(remaining, &tlv, &advanced);
+      if (ErrKindNone != err.kind) {
+        log_err(&logger, "failed to read tlv", err);
+        return 1;
+      }
+
+      bytes_advance(&remaining, advanced);
     }
 
   } else if (0 == strcmp(cmd, "otel")) {

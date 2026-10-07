@@ -2002,34 +2002,36 @@ typedef struct {
   Bytes value;
 } Tlv;
 
+// Protobuf varint: 7 bits per byte, low group first. The high bit is set when
+// more bytes follow. `dst` and `advanced` are only written on success.
 __attribute__((warn_unused_result)) static Error
 varint_read(Bytes src, u64 *dst, usize *advanced) {
   assert(dst);
   assert(advanced);
 
-  if (0 == src.len) {
-    return (Error){0};
-  }
-
-  assert(src.data);
-
+  // A u64 is at most 10 groups of 7 bits.
   const usize max_bytes = 10;
+  u64 res = 0;
   for (usize i = 0; i < min(src.len, max_bytes); i++) {
+    assert(src.data);
     const u8 byte = src.data[i];
-    const bool is_continuation = (byte << 7) != 0;
+    const u64 group = byte & 0x7f;
 
-    const u8 value = byte >> 1;
-
-    if (__builtin_add_overflow(*dst, value, dst)) {
+    // The last byte only holds the top bit of a u64.
+    if (max_bytes - 1 == i && group > 1) {
       return (Error){.kind = ErrKindInvalidData};
     }
+    res |= group << (7 * i);
 
-    if (!is_continuation) {
-      break;
+    if (0 == (byte & 0x80)) {
+      *dst = res;
+      *advanced = i + 1;
+      return (Error){0};
     }
   }
 
-  return (Error){0}; // fixme
+  // Cut short, or too long.
+  return (Error){.kind = ErrKindInvalidData};
 }
 
 __attribute__((warn_unused_result)) static Error tlv_read(Bytes src, Tlv *dst,
@@ -2043,17 +2045,34 @@ __attribute__((warn_unused_result)) static Error tlv_read(Bytes src, Tlv *dst,
 
   assert(src.data);
 
-  u64 varint = 0;
-  Error err = varint_read(src, &varint, advanced);
+  // Tag.
+  u64 tag = 0;
+  Error err = varint_read(src, &tag, advanced);
   if (ErrKindNone != err.kind) {
     return err;
   }
 
-  const u64 field_num = varint >> 3;
-  const u8 wire_type = varint & 7;
+  const u64 field_num = tag >> 3;
+  const u8 wire_type = tag & 7;
 
-  printf("varint=%llu field_num=%llu wire_type=%u\n", varint, field_num,
-         wire_type);
+  bytes_advance(&src, *advanced);
+
+  // Length.
+  u64 length = 0;
+  err = varint_read(src, &length, advanced);
+  if (ErrKindNone != err.kind) {
+    return err;
+  }
+  bytes_advance(&src, *advanced);
+
+  // Value.
+  if (length > src.len) {
+    return (Error){.kind = ErrKindInvalidData};
+  }
+  bytes_advance(&src, *advanced);
+
+  printf("advanced=%zu field_num=%llu wire_type=%u length=%llu\n", *advanced,
+         field_num, wire_type, length);
 
   return (Error){0};
 }

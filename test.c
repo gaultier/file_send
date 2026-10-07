@@ -8694,6 +8694,129 @@ static void test_io_composites_mocked(void) {
   assert(ErrKindNone == test_remove_file(real, path).kind);
 }
 
+// Reference encoder for the round trip. `dst` holds at least 10 bytes.
+__attribute__((warn_unused_result)) static usize test_varint_write(u64 value,
+                                                                   u8 *dst) {
+  assert(dst);
+
+  for (usize i = 0; i < 10; i++) {
+    const u8 group = value & 0x7f;
+    value >>= 7;
+    if (0 == value) {
+      dst[i] = group;
+      return i + 1;
+    }
+    dst[i] = group | 0x80;
+  }
+  assert(0 && "unreachable");
+}
+
+static void test_varint_read(void) {
+  // Valid encodings.
+  {
+    const struct {
+      u8 in[11];
+      usize in_len;
+      u64 value;
+      usize advanced;
+    } cases[] = {
+        {{0x00}, 1, 0, 1},
+        {{0x01}, 1, 1, 1},
+        {{0x7f}, 1, 127, 1},
+        {{0x80, 0x01}, 2, 128, 2},
+        // The example from the protobuf docs.
+        {{0x96, 0x01}, 2, 150, 2},
+        {{0xac, 0x02}, 2, 300, 2},
+        {{0xff, 0x7f}, 2, 16383, 2},
+        {{0x80, 0x80, 0x01}, 3, 16384, 3},
+        {{0xff, 0xff, 0xff, 0xff, 0x0f}, 5, UINT32_MAX, 5},
+        {{0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01},
+         10,
+         1ULL << 63,
+         10},
+        {{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01},
+         10,
+         UINT64_MAX,
+         10},
+        // Not minimal, but protobuf accepts it.
+        {{0x80, 0x00}, 2, 0, 2},
+        // Bytes after the varint are not read.
+        {{0x01, 0xff, 0xff}, 3, 1, 1},
+        {{0x96, 0x01, 0x08}, 3, 150, 2},
+    };
+
+    for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+      u8 in[11] = {0};
+      memcpy(in, cases[i].in, sizeof(in));
+      u64 value = 0;
+      usize advanced = 0;
+      assert(ErrKindNone ==
+             varint_read(bytes_make(in, cases[i].in_len), &value, &advanced)
+                 .kind);
+      assert(cases[i].value == value);
+      assert(cases[i].advanced == advanced);
+    }
+  }
+
+  // Invalid encodings leave the outputs alone.
+  {
+    const struct {
+      u8 in[11];
+      usize in_len;
+    } cases[] = {
+        {{0}, 0},
+        // Cut short.
+        {{0x80}, 1},
+        {{0xff, 0xff}, 2},
+        {{0x96}, 1},
+        // The 10th byte holds more than the top bit.
+        {{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02}, 10},
+        {{0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x7f}, 10},
+        // More than 10 bytes.
+        {{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x81, 0x00},
+         11},
+        {{0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00},
+         11},
+    };
+
+    for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+      u8 in[11] = {0};
+      memcpy(in, cases[i].in, sizeof(in));
+      u64 value = 42;
+      usize advanced = 7;
+      assert(ErrKindInvalidData ==
+             varint_read(bytes_make(in, cases[i].in_len), &value, &advanced)
+                 .kind);
+      assert(42 == value);
+      assert(7 == advanced);
+    }
+  }
+
+  // Round trip around every power of two, where the length changes.
+  for (u64 shift = 0; shift < 64; shift++) {
+    const u64 p = 1ULL << shift;
+    const u64 values[] = {p - 1, p, p + 1, UINT64_MAX - p};
+
+    for (usize i = 0; i < sizeof(values) / sizeof(values[0]); i++) {
+      u8 buf[10] = {0};
+      const usize len = test_varint_write(values[i], buf);
+      assert(1 <= len);
+      assert(len <= 10);
+
+      u64 value = 0;
+      usize advanced = 0;
+      assert(ErrKindNone ==
+             varint_read(bytes_make(buf, len), &value, &advanced).kind);
+      assert(values[i] == value);
+      assert(len == advanced);
+
+      // One byte short is always an error.
+      assert(ErrKindInvalidData ==
+             varint_read(bytes_make(buf, len - 1), &value, &advanced).kind);
+    }
+  }
+}
+
 static void test(const char *filter) {
   const struct {
     const char *name;
@@ -8789,6 +8912,7 @@ static void test(const char *filter) {
       {"bencode_encode_round_trip", test_bencode_encode_round_trip},
       {"bencode_encode_torrent_info", test_bencode_encode_torrent_info},
       {"torrent_metainfo_v2", test_torrent_metainfo_v2},
+      {"varint_read", test_varint_read},
   };
 
   usize run = 0;
