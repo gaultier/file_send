@@ -1993,3 +1993,36 @@ static void pool_release(Pool *pool, void *ptr) {
   node->next = pool->head;
   pool->head = node;
 }
+
+typedef struct {
+  u64 tag;
+  u64 length;
+  Bytes value;
+} Tlv;
+
+__attribute__((warn_unused_result)) static u64 varint_read(Bytes src, u64 *dst,
+                                                           usize *advanced) {
+  assert(dst);
+  assert(advanced);
+
+  if (0 == src.len) {
+    return 0;
+  }
+
+  assert(src.data);
+
+  return 0; // fixme
+}
+
+static void tlv_read(Bytes src, Tlv *dst, usize *advanced) {
+  assert(dst);
+  assert(advanced);
+
+  if (0 == src.len) {
+    return;
+  }
+
+  assert(src.data);
+
+  const u8 first = src.data[0];
+}
