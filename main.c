@@ -298,6 +298,7 @@ int main(i32 argc, char *argv[]) {
         log_err(&logger, "failed to read tlv", err);
         return 1;
       }
+      printf("advanced=%lu\n", advanced);
 
       bytes_advance(&remaining, advanced);
     }

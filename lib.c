@@ -2035,9 +2035,9 @@ varint_read(Bytes src, u64 *dst, usize *advanced) {
 }
 
 __attribute__((warn_unused_result)) static Error tlv_read(Bytes src, Tlv *dst,
-                                                          usize *advanced) {
+                                                          usize *dst_advanced) {
   assert(dst);
-  assert(advanced);
+  assert(dst_advanced);
 
   if (0 == src.len) {
     return (Error){0};
@@ -2045,9 +2045,12 @@ __attribute__((warn_unused_result)) static Error tlv_read(Bytes src, Tlv *dst,
 
   assert(src.data);
 
+  Bytes remaining = src;
+
   // Tag.
   u64 tag = 0;
-  Error err = varint_read(src, &tag, advanced);
+  usize advanced = 0;
+  Error err = varint_read(remaining, &tag, &advanced);
   if (ErrKindNone != err.kind) {
     return err;
   }
@@ -2055,24 +2058,64 @@ __attribute__((warn_unused_result)) static Error tlv_read(Bytes src, Tlv *dst,
   const u64 field_num = tag >> 3;
   const u8 wire_type = tag & 7;
 
-  bytes_advance(&src, *advanced);
+  bytes_advance(&remaining, advanced);
 
   // Length.
   u64 length = 0;
-  err = varint_read(src, &length, advanced);
+  advanced = 0;
+  err = varint_read(remaining, &length, &advanced);
   if (ErrKindNone != err.kind) {
     return err;
   }
-  bytes_advance(&src, *advanced);
+  bytes_advance(&remaining, advanced);
 
-  // Value.
   if (length > src.len) {
     return (Error){.kind = ErrKindInvalidData};
   }
-  bytes_advance(&src, *advanced);
 
-  printf("advanced=%zu field_num=%llu wire_type=%u length=%llu\n", *advanced,
-         field_num, wire_type, length);
+  printf("field_num=%llu wire_type=%u length=%llu\n", field_num, wire_type,
+         length);
+
+  switch (wire_type) {
+    // VARINT
+  case 0:
+    bytes_advance(&remaining, length);
+    break;
+
+    // I64
+  case 1:
+    if (sizeof(u64) != length) {
+      return (Error){.kind = ErrKindInvalidData};
+    }
+    bytes_advance(&remaining, length);
+    break;
+
+    // LEN
+  case 2:
+    printf("string: %.*s\n", (i32)length, remaining.data);
+    bytes_advance(&remaining, length);
+    break;
+
+    // SGROUP
+  case 3:
+    // EGROUP
+  case 4:
+    return (Error){.kind = ErrKindUnsupported};
+
+    // I32
+  case 5:
+    if (sizeof(u64) != length) {
+      return (Error){.kind = ErrKindInvalidData};
+    }
+    bytes_advance(&remaining, length);
+    break;
+
+  default:
+    return (Error){.kind = ErrKindInvalidData};
+  }
+
+  assert(remaining.data > src.data);
+  *dst_advanced = (usize)(remaining.data - src.data);
 
   return (Error){0};
 }
