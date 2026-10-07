@@ -8952,6 +8952,580 @@ static void test_tlv_read(void) {
   }
 }
 
+// Protobuf input built by the tests.
+typedef struct {
+  u8 data[4096];
+  usize len;
+} TestPb;
+
+static void test_pb_raw(TestPb *pb, const u8 *src, usize len) {
+  assert(pb);
+  assert(pb->len + len <= sizeof(pb->data));
+
+  if (len > 0) {
+    assert(src);
+    memcpy(pb->data + pb->len, src, len);
+    pb->len += len;
+  }
+}
+
+static void test_pb_varint(TestPb *pb, u64 value) {
+  u8 buf[10] = {0};
+  const usize len = test_varint_write(value, buf);
+  test_pb_raw(pb, buf, len);
+}
+
+static void test_pb_tag(TestPb *pb, u32 field_num, TlvWireType wire_type) {
+  test_pb_varint(pb, ((u64)field_num << 3) | (u64)wire_type);
+}
+
+static void test_pb_uint(TestPb *pb, u32 field_num, u64 value) {
+  test_pb_tag(pb, field_num, TlvWireTypeVarint);
+  test_pb_varint(pb, value);
+}
+
+static void test_pb_len(TestPb *pb, u32 field_num, const u8 *src, usize len) {
+  test_pb_tag(pb, field_num, TlvWireTypeLen);
+  test_pb_varint(pb, len);
+  test_pb_raw(pb, src, len);
+}
+
+static void test_pb_cstr(TestPb *pb, u32 field_num, const char *s) {
+  assert(s);
+  test_pb_len(pb, field_num, (const u8 *)s, strlen(s));
+}
+
+static void test_pb_msg(TestPb *pb, u32 field_num, const TestPb *sub) {
+  assert(sub);
+  test_pb_len(pb, field_num, sub->data, sub->len);
+}
+
+static void test_pb_fixed64(TestPb *pb, u32 field_num, u64 value) {
+  test_pb_tag(pb, field_num, TlvWireTypeI64);
+  for (usize i = 0; i < sizeof(value); i++) {
+    const u8 byte = (u8)(value >> (8 * i));
+    test_pb_raw(pb, &byte, 1);
+  }
+}
+
+static void test_pb_fixed32(TestPb *pb, u32 field_num, u32 value) {
+  test_pb_tag(pb, field_num, TlvWireTypeI32);
+  for (usize i = 0; i < sizeof(value); i++) {
+    const u8 byte = (u8)(value >> (8 * i));
+    test_pb_raw(pb, &byte, 1);
+  }
+}
+
+// The smallest valid record of this wire type: zero, or empty.
+static void test_pb_zero(TestPb *pb, u32 field_num, TlvWireType wire_type) {
+  switch (wire_type) {
+  case TlvWireTypeVarint:
+    test_pb_uint(pb, field_num, 0);
+    break;
+  case TlvWireTypeI64:
+    test_pb_fixed64(pb, field_num, 0);
+    break;
+  case TlvWireTypeLen:
+    test_pb_len(pb, field_num, NULL, 0);
+    break;
+  case TlvWireTypeI32:
+    test_pb_fixed32(pb, field_num, 0);
+    break;
+  case TlvWireTypeSGroup:
+  case TlvWireTypeEGroup:
+    assert(0 && "unreachable");
+  }
+}
+
+static void test_otel_protobuf_decode(void) {
+  // Varint.
+  {
+    u8 in[] = {0xac, 0x02};
+    const Tlv tlv = {.field_num = 1,
+                     .wire_type = TlvWireTypeVarint,
+                     .value = bytes_make(in, sizeof(in))};
+    u64 value = 0;
+    assert(ErrKindNone == otel_protobuf_varint(tlv, &value).kind);
+    assert(300 == value);
+  }
+
+  // Little endian fixed64 and fixed32.
+  {
+    u8 in[] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
+    const Tlv tlv = {.field_num = 1,
+                     .wire_type = TlvWireTypeI64,
+                     .value = bytes_make(in, sizeof(in))};
+    u64 value = 0;
+    assert(ErrKindNone == otel_protobuf_fixed64(tlv, &value).kind);
+    assert(0x0807060504030201ULL == value);
+  }
+  {
+    u8 in[] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+    const Tlv tlv = {.field_num = 1,
+                     .wire_type = TlvWireTypeI64,
+                     .value = bytes_make(in, sizeof(in))};
+    u64 value = 0;
+    assert(ErrKindNone == otel_protobuf_fixed64(tlv, &value).kind);
+    assert(UINT64_MAX == value);
+  }
+  {
+    u8 in[] = {0x01, 0x02, 0x03, 0x84};
+    const Tlv tlv = {.field_num = 1,
+                     .wire_type = TlvWireTypeI32,
+                     .value = bytes_make(in, sizeof(in))};
+    u32 value = 0;
+    assert(ErrKindNone == otel_protobuf_fixed32(tlv, &value).kind);
+    assert(0x84030201U == value);
+  }
+
+  // Wrong wire types leave the output alone.
+  {
+    u8 in[8] = {0};
+    const Tlv tlv = {.field_num = 1,
+                     .wire_type = TlvWireTypeLen,
+                     .value = bytes_make(in, sizeof(in))};
+    u64 value64 = 42;
+    u32 value32 = 42;
+    assert(ErrKindInvalidData == otel_protobuf_varint(tlv, &value64).kind);
+    assert(ErrKindInvalidData == otel_protobuf_fixed64(tlv, &value64).kind);
+    assert(ErrKindInvalidData ==
+           otel_protobuf_fixed32((Tlv){.field_num = 1,
+                                       .wire_type = TlvWireTypeI64,
+                                       .value = bytes_make(in, 8)},
+                                 &value32)
+               .kind);
+    assert(42 == value64);
+    assert(42 == value32);
+  }
+
+  // Hex.
+  {
+    u8 in[] = {0x00, 0xab, 0xff};
+    char out[8] = {0};
+
+    assert(3 == otel_hex_encode(bytes_make(in, sizeof(in)), out, 6));
+    assert(0 == memcmp("00abff", out, 6));
+    assert(0 == out[6]);
+
+    // Only whole bytes are written.
+    memset(out, 0, sizeof(out));
+    assert(2 == otel_hex_encode(bytes_make(in, sizeof(in)), out, 5));
+    assert(0 == memcmp("00ab", out, 4));
+    assert(0 == out[4]);
+
+    assert(0 == otel_hex_encode(bytes_make(in, sizeof(in)), out, 0));
+    assert(0 == otel_hex_encode((Bytes){0}, out, sizeof(out)));
+  }
+}
+
+static Error test_otel_parse_any_value(Bytes body, const Logger *logger,
+                                       Arena *arena) {
+  return otel_parse_protobuf_any_value(body, logger, arena, 0);
+}
+
+static Error test_otel_parse_array_value(Bytes body, const Logger *logger,
+                                         Arena *arena) {
+  return otel_parse_protobuf_array_value(body, logger, arena, 0);
+}
+
+static Error test_otel_parse_key_value_list(Bytes body, const Logger *logger,
+                                            Arena *arena) {
+  return otel_parse_protobuf_key_value_list(body, logger, arena, 0);
+}
+
+static Error test_otel_parse_key_value(Bytes body, const Logger *logger,
+                                       Arena *arena) {
+  return otel_parse_protobuf_key_value(body, logger, arena, 0);
+}
+
+// Every known field of every message, with the right wire type and with a
+// wrong one, and unknown fields of every wire type.
+static void test_otel_parse_protobuf_fields(void) {
+  const Logger logger = logger_make(0, bytes_from_cstr("[test] "));
+  u8 mem[64] = {0};
+  Arena arena = arena_from_mem(mem, sizeof(mem));
+
+  typedef Error (*ParseFn)(Bytes, const Logger *, Arena *);
+  const struct {
+    ParseFn fn;
+    u32 field_num;
+    TlvWireType wire_type;
+  } cases[] = {
+      {otel_parse_protobuf_traces_data, 1, TlvWireTypeLen},
+
+      {otel_parse_protobuf_resource_spans, 1, TlvWireTypeLen},
+      {otel_parse_protobuf_resource_spans, 2, TlvWireTypeLen},
+      {otel_parse_protobuf_resource_spans, 3, TlvWireTypeLen},
+
+      {otel_parse_protobuf_resource, 1, TlvWireTypeLen},
+      {otel_parse_protobuf_resource, 2, TlvWireTypeVarint},
+      {otel_parse_protobuf_resource, 3, TlvWireTypeLen},
+
+      {otel_parse_protobuf_entity_ref, 1, TlvWireTypeLen},
+      {otel_parse_protobuf_entity_ref, 2, TlvWireTypeLen},
+      {otel_parse_protobuf_entity_ref, 3, TlvWireTypeLen},
+      {otel_parse_protobuf_entity_ref, 4, TlvWireTypeLen},
+
+      {otel_parse_protobuf_scope_spans, 1, TlvWireTypeLen},
+      {otel_parse_protobuf_scope_spans, 2, TlvWireTypeLen},
+      {otel_parse_protobuf_scope_spans, 3, TlvWireTypeLen},
+
+      {otel_parse_protobuf_instrumentation_scope, 1, TlvWireTypeLen},
+      {otel_parse_protobuf_instrumentation_scope, 2, TlvWireTypeLen},
+      {otel_parse_protobuf_instrumentation_scope, 3, TlvWireTypeLen},
+      {otel_parse_protobuf_instrumentation_scope, 4, TlvWireTypeVarint},
+
+      {otel_parse_protobuf_span, 1, TlvWireTypeLen},
+      {otel_parse_protobuf_span, 2, TlvWireTypeLen},
+      {otel_parse_protobuf_span, 3, TlvWireTypeLen},
+      {otel_parse_protobuf_span, 4, TlvWireTypeLen},
+      {otel_parse_protobuf_span, 5, TlvWireTypeLen},
+      {otel_parse_protobuf_span, 6, TlvWireTypeVarint},
+      {otel_parse_protobuf_span, 7, TlvWireTypeI64},
+      {otel_parse_protobuf_span, 8, TlvWireTypeI64},
+      {otel_parse_protobuf_span, 9, TlvWireTypeLen},
+      {otel_parse_protobuf_span, 10, TlvWireTypeVarint},
+      {otel_parse_protobuf_span, 11, TlvWireTypeLen},
+      {otel_parse_protobuf_span, 12, TlvWireTypeVarint},
+      {otel_parse_protobuf_span, 13, TlvWireTypeLen},
+      {otel_parse_protobuf_span, 14, TlvWireTypeVarint},
+      {otel_parse_protobuf_span, 15, TlvWireTypeLen},
+      {otel_parse_protobuf_span, 16, TlvWireTypeI32},
+
+      {otel_parse_protobuf_span_event, 1, TlvWireTypeI64},
+      {otel_parse_protobuf_span_event, 2, TlvWireTypeLen},
+      {otel_parse_protobuf_span_event, 3, TlvWireTypeLen},
+      {otel_parse_protobuf_span_event, 4, TlvWireTypeVarint},
+
+      {otel_parse_protobuf_span_link, 1, TlvWireTypeLen},
+      {otel_parse_protobuf_span_link, 2, TlvWireTypeLen},
+      {otel_parse_protobuf_span_link, 3, TlvWireTypeLen},
+      {otel_parse_protobuf_span_link, 4, TlvWireTypeLen},
+      {otel_parse_protobuf_span_link, 5, TlvWireTypeVarint},
+      {otel_parse_protobuf_span_link, 6, TlvWireTypeI32},
+
+      {otel_parse_protobuf_status, 2, TlvWireTypeLen},
+      {otel_parse_protobuf_status, 3, TlvWireTypeVarint},
+
+      {test_otel_parse_key_value, 1, TlvWireTypeLen},
+      {test_otel_parse_key_value, 2, TlvWireTypeLen},
+      {test_otel_parse_key_value, 3, TlvWireTypeVarint},
+
+      {test_otel_parse_array_value, 1, TlvWireTypeLen},
+
+      {test_otel_parse_key_value_list, 1, TlvWireTypeLen},
+
+      {test_otel_parse_any_value, 1, TlvWireTypeLen},
+      {test_otel_parse_any_value, 2, TlvWireTypeVarint},
+      {test_otel_parse_any_value, 3, TlvWireTypeVarint},
+      {test_otel_parse_any_value, 4, TlvWireTypeI64},
+      {test_otel_parse_any_value, 5, TlvWireTypeLen},
+      {test_otel_parse_any_value, 6, TlvWireTypeLen},
+      {test_otel_parse_any_value, 7, TlvWireTypeLen},
+      {test_otel_parse_any_value, 8, TlvWireTypeVarint},
+  };
+
+  const TlvWireType all_wire_types[] = {TlvWireTypeVarint, TlvWireTypeI64,
+                                        TlvWireTypeLen, TlvWireTypeI32};
+
+  for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    // Empty message.
+    assert(ErrKindNone ==
+           cases[i].fn(bytes_make(mem, 0), &logger, &arena).kind);
+
+    // The right wire type, alone and repeated.
+    {
+      TestPb pb = {0};
+      test_pb_zero(&pb, cases[i].field_num, cases[i].wire_type);
+      test_pb_zero(&pb, cases[i].field_num, cases[i].wire_type);
+      assert(ErrKindNone ==
+             cases[i].fn(bytes_make(pb.data, pb.len), &logger, &arena).kind);
+    }
+
+    // Every wrong wire type, even after a valid record.
+    for (usize j = 0; j < sizeof(all_wire_types) / sizeof(all_wire_types[0]);
+         j++) {
+      if (all_wire_types[j] == cases[i].wire_type) {
+        continue;
+      }
+      TestPb pb = {0};
+      test_pb_zero(&pb, cases[i].field_num, cases[i].wire_type);
+      test_pb_zero(&pb, cases[i].field_num, all_wire_types[j]);
+      assert(ErrKindInvalidData ==
+             cases[i].fn(bytes_make(pb.data, pb.len), &logger, &arena).kind);
+    }
+
+    // Unknown fields of every wire type are skipped.
+    {
+      TestPb pb = {0};
+      for (usize j = 0; j < sizeof(all_wire_types) / sizeof(all_wire_types[0]);
+           j++) {
+        test_pb_zero(&pb, 100, all_wire_types[j]);
+        test_pb_zero(&pb, cases[i].field_num, cases[i].wire_type);
+      }
+      assert(ErrKindNone ==
+             cases[i].fn(bytes_make(pb.data, pb.len), &logger, &arena).kind);
+    }
+
+    // Malformed records.
+    {
+      u8 truncated[] = {0x0a, 0x05, 0x00};
+      assert(ErrKindInvalidData ==
+             cases[i]
+                 .fn(bytes_make(truncated, sizeof(truncated)), &logger, &arena)
+                 .kind);
+      u8 group[] = {0x0b};
+      assert(ErrKindUnsupported ==
+             cases[i].fn(bytes_make(group, sizeof(group)), &logger, &arena)
+                 .kind);
+    }
+  }
+}
+
+// Builds `AnyValue` nested `depth` times through `ArrayValue` or
+// `KeyValueList`.
+static void test_otel_any_value_nested(TestPb *dst, usize depth, bool kvlist) {
+  assert(dst);
+
+  TestPb inner = {0};
+  test_pb_cstr(&inner, 1, "leaf");
+
+  for (usize i = 0; i < depth; i++) {
+    TestPb list = {0};
+    if (kvlist) {
+      TestPb kv = {0};
+      test_pb_cstr(&kv, 1, "k");
+      test_pb_msg(&kv, 2, &inner);
+      test_pb_msg(&list, 1, &kv);
+    } else {
+      test_pb_msg(&list, 1, &inner);
+    }
+
+    TestPb outer = {0};
+    test_pb_msg(&outer, kvlist ? 6 : 5, &list);
+    inner = outer;
+  }
+
+  *dst = inner;
+}
+
+static void test_otel_parse_protobuf_depth(void) {
+  const Logger logger = logger_make(0, bytes_from_cstr("[test] "));
+  u8 mem[64] = {0};
+  Arena arena = arena_from_mem(mem, sizeof(mem));
+
+  for (usize k = 0; k < 2; k++) {
+    const bool kvlist = 1 == k;
+    TestPb pb = {0};
+
+    test_otel_any_value_nested(&pb, OTEL_PROTOBUF_DEPTH_MAX - 1, kvlist);
+    assert(ErrKindNone == otel_parse_protobuf_any_value(
+                              bytes_make(pb.data, pb.len), &logger, &arena, 0)
+                              .kind);
+
+    test_otel_any_value_nested(&pb, OTEL_PROTOBUF_DEPTH_MAX, kvlist);
+    assert(ErrKindInvalidData ==
+           otel_parse_protobuf_any_value(bytes_make(pb.data, pb.len), &logger,
+                                         &arena, 0)
+               .kind);
+
+    // Through the whole message too.
+    TestPb kv = {0};
+    test_pb_cstr(&kv, 1, "deep");
+    test_pb_msg(&kv, 2, &pb);
+    TestPb span = {0};
+    test_pb_msg(&span, 9, &kv);
+    TestPb scope_spans = {0};
+    test_pb_msg(&scope_spans, 2, &span);
+    TestPb resource_spans = {0};
+    test_pb_msg(&resource_spans, 2, &scope_spans);
+    TestPb traces = {0};
+    test_pb_msg(&traces, 1, &resource_spans);
+    assert(ErrKindInvalidData ==
+           otel_parse_protobuf_traces_data(bytes_make(traces.data, traces.len),
+                                           &logger, &arena)
+               .kind);
+  }
+}
+
+// A message with every field set, logged so that the formats run.
+static void test_otel_parse_protobuf_traces_data(void) {
+  const Logger logger = logger_make(LogLevelAll, bytes_from_cstr("[test] "));
+  u8 mem[64] = {0};
+  Arena arena = arena_from_mem(mem, sizeof(mem));
+
+  const u8 trace_id[16] = {0xf8, 0xfa, 0xe6, 0xc4, 0xbb, 0x96, 0xd9, 0xaa,
+                           0xaa, 0xaf, 0x8e, 0x92, 0xf5, 0x8e, 0x36, 0xba};
+  const u8 span_id[8] = {0x2c, 0x30, 0x62, 0x8b, 0x20, 0x44, 0x7a, 0xe8};
+  u8 long_bytes[40] = {0};
+  for (usize i = 0; i < sizeof(long_bytes); i++) {
+    long_bytes[i] = (u8)i;
+  }
+
+  // Every `AnyValue` member.
+  TestPb array = {0};
+  {
+    const char *const strings[] = {"a", ""};
+    for (usize i = 0; i < sizeof(strings) / sizeof(strings[0]); i++) {
+      TestPb v = {0};
+      test_pb_cstr(&v, 1, strings[i]);
+      test_pb_msg(&array, 1, &v);
+    }
+  }
+  TestPb kvlist = {0};
+  {
+    TestPb v = {0};
+    test_pb_uint(&v, 2, 1);
+    TestPb kv = {0};
+    test_pb_cstr(&kv, 1, "nested");
+    test_pb_msg(&kv, 2, &v);
+    test_pb_msg(&kvlist, 1, &kv);
+  }
+
+  TestPb attributes[9] = {0};
+  {
+    TestPb values[9] = {0};
+    test_pb_cstr(&values[0], 1, "kratos");
+    test_pb_uint(&values[1], 2, 1);
+    // -1 as an int64.
+    test_pb_uint(&values[2], 3, UINT64_MAX);
+    // 1.5 as a double.
+    test_pb_fixed64(&values[3], 4, 0x3ff8000000000000ULL);
+    test_pb_msg(&values[4], 5, &array);
+    test_pb_msg(&values[5], 6, &kvlist);
+    test_pb_len(&values[6], 7, long_bytes, sizeof(long_bytes));
+    test_pb_uint(&values[7], 8, 3);
+    // Several oneof members: the last one wins.
+    test_pb_cstr(&values[8], 1, "first");
+    test_pb_uint(&values[8], 3, 2);
+
+    for (usize i = 0; i < sizeof(values) / sizeof(values[0]); i++) {
+      test_pb_cstr(&attributes[i], 1, "key");
+      test_pb_msg(&attributes[i], 2, &values[i]);
+    }
+    // A key by index instead of by string.
+    test_pb_uint(&attributes[0], 3, 7);
+  }
+
+  TestPb resource = {0};
+  {
+    for (usize i = 0; i < sizeof(attributes) / sizeof(attributes[0]); i++) {
+      test_pb_msg(&resource, 1, &attributes[i]);
+    }
+    test_pb_uint(&resource, 2, 1);
+    TestPb entity_ref = {0};
+    test_pb_cstr(&entity_ref, 1, "https://opentelemetry.io/schemas/1.27.0");
+    test_pb_cstr(&entity_ref, 2, "service");
+    test_pb_cstr(&entity_ref, 3, "service.name");
+    test_pb_cstr(&entity_ref, 3, "service.namespace");
+    test_pb_cstr(&entity_ref, 4, "service.version");
+    test_pb_msg(&resource, 3, &entity_ref);
+  }
+
+  TestPb scope = {0};
+  test_pb_cstr(&scope, 1, "Ory Kratos");
+  test_pb_cstr(&scope, 2, "1.0.0");
+  test_pb_msg(&scope, 3, &attributes[0]);
+  test_pb_uint(&scope, 4, 2);
+
+  TestPb event = {0};
+  test_pb_fixed64(&event, 1, 1791375613802570000ULL);
+  test_pb_cstr(&event, 2, "exception");
+  test_pb_msg(&event, 3, &attributes[1]);
+  test_pb_uint(&event, 4, 3);
+
+  TestPb link = {0};
+  test_pb_len(&link, 1, trace_id, sizeof(trace_id));
+  test_pb_len(&link, 2, span_id, sizeof(span_id));
+  test_pb_cstr(&link, 3, "rojo=00f067aa0ba902b7");
+  test_pb_msg(&link, 4, &attributes[2]);
+  test_pb_uint(&link, 5, 4);
+  test_pb_fixed32(&link, 6, 0x301);
+
+  TestPb status = {0};
+  test_pb_cstr(&status, 2, "boom");
+  test_pb_uint(&status, 3, 2);
+
+  TestPb span = {0};
+  test_pb_len(&span, 1, trace_id, sizeof(trace_id));
+  test_pb_len(&span, 2, span_id, sizeof(span_id));
+  test_pb_cstr(&span, 3, "rojo=00f067aa0ba902b7");
+  test_pb_len(&span, 4, span_id, sizeof(span_id));
+  test_pb_cstr(&span, 5, "GET /sessions/whoami");
+  test_pb_uint(&span, 6, 2);
+  test_pb_fixed64(&span, 7, 1791375613802345000ULL);
+  test_pb_fixed64(&span, 8, 1791375613803065792ULL);
+  for (usize i = 0; i < sizeof(attributes) / sizeof(attributes[0]); i++) {
+    test_pb_msg(&span, 9, &attributes[i]);
+  }
+  test_pb_uint(&span, 10, 5);
+  test_pb_msg(&span, 11, &event);
+  test_pb_msg(&span, 11, &event);
+  test_pb_uint(&span, 12, 6);
+  test_pb_msg(&span, 13, &link);
+  test_pb_uint(&span, 14, 7);
+  test_pb_msg(&span, 15, &status);
+  test_pb_fixed32(&span, 16, 0x101);
+
+  TestPb scope_spans = {0};
+  test_pb_msg(&scope_spans, 1, &scope);
+  test_pb_msg(&scope_spans, 2, &span);
+  test_pb_msg(&scope_spans, 2, &span);
+  test_pb_cstr(&scope_spans, 3, "https://opentelemetry.io/schemas/1.27.0");
+
+  TestPb resource_spans = {0};
+  test_pb_msg(&resource_spans, 1, &resource);
+  test_pb_msg(&resource_spans, 2, &scope_spans);
+  test_pb_cstr(&resource_spans, 3, "https://opentelemetry.io/schemas/1.27.0");
+
+  TestPb traces = {0};
+  test_pb_msg(&traces, 1, &resource_spans);
+  test_pb_msg(&traces, 1, &resource_spans);
+
+  assert(ErrKindNone ==
+         otel_parse_protobuf_traces_data(bytes_make(traces.data, traces.len),
+                                         &logger, &arena)
+             .kind);
+
+  // Empty input is an empty `TracesData`.
+  assert(ErrKindNone ==
+         otel_parse_protobuf_traces_data(bytes_make(traces.data, 0), &logger,
+                                         &arena)
+             .kind);
+
+  // With a single top level record, every strict prefix is cut inside it, so
+  // it fails without reading past the end.
+  {
+    const Logger quiet = logger_make(0, (Bytes){0});
+    TestPb single = {0};
+    test_pb_msg(&single, 1, &resource_spans);
+    for (usize len = 1; len < single.len; len++) {
+      assert(ErrKindInvalidData ==
+             otel_parse_protobuf_traces_data(bytes_make(single.data, len),
+                                             &quiet, &arena)
+                 .kind);
+    }
+  }
+
+  // An error deep down reaches the top: a status code with the wrong type.
+  {
+    TestPb bad_status = {0};
+    test_pb_cstr(&bad_status, 3, "not a code");
+    TestPb bad_span = {0};
+    test_pb_msg(&bad_span, 15, &bad_status);
+    TestPb bad_scope_spans = {0};
+    test_pb_msg(&bad_scope_spans, 2, &bad_span);
+    TestPb bad_resource_spans = {0};
+    test_pb_msg(&bad_resource_spans, 2, &bad_scope_spans);
+    TestPb bad = {0};
+    test_pb_msg(&bad, 1, &bad_resource_spans);
+    assert(ErrKindInvalidData ==
+           otel_parse_protobuf_traces_data(bytes_make(bad.data, bad.len),
+                                           &logger, &arena)
+               .kind);
+  }
+}
+
 static void test(const char *filter) {
   const struct {
     const char *name;
@@ -9049,6 +9623,10 @@ static void test(const char *filter) {
       {"torrent_metainfo_v2", test_torrent_metainfo_v2},
       {"varint_read", test_varint_read},
       {"tlv_read", test_tlv_read},
+      {"otel_protobuf_decode", test_otel_protobuf_decode},
+      {"otel_parse_protobuf_fields", test_otel_parse_protobuf_fields},
+      {"otel_parse_protobuf_depth", test_otel_parse_protobuf_depth},
+      {"otel_parse_protobuf_traces_data", test_otel_parse_protobuf_traces_data},
   };
 
   usize run = 0;

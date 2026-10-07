@@ -69,5 +69,5 @@ esac
 
 set -x
 
-"$CC" $CFLAGS $MODE_CFLAGS -o "$BIN" main.c
+time "$CC" $CFLAGS $MODE_CFLAGS -o "$BIN" main.c
 time "./$BIN" "$@"
