@@ -182,3 +182,134 @@ static void otel_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
     return;
   }
 }
+
+__attribute__((warn_unused_result)) static Error
+otel_parse_protobuf_string(Bytes input, const Logger *logger, Arena *arena,
+                           usize *advanced) {
+  assert(logger);
+  assert(arena);
+  assert(advanced);
+
+  Bytes remaining = input;
+
+  Tlv tlv = {0};
+  Error err = tlv_read(remaining, &tlv, advanced);
+  if (ErrKindNone != err.kind) {
+    return err;
+  }
+  bytes_advance(&remaining, *advanced);
+
+  if (TlvWireTypeLen != tlv.wire_type) {
+    return (Error){.kind = ErrKindInvalidData};
+  }
+
+  fprintf(stdout, "key=%.*s\n", (i32)tlv.value.len, tlv.value.data);
+
+  return (Error){0};
+}
+
+__attribute__((warn_unused_result)) static Error
+otel_parse_protobuf_key_value(Bytes input, const Logger *logger, Arena *arena,
+                              usize *advanced) {
+  assert(logger);
+  assert(arena);
+  assert(advanced);
+
+  Bytes remaining = input;
+
+  Error err = otel_parse_protobuf_string(remaining, logger, arena, advanced);
+  if (ErrKindNone != err.kind) {
+    return err;
+  }
+  bytes_advance(&remaining, *advanced);
+
+  // TODO: Value.
+
+  return (Error){0};
+}
+
+__attribute__((warn_unused_result)) static Error
+otel_parse_protobuf_key_values(Bytes input, const Logger *logger, Arena *arena,
+                               usize *advanced) {
+  assert(logger);
+  assert(arena);
+  assert(advanced);
+
+  Bytes remaining = input;
+
+  for (usize i = 0; i < input.len; i++) {
+    if (0 == remaining.len) {
+      break;
+    }
+    Error err =
+        otel_parse_protobuf_key_value(remaining, logger, arena, advanced);
+    if (ErrKindNone != err.kind) {
+      return err;
+    }
+    bytes_advance(&remaining, *advanced);
+  }
+
+  return (Error){0};
+}
+
+__attribute__((warn_unused_result)) static Error
+otel_parse_protobuf_resource(Bytes input, const Logger *logger, Arena *arena,
+                             usize *advanced) {
+  assert(logger);
+  assert(arena);
+  assert(advanced);
+
+  Bytes remaining = input;
+
+  Error err =
+      otel_parse_protobuf_key_values(remaining, logger, arena, advanced);
+  if (ErrKindNone != err.kind) {
+    return err;
+  }
+  bytes_advance(&remaining, *advanced);
+
+  return (Error){0};
+}
+
+__attribute__((warn_unused_result)) static Error
+otel_parse_protobuf_resource_spans(Bytes input, const Logger *logger,
+                                   Arena *arena, usize *advanced) {
+  assert(logger);
+  assert(arena);
+  assert(advanced);
+
+  Bytes remaining = input;
+
+  Error err = otel_parse_protobuf_resource(remaining, logger, arena, advanced);
+  if (ErrKindNone != err.kind) {
+    return err;
+  }
+  bytes_advance(&remaining, *advanced);
+
+  return (Error){0};
+}
+
+__attribute__((warn_unused_result)) static Error
+otel_parse_protobuf_traces_data(Bytes input, const Logger *logger, Arena *arena,
+                                usize *advanced) {
+  assert(logger);
+  assert(arena);
+  assert(advanced);
+
+  Bytes remaining = input;
+
+  // Each record is at least one byte, so this bounds the records.
+  for (usize i = 0; i < input.len; i++) {
+    if (0 == remaining.len) {
+      break;
+    }
+    Error err =
+        otel_parse_protobuf_resource_spans(remaining, logger, arena, advanced);
+    if (ErrKindNone != err.kind) {
+      return err;
+    }
+    bytes_advance(&remaining, *advanced);
+  }
+
+  return (Error){0};
+}

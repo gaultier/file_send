@@ -286,21 +286,11 @@ int main(i32 argc, char *argv[]) {
       return 1;
     }
 
-    Bytes remaining = input;
-    for (;;) {
-      if (0 == remaining.len) {
-        break;
-      }
-      Tlv tlv = {0};
-      usize advanced = 0;
-      err = tlv_read(remaining, &tlv, &advanced);
-      if (ErrKindNone != err.kind) {
-        log_err(&logger, "failed to read tlv", err);
-        return 1;
-      }
-      printf("advanced=%lu\n", advanced);
-
-      bytes_advance(&remaining, advanced);
+    usize advanced = 0;
+    err = otel_parse_protobuf_traces_data(input, &logger, &arena, &advanced);
+    if (ErrKindNone != err.kind) {
+      log_err(&logger, "failed to parse protobuf trace", err);
+      return 1;
     }
 
   } else if (0 == strcmp(cmd, "otel")) {

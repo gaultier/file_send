@@ -1996,9 +1996,20 @@ static void pool_release(Pool *pool, void *ptr) {
   pool->head = node;
 }
 
+typedef enum {
+  TlvWireTypeVarint = 0,
+  TlvWireTypeI64 = 1,
+  TlvWireTypeLen = 2,
+  TlvWireTypeSGroup = 3,
+  TlvWireTypeEGroup = 4,
+  TlvWireTypeI32 = 5,
+} TlvWireType;
+
 typedef struct {
-  u64 tag;
-  u64 length;
+  u32 field_num;
+  TlvWireType wire_type;
+  // Borrows from the input. For a varint, the encoded bytes. For a LEN, the
+  // bytes after the length.
   Bytes value;
 } Tlv;
 
@@ -2034,89 +2045,94 @@ varint_read(Bytes src, u64 *dst, usize *advanced) {
   return (Error){.kind = ErrKindInvalidData};
 }
 
-// https://protobuf.dev/programming-guides/encoding/
+// One protobuf record: a tag, then a value whose size depends on the wire type.
+// See https://protobuf.dev/programming-guides/encoding/. `dst` and
+// `dst_advanced` are only written on success. Empty input is an error: the
+// caller stops when nothing is left.
 __attribute__((warn_unused_result)) static Error tlv_read(Bytes src, Tlv *dst,
                                                           usize *dst_advanced) {
   assert(dst);
   assert(dst_advanced);
 
-  if (0 == src.len) {
-    return (Error){0};
-  }
-
-  assert(src.data);
-
   Bytes remaining = src;
 
-  // Tag.
   u64 tag = 0;
   usize advanced = 0;
   Error err = varint_read(remaining, &tag, &advanced);
   if (ErrKindNone != err.kind) {
     return err;
   }
-
-  const u64 field_num = tag >> 3;
-  const u8 wire_type = tag & 7;
-
   bytes_advance(&remaining, advanced);
 
-  // Length.
-  u64 length = 0;
-  advanced = 0;
-  err = varint_read(remaining, &length, &advanced);
-  if (ErrKindNone != err.kind) {
-    return err;
+  // Field numbers are 29 bits and 0 is reserved.
+  if (tag > UINT32_MAX) {
+    return (Error){.kind = ErrKindInvalidData};
   }
-  bytes_advance(&remaining, advanced);
-
-  if (length > src.len) {
+  const u32 field_num = (u32)(tag >> 3);
+  if (0 == field_num) {
     return (Error){.kind = ErrKindInvalidData};
   }
 
-  printf("field_num=%llu wire_type=%u length=%llu\n", field_num, wire_type,
-         length);
-
+  const u8 wire_type = tag & 7;
+  Bytes value = {0};
   switch (wire_type) {
-    // VARINT
-  case 0:
-    bytes_advance(&remaining, length);
+  case TlvWireTypeVarint: {
+    u64 varint = 0;
+    err = varint_read(remaining, &varint, &advanced);
+    if (ErrKindNone != err.kind) {
+      return err;
+    }
+    value = bytes_take(remaining, advanced);
     break;
+  }
 
-    // I64
-  case 1:
-    if (sizeof(u64) != length) {
+  case TlvWireTypeI64:
+    if (remaining.len < sizeof(u64)) {
       return (Error){.kind = ErrKindInvalidData};
     }
-    bytes_advance(&remaining, length);
+    value = bytes_take(remaining, sizeof(u64));
     break;
 
-    // LEN
-  case 2:
-    printf("string: %.*s\n", (i32)length, remaining.data);
-    bytes_advance(&remaining, length);
-    break;
+  case TlvWireTypeLen: {
+    u64 length = 0;
+    err = varint_read(remaining, &length, &advanced);
+    if (ErrKindNone != err.kind) {
+      return err;
+    }
+    bytes_advance(&remaining, advanced);
 
-    // SGROUP
-  case 3:
-    // EGROUP
-  case 4:
+    if (length > remaining.len) {
+      return (Error){.kind = ErrKindInvalidData};
+    }
+    value = bytes_take(remaining, (usize)length);
+    break;
+  }
+
+  case TlvWireTypeSGroup:
+  case TlvWireTypeEGroup:
     return (Error){.kind = ErrKindUnsupported};
 
-    // I32
-  case 5:
-    if (sizeof(u64) != length) {
+  case TlvWireTypeI32:
+    if (remaining.len < sizeof(u32)) {
       return (Error){.kind = ErrKindInvalidData};
     }
-    bytes_advance(&remaining, length);
+    value = bytes_take(remaining, sizeof(u32));
     break;
 
   default:
     return (Error){.kind = ErrKindInvalidData};
   }
 
+  bytes_advance(&remaining, value.len);
   assert(remaining.data > src.data);
-  *dst_advanced = (usize)(remaining.data - src.data);
+  assert(remaining.len < src.len);
+
+  *dst = (Tlv){
+      .field_num = field_num,
+      .wire_type = (TlvWireType)wire_type,
+      .value = value,
+  };
+  *dst_advanced = src.len - remaining.len;
 
   return (Error){0};
 }

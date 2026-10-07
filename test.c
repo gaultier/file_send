@@ -8817,6 +8817,141 @@ static void test_varint_read(void) {
   }
 }
 
+static void test_tlv_read(void) {
+  // Valid records.
+  {
+    const struct {
+      u8 in[16];
+      usize in_len;
+      u32 field_num;
+      TlvWireType wire_type;
+      usize value_offset;
+      usize value_len;
+      usize advanced;
+    } cases[] = {
+        // Field 1 = 150, from the protobuf docs.
+        {{0x08, 0x96, 0x01}, 3, 1, TlvWireTypeVarint, 1, 2, 3},
+        {{0x08, 0x00}, 2, 1, TlvWireTypeVarint, 1, 1, 2},
+        // Field 2 = "testing", from the protobuf docs.
+        {{0x12, 0x07, 't', 'e', 's', 't', 'i', 'n', 'g'},
+         9,
+         2,
+         TlvWireTypeLen,
+         2,
+         7,
+         9},
+        // Empty LEN, last in the input.
+        {{0x12, 0x00}, 2, 2, TlvWireTypeLen, 2, 0, 2},
+        {{0x09, 1, 2, 3, 4, 5, 6, 7, 8}, 9, 1, TlvWireTypeI64, 1, 8, 9},
+        {{0x0d, 1, 2, 3, 4}, 5, 1, TlvWireTypeI32, 1, 4, 5},
+        // Two-byte tag: field 16.
+        {{0x80, 0x01, 0x05}, 3, 16, TlvWireTypeVarint, 2, 1, 3},
+        // Largest field number.
+        {{0xf8, 0xff, 0xff, 0xff, 0x0f, 0x01},
+         6,
+         (1U << 29) - 1,
+         TlvWireTypeVarint,
+         5,
+         1,
+         6},
+        // Bytes after the record are not read.
+        {{0x08, 0x01, 0x08, 0x02}, 4, 1, TlvWireTypeVarint, 1, 1, 2},
+        {{0x0d, 1, 2, 3, 4, 5}, 6, 1, TlvWireTypeI32, 1, 4, 5},
+    };
+
+    for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+      u8 in[16] = {0};
+      memcpy(in, cases[i].in, sizeof(in));
+      Tlv tlv = {0};
+      usize advanced = 0;
+      assert(ErrKindNone ==
+             tlv_read(bytes_make(in, cases[i].in_len), &tlv, &advanced).kind);
+      assert(cases[i].field_num == tlv.field_num);
+      assert(cases[i].wire_type == tlv.wire_type);
+      assert(in + cases[i].value_offset == tlv.value.data);
+      assert(cases[i].value_len == tlv.value.len);
+      assert(cases[i].advanced == advanced);
+    }
+  }
+
+  // Invalid records leave the outputs alone.
+  {
+    const struct {
+      u8 in[16];
+      usize in_len;
+      ErrorKind err;
+    } cases[] = {
+        {{0}, 0, ErrKindInvalidData},
+        // Field 0.
+        {{0x00, 0x01}, 2, ErrKindInvalidData},
+        {{0x02, 0x00}, 2, ErrKindInvalidData},
+        // Tag does not fit a u32.
+        {{0x80, 0x80, 0x80, 0x80, 0x10, 0x01}, 6, ErrKindInvalidData},
+        // Tag cut short.
+        {{0x80}, 1, ErrKindInvalidData},
+        // No value.
+        {{0x08}, 1, ErrKindInvalidData},
+        {{0x08, 0x96}, 2, ErrKindInvalidData},
+        {{0x12}, 1, ErrKindInvalidData},
+        // LEN longer than what is left, even though not longer than the input.
+        {{0x0a, 0x03, 0x61}, 3, ErrKindInvalidData},
+        {{0x0a, 0x02, 0x61}, 3, ErrKindInvalidData},
+        // Fixed sizes cut short.
+        {{0x09, 1, 2, 3, 4, 5, 6, 7}, 8, ErrKindInvalidData},
+        {{0x0d, 1, 2, 3}, 4, ErrKindInvalidData},
+        // Groups.
+        {{0x0b}, 1, ErrKindUnsupported},
+        {{0x0c}, 1, ErrKindUnsupported},
+        // Wire types 6 and 7 do not exist.
+        {{0x0e, 0x00}, 2, ErrKindInvalidData},
+        {{0x0f, 0x00}, 2, ErrKindInvalidData},
+    };
+
+    for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+      u8 in[16] = {0};
+      memcpy(in, cases[i].in, sizeof(in));
+      Tlv tlv = {.field_num = 42};
+      usize advanced = 7;
+      assert(cases[i].err ==
+             tlv_read(bytes_make(in, cases[i].in_len), &tlv, &advanced).kind);
+      assert(42 == tlv.field_num);
+      assert(7 == advanced);
+    }
+  }
+
+  // A varint value of 150 must not be taken as a length, even when the input
+  // is long enough for it.
+  {
+    u8 in[256] = {0x08, 0x96, 0x01};
+    Tlv tlv = {0};
+    usize advanced = 0;
+    assert(ErrKindNone ==
+           tlv_read(bytes_make(in, sizeof(in)), &tlv, &advanced).kind);
+    assert(TlvWireTypeVarint == tlv.wire_type);
+    assert(2 == tlv.value.len);
+    assert(3 == advanced);
+  }
+
+  // Records one after the other, as in a message.
+  {
+    u8 in[] = {0x08, 0x96, 0x01, 0x12, 0x02, 'h', 'i', 0x0d, 1, 2, 3, 4};
+    const u32 field_nums[] = {1, 2, 1};
+    const TlvWireType wire_types[] = {TlvWireTypeVarint, TlvWireTypeLen,
+                                      TlvWireTypeI32};
+
+    Bytes remaining = bytes_make(in, sizeof(in));
+    for (usize i = 0; i < sizeof(field_nums) / sizeof(field_nums[0]); i++) {
+      Tlv tlv = {0};
+      usize advanced = 0;
+      assert(ErrKindNone == tlv_read(remaining, &tlv, &advanced).kind);
+      assert(field_nums[i] == tlv.field_num);
+      assert(wire_types[i] == tlv.wire_type);
+      bytes_advance(&remaining, advanced);
+    }
+    assert(0 == remaining.len);
+  }
+}
+
 static void test(const char *filter) {
   const struct {
     const char *name;
@@ -8913,6 +9048,7 @@ static void test(const char *filter) {
       {"bencode_encode_torrent_info", test_bencode_encode_torrent_info},
       {"torrent_metainfo_v2", test_torrent_metainfo_v2},
       {"varint_read", test_varint_read},
+      {"tlv_read", test_tlv_read},
   };
 
   usize run = 0;
