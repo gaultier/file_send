@@ -286,8 +286,7 @@ int main(i32 argc, char *argv[]) {
       return 1;
     }
 
-    usize advanced = 0;
-    err = otel_parse_protobuf_traces_data(input, &logger, &arena, &advanced);
+    err = otel_parse_protobuf_traces_data(input, &logger, &arena);
     if (ErrKindNone != err.kind) {
       log_err(&logger, "failed to parse protobuf trace", err);
       return 1;

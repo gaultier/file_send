@@ -183,134 +183,254 @@ static void otel_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
   }
 }
 
+// Each `otel_parse_protobuf_*` takes the body of its message: the records
+// after the message's own tag and length, which the parent read. A field is
+// passed down as `tlv.value`. Unknown fields are skipped.
+
+// Reads the next record and moves `remaining` past it.
 __attribute__((warn_unused_result)) static Error
-otel_parse_protobuf_string(Bytes input, const Logger *logger, Arena *arena,
-                           usize *advanced) {
-  assert(logger);
-  assert(arena);
-  assert(advanced);
+otel_protobuf_next(Bytes *remaining, Tlv *tlv) {
+  assert(remaining);
+  assert(remaining->len > 0);
+  assert(tlv);
 
-  Bytes remaining = input;
-
-  Tlv tlv = {0};
-  Error err = tlv_read(remaining, &tlv, advanced);
+  usize advanced = 0;
+  const Error err = tlv_read(*remaining, tlv, &advanced);
   if (ErrKindNone != err.kind) {
     return err;
   }
-  bytes_advance(&remaining, *advanced);
+  assert(advanced > 0);
+  bytes_advance(remaining, advanced);
 
-  if (TlvWireTypeLen != tlv.wire_type) {
+  return (Error){0};
+}
+
+// A known field must have the wire type of the schema.
+__attribute__((warn_unused_result)) static Error
+otel_protobuf_expect(Tlv tlv, TlvWireType wire_type) {
+  if (wire_type != tlv.wire_type) {
     return (Error){.kind = ErrKindInvalidData};
   }
-
-  fprintf(stdout, "key=%.*s %#x %#x %#x\n", (i32)tlv.value.len, tlv.value.data,
-          tlv.value.data[0], tlv.value.data[1], tlv.value.data[2]);
-
   return (Error){0};
 }
 
+// `AnyValue`.
 __attribute__((warn_unused_result)) static Error
-otel_parse_protobuf_key_value(Bytes input, const Logger *logger, Arena *arena,
-                              usize *advanced) {
+otel_parse_protobuf_any_value(Bytes body, const Logger *logger, Arena *arena) {
   assert(logger);
   assert(arena);
-  assert(advanced);
 
-  Bytes remaining = input;
-
-  Error err = otel_parse_protobuf_string(remaining, logger, arena, advanced);
-  if (ErrKindNone != err.kind) {
-    return err;
-  }
-  bytes_advance(&remaining, *advanced);
-
-  // TODO: Value.
-
-  return (Error){0};
-}
-
-__attribute__((warn_unused_result)) static Error
-otel_parse_protobuf_key_values(Bytes input, const Logger *logger, Arena *arena,
-                               usize *advanced) {
-  assert(logger);
-  assert(arena);
-  assert(advanced);
-
-  Bytes remaining = input;
-
-  for (usize i = 0; i < input.len; i++) {
+  // A oneof: the last member on the wire wins. Empty when unset.
+  Bytes remaining = body;
+  // Each record is at least one byte, so this bounds the records.
+  for (usize i = 0; i < body.len; i++) {
     if (0 == remaining.len) {
       break;
     }
-    Error err =
-        otel_parse_protobuf_key_value(remaining, logger, arena, advanced);
+    Tlv tlv = {0};
+    Error err = otel_protobuf_next(&remaining, &tlv);
     if (ErrKindNone != err.kind) {
       return err;
     }
-    bytes_advance(&remaining, *advanced);
+
+    switch (tlv.field_num) {
+    case 1: // string_value
+      err = otel_protobuf_expect(tlv, TlvWireTypeLen);
+      if (ErrKindNone != err.kind) {
+        return err;
+      }
+      log(logger, LogLevelDebug, "string_value=%.*s", (i32)tlv.value.len,
+          tlv.value.data);
+      break;
+
+    default:
+      break;
+    }
   }
+  assert(0 == remaining.len);
 
   return (Error){0};
 }
 
+// `KeyValue`.
 __attribute__((warn_unused_result)) static Error
-otel_parse_protobuf_resource(Bytes input, const Logger *logger, Arena *arena,
-                             usize *advanced) {
+otel_parse_protobuf_key_value(Bytes body, const Logger *logger, Arena *arena) {
   assert(logger);
   assert(arena);
-  assert(advanced);
 
-  Bytes remaining = input;
+  Bytes remaining = body;
+  // Each record is at least one byte, so this bounds the records.
+  for (usize i = 0; i < body.len; i++) {
+    if (0 == remaining.len) {
+      break;
+    }
+    Tlv tlv = {0};
+    Error err = otel_protobuf_next(&remaining, &tlv);
+    if (ErrKindNone != err.kind) {
+      return err;
+    }
 
-  Error err =
-      otel_parse_protobuf_key_values(remaining, logger, arena, advanced);
-  if (ErrKindNone != err.kind) {
-    return err;
+    switch (tlv.field_num) {
+    case 1: // string key
+      err = otel_protobuf_expect(tlv, TlvWireTypeLen);
+      if (ErrKindNone != err.kind) {
+        return err;
+      }
+      log(logger, LogLevelDebug, "key=%.*s", (i32)tlv.value.len,
+          tlv.value.data);
+      break;
+
+    case 2: // AnyValue value
+      err = otel_protobuf_expect(tlv, TlvWireTypeLen);
+      if (ErrKindNone != err.kind) {
+        return err;
+      }
+      err = otel_parse_protobuf_any_value(tlv.value, logger, arena);
+      if (ErrKindNone != err.kind) {
+        return err;
+      }
+      break;
+
+    default:
+      break;
+    }
   }
-  bytes_advance(&remaining, *advanced);
+  assert(0 == remaining.len);
 
   return (Error){0};
 }
 
+// `Resource`.
 __attribute__((warn_unused_result)) static Error
-otel_parse_protobuf_resource_spans(Bytes input, const Logger *logger,
-                                   Arena *arena, usize *advanced) {
+otel_parse_protobuf_resource(Bytes body, const Logger *logger, Arena *arena) {
   assert(logger);
   assert(arena);
-  assert(advanced);
 
-  Bytes remaining = input;
+  Bytes remaining = body;
+  // Each record is at least one byte, so this bounds the records.
+  for (usize i = 0; i < body.len; i++) {
+    if (0 == remaining.len) {
+      break;
+    }
+    Tlv tlv = {0};
+    Error err = otel_protobuf_next(&remaining, &tlv);
+    if (ErrKindNone != err.kind) {
+      return err;
+    }
 
-  Error err = otel_parse_protobuf_resource(remaining, logger, arena, advanced);
-  if (ErrKindNone != err.kind) {
-    return err;
+    switch (tlv.field_num) {
+    case 1: // repeated KeyValue attributes
+      err = otel_protobuf_expect(tlv, TlvWireTypeLen);
+      if (ErrKindNone != err.kind) {
+        return err;
+      }
+      err = otel_parse_protobuf_key_value(tlv.value, logger, arena);
+      if (ErrKindNone != err.kind) {
+        return err;
+      }
+      break;
+
+    case 2: // uint32 dropped_attributes_count
+      err = otel_protobuf_expect(tlv, TlvWireTypeVarint);
+      if (ErrKindNone != err.kind) {
+        return err;
+      }
+      break;
+
+    default:
+      break;
+    }
   }
-  bytes_advance(&remaining, *advanced);
+  assert(0 == remaining.len);
 
   return (Error){0};
 }
 
+// `ResourceSpans`.
 __attribute__((warn_unused_result)) static Error
-otel_parse_protobuf_traces_data(Bytes input, const Logger *logger, Arena *arena,
-                                usize *advanced) {
+otel_parse_protobuf_resource_spans(Bytes body, const Logger *logger,
+                                   Arena *arena) {
   assert(logger);
   assert(arena);
-  assert(advanced);
+
+  Bytes remaining = body;
+  // Each record is at least one byte, so this bounds the records.
+  for (usize i = 0; i < body.len; i++) {
+    if (0 == remaining.len) {
+      break;
+    }
+    Tlv tlv = {0};
+    Error err = otel_protobuf_next(&remaining, &tlv);
+    if (ErrKindNone != err.kind) {
+      return err;
+    }
+
+    switch (tlv.field_num) {
+    case 1: // Resource resource
+      err = otel_protobuf_expect(tlv, TlvWireTypeLen);
+      if (ErrKindNone != err.kind) {
+        return err;
+      }
+      err = otel_parse_protobuf_resource(tlv.value, logger, arena);
+      if (ErrKindNone != err.kind) {
+        return err;
+      }
+      break;
+
+    case 2: // repeated ScopeSpans scope_spans
+    case 3: // string schema_url
+      err = otel_protobuf_expect(tlv, TlvWireTypeLen);
+      if (ErrKindNone != err.kind) {
+        return err;
+      }
+      // TODO.
+      break;
+
+    default:
+      break;
+    }
+  }
+  assert(0 == remaining.len);
+
+  return (Error){0};
+}
+
+// `TracesData`, the top level message: `input` is the whole payload.
+__attribute__((warn_unused_result)) static Error
+otel_parse_protobuf_traces_data(Bytes input, const Logger *logger,
+                                Arena *arena) {
+  assert(logger);
+  assert(arena);
 
   Bytes remaining = input;
-
   // Each record is at least one byte, so this bounds the records.
   for (usize i = 0; i < input.len; i++) {
     if (0 == remaining.len) {
       break;
     }
-    Error err =
-        otel_parse_protobuf_resource_spans(remaining, logger, arena, advanced);
+    Tlv tlv = {0};
+    Error err = otel_protobuf_next(&remaining, &tlv);
     if (ErrKindNone != err.kind) {
       return err;
     }
-    bytes_advance(&remaining, *advanced);
+
+    switch (tlv.field_num) {
+    case 1: // repeated ResourceSpans resource_spans
+      err = otel_protobuf_expect(tlv, TlvWireTypeLen);
+      if (ErrKindNone != err.kind) {
+        return err;
+      }
+      err = otel_parse_protobuf_resource_spans(tlv.value, logger, arena);
+      if (ErrKindNone != err.kind) {
+        return err;
+      }
+      break;
+
+    default:
+      break;
+    }
   }
+  assert(0 == remaining.len);
 
   return (Error){0};
 }
