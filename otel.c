@@ -2,7 +2,7 @@
 
 #include "http.c"
 
-typedef enum {
+typedef enum : u8 {
   OTEL_SPAN_KIND_UNSPECIFIED,
   OTEL_SPAN_KIND_INTERNAL,
   OTEL_SPAN_KIND_SERVER,
@@ -11,7 +11,7 @@ typedef enum {
   OTEL_SPAN_KIND_CONSUMER,
 } OtelSpanKind;
 
-typedef enum {
+typedef enum : u8 {
   OTEL_STATUS_CODE_UNSET,
   OTEL_STATUS_CODE_OK,
   OTEL_STATUS_CODE_ERROR,
@@ -34,7 +34,6 @@ typedef struct {
   // TODO: attributes
   // TODO: events
   // TODO: links
-
 } OtelSpan;
 
 static void http_handler_on_close(IoCompletion *completion, Error err,
