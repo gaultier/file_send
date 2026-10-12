@@ -32,17 +32,18 @@ typedef struct {
 
 // TODO: Is assuming UUIDv4 ok for ids?
 typedef struct {
-  u8 trace_id[16];
-  u8 id[16];
+  Bytes trace_id;
+  Bytes id;
   // TODO: trace_state
-  u8 parent_id[16];
+  Bytes parent_id;
   // From 2026-01-01.
   u64 start_time_nano;
   u64 end_time_nano;
   Bytes name;
-  OtelValue *values;
+  Bytes attrs_keys;
+  OtelValue *attrs_values;
   u32 flags;
-  u16 values_count;
+  u16 attrs_count;
   OtelSpanKind kind;
   OtelStatusCode status_code;
 
@@ -485,15 +486,12 @@ otel_log_double(const Logger *logger, const char *name, Tlv tlv) {
 
 // `AnyValue`, `ArrayValue`, `KeyValueList` and `KeyValue` call each other.
 __attribute__((warn_unused_result)) static Error
-otel_parse_protobuf_any_value(Bytes body, const Logger *logger, Arena *arena,
-                              u32 depth);
+otel_parse_protobuf_any_value(Bytes body, const Logger *logger, u32 depth);
 
 // `KeyValue`.
 __attribute__((warn_unused_result)) static Error
-otel_parse_protobuf_key_value(Bytes body, const Logger *logger, Arena *arena,
-                              u32 depth) {
+otel_parse_protobuf_key_value(Bytes body, const Logger *logger, u32 depth) {
   assert(logger);
-  assert(arena);
   assert(depth <= OTEL_PROTOBUF_DEPTH_MAX);
 
   Bytes remaining = body;
@@ -517,7 +515,7 @@ otel_parse_protobuf_key_value(Bytes body, const Logger *logger, Arena *arena,
     case 2: // AnyValue value
       err = otel_protobuf_expect(tlv, TlvWireTypeLen);
       if (ErrKindNone == err.kind) {
-        err = otel_parse_protobuf_any_value(tlv.value, logger, arena, depth);
+        err = otel_parse_protobuf_any_value(tlv.value, logger, depth);
       }
       break;
 
@@ -539,10 +537,8 @@ otel_parse_protobuf_key_value(Bytes body, const Logger *logger, Arena *arena,
 
 // `ArrayValue`.
 __attribute__((warn_unused_result)) static Error
-otel_parse_protobuf_array_value(Bytes body, const Logger *logger, Arena *arena,
-                                u32 depth) {
+otel_parse_protobuf_array_value(Bytes body, const Logger *logger, u32 depth) {
   assert(logger);
-  assert(arena);
   assert(depth < OTEL_PROTOBUF_DEPTH_MAX);
 
   Bytes remaining = body;
@@ -562,8 +558,7 @@ otel_parse_protobuf_array_value(Bytes body, const Logger *logger, Arena *arena,
     case 1: // repeated AnyValue values
       err = otel_protobuf_expect(tlv, TlvWireTypeLen);
       if (ErrKindNone == err.kind) {
-        err =
-            otel_parse_protobuf_any_value(tlv.value, logger, arena, depth + 1);
+        err = otel_parse_protobuf_any_value(tlv.value, logger, depth + 1);
       }
       break;
 
@@ -582,9 +577,8 @@ otel_parse_protobuf_array_value(Bytes body, const Logger *logger, Arena *arena,
 // `KeyValueList`.
 __attribute__((warn_unused_result)) static Error
 otel_parse_protobuf_key_value_list(Bytes body, const Logger *logger,
-                                   Arena *arena, u32 depth) {
+                                   u32 depth) {
   assert(logger);
-  assert(arena);
   assert(depth < OTEL_PROTOBUF_DEPTH_MAX);
 
   Bytes remaining = body;
@@ -604,8 +598,7 @@ otel_parse_protobuf_key_value_list(Bytes body, const Logger *logger,
     case 1: // repeated KeyValue values
       err = otel_protobuf_expect(tlv, TlvWireTypeLen);
       if (ErrKindNone == err.kind) {
-        err =
-            otel_parse_protobuf_key_value(tlv.value, logger, arena, depth + 1);
+        err = otel_parse_protobuf_key_value(tlv.value, logger, depth + 1);
       }
       break;
 
@@ -623,10 +616,8 @@ otel_parse_protobuf_key_value_list(Bytes body, const Logger *logger,
 
 // `AnyValue`. A oneof: the last member on the wire wins. Empty when unset.
 __attribute__((warn_unused_result)) static Error
-otel_parse_protobuf_any_value(Bytes body, const Logger *logger, Arena *arena,
-                              u32 depth) {
+otel_parse_protobuf_any_value(Bytes body, const Logger *logger, u32 depth) {
   assert(logger);
-  assert(arena);
 
   if (depth >= OTEL_PROTOBUF_DEPTH_MAX) {
     return (Error){.kind = ErrKindInvalidData};
@@ -665,15 +656,14 @@ otel_parse_protobuf_any_value(Bytes body, const Logger *logger, Arena *arena,
     case 5: // ArrayValue array_value
       err = otel_protobuf_expect(tlv, TlvWireTypeLen);
       if (ErrKindNone == err.kind) {
-        err = otel_parse_protobuf_array_value(tlv.value, logger, arena, depth);
+        err = otel_parse_protobuf_array_value(tlv.value, logger, depth);
       }
       break;
 
     case 6: // KeyValueList kvlist_value
       err = otel_protobuf_expect(tlv, TlvWireTypeLen);
       if (ErrKindNone == err.kind) {
-        err =
-            otel_parse_protobuf_key_value_list(tlv.value, logger, arena, depth);
+        err = otel_parse_protobuf_key_value_list(tlv.value, logger, depth);
       }
       break;
 
@@ -699,9 +689,8 @@ otel_parse_protobuf_any_value(Bytes body, const Logger *logger, Arena *arena,
 
 // `EntityRef`.
 __attribute__((warn_unused_result)) static Error
-otel_parse_protobuf_entity_ref(Bytes body, const Logger *logger, Arena *arena) {
+otel_parse_protobuf_entity_ref(Bytes body, const Logger *logger) {
   assert(logger);
-  assert(arena);
 
   Bytes remaining = body;
   // Each record is at least one byte, so this bounds the records.
@@ -747,9 +736,8 @@ otel_parse_protobuf_entity_ref(Bytes body, const Logger *logger, Arena *arena) {
 
 // `Resource`.
 __attribute__((warn_unused_result)) static Error
-otel_parse_protobuf_resource(Bytes body, const Logger *logger, Arena *arena) {
+otel_parse_protobuf_resource(Bytes body, const Logger *logger) {
   assert(logger);
-  assert(arena);
 
   Bytes remaining = body;
   // Each record is at least one byte, so this bounds the records.
@@ -768,7 +756,7 @@ otel_parse_protobuf_resource(Bytes body, const Logger *logger, Arena *arena) {
     case 1: // repeated KeyValue attributes
       err = otel_protobuf_expect(tlv, TlvWireTypeLen);
       if (ErrKindNone == err.kind) {
-        err = otel_parse_protobuf_key_value(tlv.value, logger, arena, 0);
+        err = otel_parse_protobuf_key_value(tlv.value, logger, 0);
       }
       break;
 
@@ -779,7 +767,7 @@ otel_parse_protobuf_resource(Bytes body, const Logger *logger, Arena *arena) {
     case 3: // repeated EntityRef entity_refs
       err = otel_protobuf_expect(tlv, TlvWireTypeLen);
       if (ErrKindNone == err.kind) {
-        err = otel_parse_protobuf_entity_ref(tlv.value, logger, arena);
+        err = otel_parse_protobuf_entity_ref(tlv.value, logger);
       }
       break;
 
@@ -797,10 +785,8 @@ otel_parse_protobuf_resource(Bytes body, const Logger *logger, Arena *arena) {
 
 // `InstrumentationScope`.
 __attribute__((warn_unused_result)) static Error
-otel_parse_protobuf_instrumentation_scope(Bytes body, const Logger *logger,
-                                          Arena *arena) {
+otel_parse_protobuf_instrumentation_scope(Bytes body, const Logger *logger) {
   assert(logger);
-  assert(arena);
 
   Bytes remaining = body;
   // Each record is at least one byte, so this bounds the records.
@@ -827,7 +813,7 @@ otel_parse_protobuf_instrumentation_scope(Bytes body, const Logger *logger,
     case 3: // repeated KeyValue attributes
       err = otel_protobuf_expect(tlv, TlvWireTypeLen);
       if (ErrKindNone == err.kind) {
-        err = otel_parse_protobuf_key_value(tlv.value, logger, arena, 0);
+        err = otel_parse_protobuf_key_value(tlv.value, logger, 0);
       }
       break;
 
@@ -849,9 +835,8 @@ otel_parse_protobuf_instrumentation_scope(Bytes body, const Logger *logger,
 
 // `Span.Event`.
 __attribute__((warn_unused_result)) static Error
-otel_parse_protobuf_span_event(Bytes body, const Logger *logger, Arena *arena) {
+otel_parse_protobuf_span_event(Bytes body, const Logger *logger) {
   assert(logger);
-  assert(arena);
 
   Bytes remaining = body;
   // Each record is at least one byte, so this bounds the records.
@@ -878,7 +863,7 @@ otel_parse_protobuf_span_event(Bytes body, const Logger *logger, Arena *arena) {
     case 3: // repeated KeyValue attributes
       err = otel_protobuf_expect(tlv, TlvWireTypeLen);
       if (ErrKindNone == err.kind) {
-        err = otel_parse_protobuf_key_value(tlv.value, logger, arena, 0);
+        err = otel_parse_protobuf_key_value(tlv.value, logger, 0);
       }
       break;
 
@@ -900,9 +885,8 @@ otel_parse_protobuf_span_event(Bytes body, const Logger *logger, Arena *arena) {
 
 // `Span.Link`.
 __attribute__((warn_unused_result)) static Error
-otel_parse_protobuf_span_link(Bytes body, const Logger *logger, Arena *arena) {
+otel_parse_protobuf_span_link(Bytes body, const Logger *logger) {
   assert(logger);
-  assert(arena);
 
   Bytes remaining = body;
   // Each record is at least one byte, so this bounds the records.
@@ -933,7 +917,7 @@ otel_parse_protobuf_span_link(Bytes body, const Logger *logger, Arena *arena) {
     case 4: // repeated KeyValue attributes
       err = otel_protobuf_expect(tlv, TlvWireTypeLen);
       if (ErrKindNone == err.kind) {
-        err = otel_parse_protobuf_key_value(tlv.value, logger, arena, 0);
+        err = otel_parse_protobuf_key_value(tlv.value, logger, 0);
       }
       break;
 
@@ -959,9 +943,10 @@ otel_parse_protobuf_span_link(Bytes body, const Logger *logger, Arena *arena) {
 
 // `Status`.
 __attribute__((warn_unused_result)) static Error
-otel_parse_protobuf_status(Bytes body, const Logger *logger, Arena *arena) {
+otel_parse_protobuf_status(Bytes body, OtelStatusCode *status_code,
+                           const Logger *logger) {
+  assert(status_code);
   assert(logger);
-  assert(arena);
 
   Bytes remaining = body;
   // Each record is at least one byte, so this bounds the records.
@@ -981,9 +966,17 @@ otel_parse_protobuf_status(Bytes body, const Logger *logger, Arena *arena) {
       err = otel_log_string(logger, "status.message", tlv);
       break;
 
-    case 3: // StatusCode code
+    case 3: { // StatusCode code
+      u64 value = 0;
+      err = otel_protobuf_varint(tlv, &value);
+      if (ErrKindNone != err.kind) {
+        return err;
+      }
+      if (value <= 1) {
+        *status_code = (OtelStatusCode)value;
+      }
       err = otel_log_uint(logger, "status.code", tlv);
-      break;
+    } break;
 
     default:
       break;
@@ -999,9 +992,9 @@ otel_parse_protobuf_status(Bytes body, const Logger *logger, Arena *arena) {
 
 // `Span`.
 __attribute__((warn_unused_result)) static Error
-otel_parse_protobuf_span(Bytes body, const Logger *logger, Arena *arena) {
+otel_parse_protobuf_span(Bytes body, OtelSpan *span, const Logger *logger) {
+  assert(span);
   assert(logger);
-  assert(arena);
 
   Bytes remaining = body;
   // Each record is at least one byte, so this bounds the records.
@@ -1017,42 +1010,75 @@ otel_parse_protobuf_span(Bytes body, const Logger *logger, Arena *arena) {
     }
 
     switch (tlv.field_num) {
-    case 1: // bytes trace_id
-      err = otel_log_bytes(logger, "span.trace_id", tlv);
-      break;
+    case 1: { // bytes trace_id
+      err = otel_protobuf_expect(tlv, TlvWireTypeLen);
+      if (ErrKindNone != err.kind) {
+        return err;
+      }
+      span->trace_id = tlv.value;
+    } break;
 
-    case 2: // bytes span_id
-      err = otel_log_bytes(logger, "span.span_id", tlv);
-      break;
+    case 2: { // bytes span_id
+      err = otel_protobuf_expect(tlv, TlvWireTypeLen);
+      if (ErrKindNone != err.kind) {
+        return err;
+      }
+      span->id = tlv.value;
+    } break;
 
     case 3: // string trace_state
       err = otel_log_string(logger, "span.trace_state", tlv);
       break;
 
-    case 4: // bytes parent_span_id
-      err = otel_log_bytes(logger, "span.parent_span_id", tlv);
-      break;
+    case 4: { // bytes parent_span_id
+      err = otel_protobuf_expect(tlv, TlvWireTypeLen);
+      if (ErrKindNone != err.kind) {
+        return err;
+      }
 
-    case 5: // string name
-      err = otel_log_string(logger, "span.name", tlv);
-      break;
+      span->parent_id = tlv.value;
+    } break;
 
-    case 6: // SpanKind kind
-      err = otel_log_uint(logger, "span.kind", tlv);
-      break;
+    case 5: { // string name
+      err = otel_protobuf_expect(tlv, TlvWireTypeLen);
+      if (ErrKindNone != err.kind) {
+        return err;
+      }
+      span->name = tlv.value;
+    } break;
+
+    case 6: { // SpanKind kind
+      u64 kind = 0;
+      err = otel_protobuf_varint(tlv, &kind);
+      if (ErrKindNone != err.kind) {
+        return err;
+      }
+
+      if (kind <= OTEL_SPAN_KIND_CONSUMER /* MAX */) {
+        span->kind = (OtelSpanKind)kind;
+      }
+    } break;
 
     case 7: // fixed64 start_time_unix_nano
-      err = otel_log_fixed64(logger, "span.start_time_unix_nano", tlv);
+      err = otel_protobuf_fixed64(tlv, &span->start_time_nano);
+      if (ErrKindNone != err.kind) {
+        return err;
+      }
+
       break;
 
     case 8: // fixed64 end_time_unix_nano
-      err = otel_log_fixed64(logger, "span.end_time_unix_nano", tlv);
+      err = otel_protobuf_fixed64(tlv, &span->end_time_nano);
+      if (ErrKindNone != err.kind) {
+        return err;
+      }
       break;
 
     case 9: // repeated KeyValue attributes
+      // TODO
       err = otel_protobuf_expect(tlv, TlvWireTypeLen);
       if (ErrKindNone == err.kind) {
-        err = otel_parse_protobuf_key_value(tlv.value, logger, arena, 0);
+        err = otel_parse_protobuf_key_value(tlv.value, logger, 0);
       }
       break;
 
@@ -1063,7 +1089,7 @@ otel_parse_protobuf_span(Bytes body, const Logger *logger, Arena *arena) {
     case 11: // repeated Event events
       err = otel_protobuf_expect(tlv, TlvWireTypeLen);
       if (ErrKindNone == err.kind) {
-        err = otel_parse_protobuf_span_event(tlv.value, logger, arena);
+        err = otel_parse_protobuf_span_event(tlv.value, logger);
       }
       break;
 
@@ -1074,7 +1100,7 @@ otel_parse_protobuf_span(Bytes body, const Logger *logger, Arena *arena) {
     case 13: // repeated Link links
       err = otel_protobuf_expect(tlv, TlvWireTypeLen);
       if (ErrKindNone == err.kind) {
-        err = otel_parse_protobuf_span_link(tlv.value, logger, arena);
+        err = otel_parse_protobuf_span_link(tlv.value, logger);
       }
       break;
 
@@ -1085,7 +1111,7 @@ otel_parse_protobuf_span(Bytes body, const Logger *logger, Arena *arena) {
     case 15: // Status status
       err = otel_protobuf_expect(tlv, TlvWireTypeLen);
       if (ErrKindNone == err.kind) {
-        err = otel_parse_protobuf_status(tlv.value, logger, arena);
+        err = otel_parse_protobuf_status(tlv.value, &span->status_code, logger);
       }
       break;
 
@@ -1108,9 +1134,12 @@ otel_parse_protobuf_span(Bytes body, const Logger *logger, Arena *arena) {
 // `ScopeSpans`.
 __attribute__((warn_unused_result)) static Error
 otel_parse_protobuf_scope_spans(Bytes body, const Logger *logger,
-                                Arena *arena) {
+                                OtelSpan *spans, usize *spans_count,
+                                usize spans_cap) {
   assert(logger);
-  assert(arena);
+  assert(spans);
+  assert(spans_count);
+  assert(spans_cap);
 
   Bytes remaining = body;
   // Each record is at least one byte, so this bounds the records.
@@ -1129,17 +1158,26 @@ otel_parse_protobuf_scope_spans(Bytes body, const Logger *logger,
     case 1: // InstrumentationScope scope
       err = otel_protobuf_expect(tlv, TlvWireTypeLen);
       if (ErrKindNone == err.kind) {
-        err =
-            otel_parse_protobuf_instrumentation_scope(tlv.value, logger, arena);
+        err = otel_parse_protobuf_instrumentation_scope(tlv.value, logger);
       }
       break;
 
     case 2: // repeated Span spans
       err = otel_protobuf_expect(tlv, TlvWireTypeLen);
+      OtelSpan span = {0};
       if (ErrKindNone == err.kind) {
-        err = otel_parse_protobuf_span(tlv.value, logger, arena);
+        err = otel_parse_protobuf_span(tlv.value, &span, logger);
       }
       break;
+
+      assert(spans_cap >= *spans_count);
+
+      if (spans_cap == *spans_count) {
+        return (Error){.kind = ErrKindRange};
+      }
+
+      spans[*spans_count] = span;
+      *spans_count += 1;
 
     case 3: // string schema_url
       err = otel_log_string(logger, "scope_spans.schema_url", tlv);
@@ -1159,10 +1197,13 @@ otel_parse_protobuf_scope_spans(Bytes body, const Logger *logger,
 
 // `ResourceSpans`.
 __attribute__((warn_unused_result)) static Error
-otel_parse_protobuf_resource_spans(Bytes body, const Logger *logger,
-                                   Arena *arena) {
+otel_parse_protobuf_resource_spans(Bytes body, OtelSpan *spans,
+                                   usize *spans_count, usize spans_cap,
+                                   const Logger *logger) {
+  assert(spans);
+  assert(spans_count);
+  assert(spans_cap);
   assert(logger);
-  assert(arena);
 
   Bytes remaining = body;
   // Each record is at least one byte, so this bounds the records.
@@ -1181,14 +1222,15 @@ otel_parse_protobuf_resource_spans(Bytes body, const Logger *logger,
     case 1: // Resource resource
       err = otel_protobuf_expect(tlv, TlvWireTypeLen);
       if (ErrKindNone == err.kind) {
-        err = otel_parse_protobuf_resource(tlv.value, logger, arena);
+        err = otel_parse_protobuf_resource(tlv.value, logger);
       }
       break;
 
     case 2: // repeated ScopeSpans scope_spans
       err = otel_protobuf_expect(tlv, TlvWireTypeLen);
       if (ErrKindNone == err.kind) {
-        err = otel_parse_protobuf_scope_spans(tlv.value, logger, arena);
+        err = otel_parse_protobuf_scope_spans(tlv.value, logger, spans,
+                                              spans_count, spans_cap);
       }
       break;
 
@@ -1210,10 +1252,15 @@ otel_parse_protobuf_resource_spans(Bytes body, const Logger *logger,
 
 // `TracesData`, the top level message: `input` is the whole payload.
 __attribute__((warn_unused_result)) static Error
-otel_parse_protobuf_traces_data(Bytes input, const Logger *logger,
-                                Arena *arena) {
+otel_parse_protobuf_traces_data(Bytes input, OtelSpan *spans,
+                                usize *spans_count, usize spans_cap,
+                                const Logger *logger) {
+  assert(spans);
+  assert(spans_count);
+  assert(spans_cap);
   assert(logger);
-  assert(arena);
+
+  *spans_count = 0;
 
   Bytes remaining = input;
   // Each record is at least one byte, so this bounds the records.
@@ -1232,7 +1279,8 @@ otel_parse_protobuf_traces_data(Bytes input, const Logger *logger,
     case 1: // repeated ResourceSpans resource_spans
       err = otel_protobuf_expect(tlv, TlvWireTypeLen);
       if (ErrKindNone == err.kind) {
-        err = otel_parse_protobuf_resource_spans(tlv.value, logger, arena);
+        err = otel_parse_protobuf_resource_spans(tlv.value, spans, spans_count,
+                                                 spans_cap, logger);
       }
       break;
 

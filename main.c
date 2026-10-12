@@ -286,10 +286,29 @@ int main(i32 argc, char *argv[]) {
       return 1;
     }
 
-    err = otel_parse_protobuf_traces_data(input, &logger, &arena);
+    const usize max_spans_in_batch = 1024; // TODO: Adjust.
+    OtelSpan *spans = arena_alloc(&arena, __alignof__(OtelSpan),
+                                  sizeof(OtelSpan), max_spans_in_batch);
+    usize spans_count = 0;
+    if (!spans) {
+      assert(0 && "oom");
+    }
+    err = otel_parse_protobuf_traces_data(input, spans, &spans_count,
+                                          max_spans_in_batch, &logger);
     if (ErrKindNone != err.kind) {
       log_err(&logger, "failed to parse protobuf trace", err);
       return 1;
+    }
+
+    if (spans_count > 0) {
+      assert(spans);
+    }
+    printf("[D001] %lu\n", spans_count);
+
+    for (usize i = 0; i < spans_count; i++) {
+      const OtelSpan span = spans[i];
+      __builtin_dump_struct(&span, &printf);
+      puts("");
     }
 
   } else if (0 == strcmp(cmd, "otel")) {
