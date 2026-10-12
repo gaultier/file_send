@@ -303,9 +303,7 @@ int main(i32 argc, char *argv[]) {
     printf("[D001] %lu\n", spans_count);
 
     for (usize i = 0; i < spans_count; i++) {
-      const OtelSpan span = spans[i];
-      __builtin_dump_struct(&span, &printf);
-      puts("");
+      otel_span_log(&spans[i], &logger);
     }
 
   } else if (0 == strcmp(cmd, "otel")) {

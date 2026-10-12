@@ -56,6 +56,8 @@ otel_parse_protobuf_traces_data(Bytes input, OtelSpan *spans,
                                 usize *spans_count, usize spans_cap,
                                 const Logger *logger);
 
+static void otel_span_log(const OtelSpan *span, const Logger *logger);
+
 static void http_handler_on_close(IoCompletion *completion, Error err,
                                   usize res) {
   assert(completion);
@@ -211,12 +213,8 @@ static void otel_on_read(IoCompletion *completion, Error read_err,
       log_err(&handler->logger, "failed to parse protobuf trace", err);
     } else {
 
-      printf("[D001] %lu\n", spans_count);
-
       for (usize i = 0; i < spans_count; i++) {
-        const OtelSpan span = spans[i];
-        __builtin_dump_struct(&span, &printf);
-        puts("");
+        otel_span_log(&spans[i], &handler->logger);
       }
     }
   }
@@ -401,7 +399,19 @@ otel_log_string(const Logger *logger, const char *name, Tlv tlv) {
   return (Error){0};
 }
 
-// Bytes are logged as hex, cut short past 32 bytes.
+// Logged as hex, cut short past 32 bytes.
+static void otel_log_hex(const Logger *logger, const char *name, Bytes value) {
+  assert(logger);
+  assert(name);
+
+  char hex[2 * 32 + 1] = {0};
+  const usize encoded = otel_hex_encode(value, hex, sizeof(hex) - 1);
+  assert(encoded <= value.len);
+
+  log(logger, LogLevelDebug, "%s=%s%s", name, hex,
+      encoded < value.len ? "..." : "");
+}
+
 __attribute__((warn_unused_result)) static Error
 otel_log_bytes(const Logger *logger, const char *name, Tlv tlv) {
   assert(logger);
@@ -412,12 +422,7 @@ otel_log_bytes(const Logger *logger, const char *name, Tlv tlv) {
     return err;
   }
 
-  char hex[2 * 32 + 1] = {0};
-  const usize encoded = otel_hex_encode(tlv.value, hex, sizeof(hex) - 1);
-  assert(encoded <= tlv.value.len);
-
-  log(logger, LogLevelDebug, "%s=%s%s", name, hex,
-      encoded < tlv.value.len ? "..." : "");
+  otel_log_hex(logger, name, tlv.value);
   return (Error){0};
 }
 
@@ -514,6 +519,70 @@ otel_log_double(const Logger *logger, const char *name, Tlv tlv) {
   memcpy(&value, &bits, sizeof(value));
   log(logger, LogLevelDebug, "%s=%g", name, value);
   return (Error){0};
+}
+
+__attribute__((warn_unused_result)) static const char *
+otel_span_kind_to_cstr(OtelSpanKind kind) {
+  switch (kind) {
+  case OTEL_SPAN_KIND_UNSPECIFIED:
+    return "unspecified";
+  case OTEL_SPAN_KIND_INTERNAL:
+    return "internal";
+  case OTEL_SPAN_KIND_SERVER:
+    return "server";
+  case OTEL_SPAN_KIND_CLIENT:
+    return "client";
+  case OTEL_SPAN_KIND_PRODUCER:
+    return "producer";
+  case OTEL_SPAN_KIND_CONSUMER:
+    return "consumer";
+  default:
+    return "invalid";
+  }
+}
+
+__attribute__((warn_unused_result)) static const char *
+otel_status_code_to_cstr(OtelStatusCode status_code) {
+  switch (status_code) {
+  case OTEL_STATUS_CODE_UNSET:
+    return "unset";
+  case OTEL_STATUS_CODE_OK:
+    return "ok";
+  case OTEL_STATUS_CODE_ERROR:
+    return "error";
+  default:
+    return "invalid";
+  }
+}
+
+static void otel_span_log(const OtelSpan *span, const Logger *logger) {
+  assert(span);
+  assert(logger);
+
+  otel_log_hex(logger, "span.trace_id", span->trace_id);
+  otel_log_hex(logger, "span.id", span->id);
+  otel_log_hex(logger, "span.parent_id", span->parent_id);
+  log(logger, LogLevelDebug, "span.start_time_nano=%" PRIu64,
+      span->start_time_nano);
+  log(logger, LogLevelDebug, "span.end_time_nano=%" PRIu64,
+      span->end_time_nano);
+  log(logger, LogLevelDebug, "span.name=%.*s",
+      (i32)min(span->name.len, (usize)INT32_MAX), span->name.data);
+  otel_log_hex(logger, "span.attrs_keys", span->attrs_keys);
+  log(logger, LogLevelDebug, "span.attrs_count=%u", span->attrs_count);
+  if (span->attrs_count > 0) {
+    assert(span->attrs_values);
+  }
+  for (usize i = 0; i < span->attrs_count; i++) {
+    const OtelValue value = span->attrs_values[i];
+    log(logger, LogLevelDebug, "span.attrs_values[%zu]=kind:%u val:%#" PRIx64,
+        i, value.kind, value.val);
+  }
+  log(logger, LogLevelDebug, "span.flags=%#x", span->flags);
+  log(logger, LogLevelDebug, "span.kind=%s",
+      otel_span_kind_to_cstr(span->kind));
+  log(logger, LogLevelDebug, "span.status_code=%s",
+      otel_status_code_to_cstr(span->status_code));
 }
 
 // `AnyValue`, `ArrayValue`, `KeyValueList` and `KeyValue` call each other.
