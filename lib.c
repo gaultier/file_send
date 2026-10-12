@@ -49,8 +49,9 @@ typedef int64_t i64;
 typedef size_t usize;
 typedef ssize_t isize;
 
-static const usize KiB = 1024;
-static const usize MiB = 1024 * KiB;
+#define KiB 1024
+#define MiB 1024 * KiB
+#define GiB 1024 * MiB
 
 // Nanoseconds, which is the unit every duration in here is counted in: a `u64`
 // of them is nearly six hundred years, so no wait and no deadline has to think

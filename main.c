@@ -313,18 +313,20 @@ int main(i32 argc, char *argv[]) {
       fprintf(stderr, "missing argument\n");
       return 1;
     }
+
+    const usize inflight_requests_max = 1024;
     const char *const port_s = argv[2];
     char *port_end = NULL;
     const usize port = strtoull(port_s, &port_end, 10);
     const Ipv4Addr listen_addr = {.port = (u16)port};
     Arena http_arena = {0};
-    assert(ErrKindNone == arena_valloc(env, 24 * MiB, &http_arena).kind);
+    assert(ErrKindNone == arena_valloc(env, 5ULL * GiB, &http_arena).kind);
 
     HttpServer ctx = {0};
     {
       const Error err_init = http_server_init(
-          &ctx, http_arena, 1024, LogLevelError | LogLevelInfo | LogLevelDebug,
-          env_platform_make());
+          &ctx, http_arena, inflight_requests_max,
+          LogLevelError | LogLevelInfo | LogLevelDebug, env_platform_make());
       if (ErrKindNone != err_init.kind) {
         log_err(&logger, "failed to create the http server", err_init);
         return 1;

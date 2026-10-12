@@ -209,7 +209,7 @@ struct HttpServer {
   Pool memory_blocks_pool;
 };
 
-#define HTTP_HANDLER_ARENA_SIZE (20 * KiB)
+#define HTTP_HANDLER_ARENA_SIZE 1 * MiB
 
 __attribute__((warn_unused_result)) static Error
 http_server_init(HttpServer *server, Arena arena, usize inflight_requests_max,
