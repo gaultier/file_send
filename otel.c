@@ -17,6 +17,19 @@ typedef enum : u8 {
   OTEL_STATUS_CODE_ERROR,
 } OtelStatusCode;
 
+typedef enum {
+  OTEL_VALUE_KIND_STRING,
+  OTEL_VALUE_KIND_BOOL,
+  OTEL_VALUE_KIND_I64,
+  OTEL_VALUE_KIND_DOUBLE,
+  OTEL_VALUE_KIND_BYTES,
+} OtelValueKind;
+
+typedef struct {
+  OtelValueKind kind;
+  u64 val;
+} OtelValue;
+
 // TODO: Is assuming UUIDv4 ok for ids?
 typedef struct {
   u8 trace_id[16];
@@ -27,7 +40,9 @@ typedef struct {
   u64 start_time_nano;
   u64 end_time_nano;
   Bytes name;
+  OtelValue *values;
   u32 flags;
+  u16 values_count;
   OtelSpanKind kind;
   OtelStatusCode status_code;
 
