@@ -2,6 +2,41 @@
 
 #include "http.c"
 
+typedef enum {
+  OTEL_SPAN_KIND_UNSPECIFIED,
+  OTEL_SPAN_KIND_INTERNAL,
+  OTEL_SPAN_KIND_SERVER,
+  OTEL_SPAN_KIND_CLIENT,
+  OTEL_SPAN_KIND_PRODUCER,
+  OTEL_SPAN_KIND_CONSUMER,
+} OtelSpanKind;
+
+typedef enum {
+  OTEL_STATUS_CODE_UNSET,
+  OTEL_STATUS_CODE_OK,
+  OTEL_STATUS_CODE_ERROR,
+} OtelStatusCode;
+
+// TODO: Is assuming UUIDv4 ok for ids?
+typedef struct {
+  u8 trace_id[16];
+  u8 id[16];
+  // TODO: trace_state
+  u8 parent_id[16];
+  // From 2026-01-01.
+  u64 start_time_nano;
+  u64 end_time_nano;
+  Bytes name;
+  u32 flags;
+  OtelSpanKind kind;
+  OtelStatusCode status_code;
+
+  // TODO: attributes
+  // TODO: events
+  // TODO: links
+
+} OtelSpan;
+
 static void http_handler_on_close(IoCompletion *completion, Error err,
                                   usize res) {
   assert(completion);
@@ -513,8 +548,8 @@ otel_parse_protobuf_array_value(Bytes body, const Logger *logger, Arena *arena,
     case 1: // repeated AnyValue values
       err = otel_protobuf_expect(tlv, TlvWireTypeLen);
       if (ErrKindNone == err.kind) {
-        err = otel_parse_protobuf_any_value(tlv.value, logger, arena,
-                                            depth + 1);
+        err =
+            otel_parse_protobuf_any_value(tlv.value, logger, arena, depth + 1);
       }
       break;
 
@@ -555,8 +590,8 @@ otel_parse_protobuf_key_value_list(Bytes body, const Logger *logger,
     case 1: // repeated KeyValue values
       err = otel_protobuf_expect(tlv, TlvWireTypeLen);
       if (ErrKindNone == err.kind) {
-        err = otel_parse_protobuf_key_value(tlv.value, logger, arena,
-                                            depth + 1);
+        err =
+            otel_parse_protobuf_key_value(tlv.value, logger, arena, depth + 1);
       }
       break;
 
@@ -623,8 +658,8 @@ otel_parse_protobuf_any_value(Bytes body, const Logger *logger, Arena *arena,
     case 6: // KeyValueList kvlist_value
       err = otel_protobuf_expect(tlv, TlvWireTypeLen);
       if (ErrKindNone == err.kind) {
-        err = otel_parse_protobuf_key_value_list(tlv.value, logger, arena,
-                                                 depth);
+        err =
+            otel_parse_protobuf_key_value_list(tlv.value, logger, arena, depth);
       }
       break;
 
@@ -800,8 +835,7 @@ otel_parse_protobuf_instrumentation_scope(Bytes body, const Logger *logger,
 
 // `Span.Event`.
 __attribute__((warn_unused_result)) static Error
-otel_parse_protobuf_span_event(Bytes body, const Logger *logger,
-                               Arena *arena) {
+otel_parse_protobuf_span_event(Bytes body, const Logger *logger, Arena *arena) {
   assert(logger);
   assert(arena);
 
