@@ -300,9 +300,6 @@ int main(i32 argc, char *argv[]) {
       return 1;
     }
 
-    if (spans_count > 0) {
-      assert(spans);
-    }
     printf("[D001] %lu\n", spans_count);
 
     for (usize i = 0; i < spans_count; i++) {

@@ -30,7 +30,6 @@ typedef struct {
   u64 val;
 } OtelValue;
 
-// TODO: Is assuming UUIDv4 ok for ids?
 typedef struct {
   Bytes trace_id;
   Bytes id;
@@ -972,7 +971,7 @@ otel_parse_protobuf_status(Bytes body, OtelStatusCode *status_code,
       if (ErrKindNone != err.kind) {
         return err;
       }
-      if (value <= 1) {
+      if (value <= OTEL_STATUS_CODE_ERROR) {
         *status_code = (OtelStatusCode)value;
       }
       err = otel_log_uint(logger, "status.code", tlv);
@@ -1015,6 +1014,9 @@ otel_parse_protobuf_span(Bytes body, OtelSpan *span, const Logger *logger) {
       if (ErrKindNone != err.kind) {
         return err;
       }
+      if (16 != tlv.value.len) {
+        return (Error){.kind = ErrKindInvalidData};
+      }
       span->trace_id = tlv.value;
     } break;
 
@@ -1022,6 +1024,9 @@ otel_parse_protobuf_span(Bytes body, OtelSpan *span, const Logger *logger) {
       err = otel_protobuf_expect(tlv, TlvWireTypeLen);
       if (ErrKindNone != err.kind) {
         return err;
+      }
+      if (8 != tlv.value.len) {
+        return (Error){.kind = ErrKindInvalidData};
       }
       span->id = tlv.value;
     } break;
@@ -1036,6 +1041,9 @@ otel_parse_protobuf_span(Bytes body, OtelSpan *span, const Logger *logger) {
         return err;
       }
 
+      if (8 != tlv.value.len) {
+        return (Error){.kind = ErrKindInvalidData};
+      }
       span->parent_id = tlv.value;
     } break;
 
@@ -1133,9 +1141,8 @@ otel_parse_protobuf_span(Bytes body, OtelSpan *span, const Logger *logger) {
 
 // `ScopeSpans`.
 __attribute__((warn_unused_result)) static Error
-otel_parse_protobuf_scope_spans(Bytes body, const Logger *logger,
-                                OtelSpan *spans, usize *spans_count,
-                                usize spans_cap) {
+otel_parse_protobuf_scope_spans(Bytes body, OtelSpan *spans, usize *spans_count,
+                                usize spans_cap, const Logger *logger) {
   assert(logger);
   assert(spans);
   assert(spans_count);
@@ -1168,7 +1175,6 @@ otel_parse_protobuf_scope_spans(Bytes body, const Logger *logger,
       if (ErrKindNone == err.kind) {
         err = otel_parse_protobuf_span(tlv.value, &span, logger);
       }
-      break;
 
       assert(spans_cap >= *spans_count);
 
@@ -1178,6 +1184,8 @@ otel_parse_protobuf_scope_spans(Bytes body, const Logger *logger,
 
       spans[*spans_count] = span;
       *spans_count += 1;
+
+      break;
 
     case 3: // string schema_url
       err = otel_log_string(logger, "scope_spans.schema_url", tlv);
@@ -1229,8 +1237,8 @@ otel_parse_protobuf_resource_spans(Bytes body, OtelSpan *spans,
     case 2: // repeated ScopeSpans scope_spans
       err = otel_protobuf_expect(tlv, TlvWireTypeLen);
       if (ErrKindNone == err.kind) {
-        err = otel_parse_protobuf_scope_spans(tlv.value, logger, spans,
-                                              spans_count, spans_cap);
+        err = otel_parse_protobuf_scope_spans(tlv.value, spans, spans_count,
+                                              spans_cap, logger);
       }
       break;
 
