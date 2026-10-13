@@ -5010,15 +5010,24 @@ static void test_http_close(HttpHandler *handler) {
   http_handler_on_close(&handler->completion, (Error){.kind = ErrKindNone}, 0);
 }
 
+// Room for both pools of `http_server_init`.
+__attribute__((warn_unused_result)) static Arena
+test_http_server_arena(usize inflight_requests_max) {
+  const usize handler_chunk =
+      usize_round_up_multiple_of(sizeof(HttpHandler), POOL_ALIGN);
+  return test_arena(inflight_requests_max *
+                    (handler_chunk + HTTP_HANDLER_ARENA_SIZE));
+}
+
 static void test_http_server_pool(void) {
   const Env *const env = env_platform_make();
 
   // A slot taken from the pool is set up for one connection.
   {
     HttpServer server = {0};
-    assert(ErrKindNone == http_server_init(&server, test_arena(1 * MiB), 1,
-                                           LogLevelError, env)
-                              .kind);
+    const Arena arena = test_http_server_arena(1);
+    assert(ErrKindNone ==
+           http_server_init(&server, arena, 1, LogLevelError, env).kind);
 
     HttpHandler *const handler = pool_acquire(&server.handler_pool);
     assert(handler);
@@ -5046,9 +5055,9 @@ static void test_http_server_pool(void) {
   // Live connections never share a memory block.
   {
     HttpServer server = {0};
-    assert(ErrKindNone == http_server_init(&server, test_arena(1 * MiB), 3,
-                                           LogLevelError, env)
-                              .kind);
+    const Arena arena = test_http_server_arena(3);
+    assert(ErrKindNone ==
+           http_server_init(&server, arena, 3, LogLevelError, env).kind);
 
     HttpHandler *handlers[3] = {0};
     for (usize i = 0; i < 3; i++) {
@@ -5083,9 +5092,9 @@ static void test_http_server_pool(void) {
   // connections than the maximum can come and go.
   {
     HttpServer server = {0};
-    assert(ErrKindNone == http_server_init(&server, test_arena(1 * MiB), 2,
-                                           LogLevelError, env)
-                              .kind);
+    const Arena arena = test_http_server_arena(2);
+    assert(ErrKindNone ==
+           http_server_init(&server, arena, 2, LogLevelError, env).kind);
 
     for (usize i = 0; i < 100; i++) {
       HttpHandler *const a = test_http_accept(&server, 1);
@@ -5279,10 +5288,11 @@ static void test_otel_connection(TestOtelCtx *c) {
   test_io_make(&test_io, &env, test_otel_perform, c);
 
   HttpServer server = {0};
-  assert(ErrKindNone == http_server_init(&server, test_arena(1 * MiB),
-                                         TEST_OTEL_INFLIGHT_MAX, LogLevelAll,
-                                         &env)
-                            .kind);
+  const Arena arena = test_http_server_arena(TEST_OTEL_INFLIGHT_MAX);
+  assert(ErrKindNone ==
+         http_server_init(&server, arena, TEST_OTEL_INFLIGHT_MAX, LogLevelAll,
+                              &env)
+                 .kind);
 
   const i32 saved = test_stdout_silence();
   otel_on_accept(&test_io.io, &server, (Ipv4Addr){0}, TEST_OTEL_FD);
@@ -5436,9 +5446,9 @@ static void test_otel(void) {
       test_io.submit_fails_with = ErrKindAgain;
 
       HttpServer server = {0};
-      assert(ErrKindNone == http_server_init(&server, test_arena(1 * MiB), 1,
-                                             LogLevelAll, &env)
-                                .kind);
+      const Arena arena = test_http_server_arena(1);
+      assert(ErrKindNone ==
+             http_server_init(&server, arena, 1, LogLevelAll, &env).kind);
       const i32 saved = test_stdout_silence();
       otel_on_accept(&test_io.io, &server, (Ipv4Addr){0}, TEST_OTEL_FD);
       test_io_drain(&test_io);
@@ -5485,9 +5495,9 @@ static void test_otel(void) {
     test_io_make(&test_io, &env, test_otel_perform, &c);
 
     HttpServer server = {0};
-    assert(ErrKindNone == http_server_init(&server, test_arena(1 * MiB), 1,
-                                           LogLevelAll, &env)
-                              .kind);
+    const Arena arena = test_http_server_arena(1);
+    assert(ErrKindNone ==
+           http_server_init(&server, arena, 1, LogLevelAll, &env).kind);
     const i32 saved = test_stdout_silence();
     otel_on_accept(&test_io.io, &server, (Ipv4Addr){0}, TEST_OTEL_FD);
     otel_on_accept(&test_io.io, &server, (Ipv4Addr){0}, TEST_OTEL_FD);
@@ -9118,44 +9128,103 @@ static void test_otel_protobuf_decode(void) {
   }
 }
 
-static Error test_otel_parse_any_value(Bytes body, const Logger *logger,
-                                       Arena *arena) {
-  return otel_parse_protobuf_any_value(body, logger, arena, 0);
+__attribute__((warn_unused_result)) static Error
+test_otel_parse_any_value(Bytes body, const Logger *logger) {
+  return otel_parse_protobuf_any_value(body, logger, 0);
 }
 
-static Error test_otel_parse_array_value(Bytes body, const Logger *logger,
-                                         Arena *arena) {
-  return otel_parse_protobuf_array_value(body, logger, arena, 0);
+__attribute__((warn_unused_result)) static Error
+test_otel_parse_array_value(Bytes body, const Logger *logger) {
+  return otel_parse_protobuf_array_value(body, logger, 0);
 }
 
-static Error test_otel_parse_key_value_list(Bytes body, const Logger *logger,
-                                            Arena *arena) {
-  return otel_parse_protobuf_key_value_list(body, logger, arena, 0);
+__attribute__((warn_unused_result)) static Error
+test_otel_parse_key_value_list(Bytes body, const Logger *logger) {
+  return otel_parse_protobuf_key_value_list(body, logger, 0);
 }
 
-static Error test_otel_parse_key_value(Bytes body, const Logger *logger,
-                                       Arena *arena) {
-  return otel_parse_protobuf_key_value(body, logger, arena, 0);
+__attribute__((warn_unused_result)) static Error
+test_otel_parse_key_value(Bytes body, const Logger *logger) {
+  return otel_parse_protobuf_key_value(body, logger, 0);
+}
+
+// Enough for every message built by the field tests.
+#define TEST_OTEL_SPANS_CAP 8
+
+__attribute__((warn_unused_result)) static Error
+test_otel_parse_traces_data(Bytes body, const Logger *logger) {
+  OtelSpan spans[TEST_OTEL_SPANS_CAP] = {0};
+  usize spans_count = 0;
+  const Error err = otel_parse_protobuf_traces_data(
+      body, spans, &spans_count, TEST_OTEL_SPANS_CAP, logger);
+  assert(spans_count <= TEST_OTEL_SPANS_CAP);
+  return err;
+}
+
+__attribute__((warn_unused_result)) static Error
+test_otel_parse_resource_spans(Bytes body, const Logger *logger) {
+  OtelSpan spans[TEST_OTEL_SPANS_CAP] = {0};
+  usize spans_count = 0;
+  const Error err = otel_parse_protobuf_resource_spans(
+      body, spans, &spans_count, TEST_OTEL_SPANS_CAP, logger);
+  assert(spans_count <= TEST_OTEL_SPANS_CAP);
+  return err;
+}
+
+__attribute__((warn_unused_result)) static Error
+test_otel_parse_scope_spans(Bytes body, const Logger *logger) {
+  OtelSpan spans[TEST_OTEL_SPANS_CAP] = {0};
+  usize spans_count = 0;
+  const Error err = otel_parse_protobuf_scope_spans(
+      body, spans, &spans_count, TEST_OTEL_SPANS_CAP, logger);
+  assert(spans_count <= TEST_OTEL_SPANS_CAP);
+  return err;
+}
+
+__attribute__((warn_unused_result)) static Error
+test_otel_parse_span(Bytes body, const Logger *logger) {
+  OtelSpan span = {0};
+  return otel_parse_protobuf_span(body, &span, logger);
+}
+
+__attribute__((warn_unused_result)) static Error
+test_otel_parse_status(Bytes body, const Logger *logger) {
+  OtelStatusCode status_code = OTEL_STATUS_CODE_UNSET;
+  return otel_parse_protobuf_status(body, &status_code, logger);
+}
+
+// A valid record: zero, or zero bytes of length `len`.
+static void test_pb_valid(TestPb *pb, u32 field_num, TlvWireType wire_type,
+                          usize len) {
+  assert(pb);
+
+  const u8 zeros[16] = {0};
+  assert(len <= sizeof(zeros));
+  if (TlvWireTypeLen == wire_type) {
+    test_pb_len(pb, field_num, zeros, len);
+  } else {
+    assert(0 == len);
+    test_pb_zero(pb, field_num, wire_type);
+  }
 }
 
 // Every known field of every message, with the right wire type and with a
 // wrong one, and unknown fields of every wire type.
 static void test_otel_parse_protobuf_fields(void) {
   const Logger logger = logger_make(0, bytes_from_cstr("[test] "));
-  u8 mem[64] = {0};
-  Arena arena = arena_from_mem(mem, sizeof(mem));
+  u8 mem[1] = {0};
 
-  typedef Error (*ParseFn)(Bytes, const Logger *, Arena *);
+  typedef Error (*ParseFn)(Bytes, const Logger *);
   const struct {
     ParseFn fn;
     u32 field_num;
     TlvWireType wire_type;
   } cases[] = {
-      {otel_parse_protobuf_traces_data, 1, TlvWireTypeLen},
+      {test_otel_parse_traces_data, 1, TlvWireTypeLen},
 
-      {otel_parse_protobuf_resource_spans, 1, TlvWireTypeLen},
-      {otel_parse_protobuf_resource_spans, 2, TlvWireTypeLen},
-      {otel_parse_protobuf_resource_spans, 3, TlvWireTypeLen},
+      {test_otel_parse_resource_spans, 1, TlvWireTypeLen},
+      {test_otel_parse_resource_spans, 2, TlvWireTypeLen},
+      {test_otel_parse_resource_spans, 3, TlvWireTypeLen},
 
       {otel_parse_protobuf_resource, 1, TlvWireTypeLen},
       {otel_parse_protobuf_resource, 2, TlvWireTypeVarint},
@@ -9166,31 +9235,31 @@ static void test_otel_parse_protobuf_fields(void) {
       {otel_parse_protobuf_entity_ref, 3, TlvWireTypeLen},
       {otel_parse_protobuf_entity_ref, 4, TlvWireTypeLen},
 
-      {otel_parse_protobuf_scope_spans, 1, TlvWireTypeLen},
-      {otel_parse_protobuf_scope_spans, 2, TlvWireTypeLen},
-      {otel_parse_protobuf_scope_spans, 3, TlvWireTypeLen},
+      {test_otel_parse_scope_spans, 1, TlvWireTypeLen},
+      {test_otel_parse_scope_spans, 2, TlvWireTypeLen},
+      {test_otel_parse_scope_spans, 3, TlvWireTypeLen},
 
       {otel_parse_protobuf_instrumentation_scope, 1, TlvWireTypeLen},
       {otel_parse_protobuf_instrumentation_scope, 2, TlvWireTypeLen},
       {otel_parse_protobuf_instrumentation_scope, 3, TlvWireTypeLen},
       {otel_parse_protobuf_instrumentation_scope, 4, TlvWireTypeVarint},
 
-      {otel_parse_protobuf_span, 1, TlvWireTypeLen},
-      {otel_parse_protobuf_span, 2, TlvWireTypeLen},
-      {otel_parse_protobuf_span, 3, TlvWireTypeLen},
-      {otel_parse_protobuf_span, 4, TlvWireTypeLen},
-      {otel_parse_protobuf_span, 5, TlvWireTypeLen},
-      {otel_parse_protobuf_span, 6, TlvWireTypeVarint},
-      {otel_parse_protobuf_span, 7, TlvWireTypeI64},
-      {otel_parse_protobuf_span, 8, TlvWireTypeI64},
-      {otel_parse_protobuf_span, 9, TlvWireTypeLen},
-      {otel_parse_protobuf_span, 10, TlvWireTypeVarint},
-      {otel_parse_protobuf_span, 11, TlvWireTypeLen},
-      {otel_parse_protobuf_span, 12, TlvWireTypeVarint},
-      {otel_parse_protobuf_span, 13, TlvWireTypeLen},
-      {otel_parse_protobuf_span, 14, TlvWireTypeVarint},
-      {otel_parse_protobuf_span, 15, TlvWireTypeLen},
-      {otel_parse_protobuf_span, 16, TlvWireTypeI32},
+      {test_otel_parse_span, 1, TlvWireTypeLen},
+      {test_otel_parse_span, 2, TlvWireTypeLen},
+      {test_otel_parse_span, 3, TlvWireTypeLen},
+      {test_otel_parse_span, 4, TlvWireTypeLen},
+      {test_otel_parse_span, 5, TlvWireTypeLen},
+      {test_otel_parse_span, 6, TlvWireTypeVarint},
+      {test_otel_parse_span, 7, TlvWireTypeI64},
+      {test_otel_parse_span, 8, TlvWireTypeI64},
+      {test_otel_parse_span, 9, TlvWireTypeLen},
+      {test_otel_parse_span, 10, TlvWireTypeVarint},
+      {test_otel_parse_span, 11, TlvWireTypeLen},
+      {test_otel_parse_span, 12, TlvWireTypeVarint},
+      {test_otel_parse_span, 13, TlvWireTypeLen},
+      {test_otel_parse_span, 14, TlvWireTypeVarint},
+      {test_otel_parse_span, 15, TlvWireTypeLen},
+      {test_otel_parse_span, 16, TlvWireTypeI32},
 
       {otel_parse_protobuf_span_event, 1, TlvWireTypeI64},
       {otel_parse_protobuf_span_event, 2, TlvWireTypeLen},
@@ -9204,8 +9273,8 @@ static void test_otel_parse_protobuf_fields(void) {
       {otel_parse_protobuf_span_link, 5, TlvWireTypeVarint},
       {otel_parse_protobuf_span_link, 6, TlvWireTypeI32},
 
-      {otel_parse_protobuf_status, 2, TlvWireTypeLen},
-      {otel_parse_protobuf_status, 3, TlvWireTypeVarint},
+      {test_otel_parse_status, 2, TlvWireTypeLen},
+      {test_otel_parse_status, 3, TlvWireTypeVarint},
 
       {test_otel_parse_key_value, 1, TlvWireTypeLen},
       {test_otel_parse_key_value, 2, TlvWireTypeLen},
@@ -9229,17 +9298,26 @@ static void test_otel_parse_protobuf_fields(void) {
                                         TlvWireTypeLen, TlvWireTypeI32};
 
   for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    // Span ids have a fixed size.
+    usize len = 0;
+    if (test_otel_parse_span == cases[i].fn) {
+      if (1 == cases[i].field_num) {
+        len = 16;
+      } else if (2 == cases[i].field_num || 4 == cases[i].field_num) {
+        len = 8;
+      }
+    }
+
     // Empty message.
-    assert(ErrKindNone ==
-           cases[i].fn(bytes_make(mem, 0), &logger, &arena).kind);
+    assert(ErrKindNone == cases[i].fn(bytes_make(mem, 0), &logger).kind);
 
     // The right wire type, alone and repeated.
     {
       TestPb pb = {0};
-      test_pb_zero(&pb, cases[i].field_num, cases[i].wire_type);
-      test_pb_zero(&pb, cases[i].field_num, cases[i].wire_type);
+      test_pb_valid(&pb, cases[i].field_num, cases[i].wire_type, len);
+      test_pb_valid(&pb, cases[i].field_num, cases[i].wire_type, len);
       assert(ErrKindNone ==
-             cases[i].fn(bytes_make(pb.data, pb.len), &logger, &arena).kind);
+             cases[i].fn(bytes_make(pb.data, pb.len), &logger).kind);
     }
 
     // Every wrong wire type, even after a valid record.
@@ -9249,10 +9327,10 @@ static void test_otel_parse_protobuf_fields(void) {
         continue;
       }
       TestPb pb = {0};
-      test_pb_zero(&pb, cases[i].field_num, cases[i].wire_type);
+      test_pb_valid(&pb, cases[i].field_num, cases[i].wire_type, len);
       test_pb_zero(&pb, cases[i].field_num, all_wire_types[j]);
       assert(ErrKindInvalidData ==
-             cases[i].fn(bytes_make(pb.data, pb.len), &logger, &arena).kind);
+             cases[i].fn(bytes_make(pb.data, pb.len), &logger).kind);
     }
 
     // Unknown fields of every wire type are skipped.
@@ -9261,10 +9339,10 @@ static void test_otel_parse_protobuf_fields(void) {
       for (usize j = 0; j < sizeof(all_wire_types) / sizeof(all_wire_types[0]);
            j++) {
         test_pb_zero(&pb, 100, all_wire_types[j]);
-        test_pb_zero(&pb, cases[i].field_num, cases[i].wire_type);
+        test_pb_valid(&pb, cases[i].field_num, cases[i].wire_type, len);
       }
       assert(ErrKindNone ==
-             cases[i].fn(bytes_make(pb.data, pb.len), &logger, &arena).kind);
+             cases[i].fn(bytes_make(pb.data, pb.len), &logger).kind);
     }
 
     // Malformed records.
@@ -9272,12 +9350,32 @@ static void test_otel_parse_protobuf_fields(void) {
       u8 truncated[] = {0x0a, 0x05, 0x00};
       assert(ErrKindInvalidData ==
              cases[i]
-                 .fn(bytes_make(truncated, sizeof(truncated)), &logger, &arena)
+                 .fn(bytes_make(truncated, sizeof(truncated)), &logger)
                  .kind);
       u8 group[] = {0x0b};
       assert(ErrKindUnsupported ==
-             cases[i].fn(bytes_make(group, sizeof(group)), &logger, &arena)
+             cases[i].fn(bytes_make(group, sizeof(group)), &logger)
                  .kind);
+    }
+  }
+
+  // Span ids of the wrong size. A root span has no parent id.
+  {
+    const struct {
+      u32 field_num;
+      usize len;
+      ErrorKind err;
+    } id_cases[] = {
+        {1, 0, ErrKindInvalidData}, {1, 8, ErrKindInvalidData},
+        {2, 0, ErrKindInvalidData}, {2, 16, ErrKindInvalidData},
+        {4, 0, ErrKindNone}, {4, 16, ErrKindInvalidData},
+    };
+    for (usize i = 0; i < sizeof(id_cases) / sizeof(id_cases[0]); i++) {
+      TestPb pb = {0};
+      test_pb_valid(&pb, id_cases[i].field_num, TlvWireTypeLen,
+                    id_cases[i].len);
+      assert(id_cases[i].err ==
+             test_otel_parse_span(bytes_make(pb.data, pb.len), &logger).kind);
     }
   }
 }
@@ -9311,8 +9409,6 @@ static void test_otel_any_value_nested(TestPb *dst, usize depth, bool kvlist) {
 
 static void test_otel_parse_protobuf_depth(void) {
   const Logger logger = logger_make(0, bytes_from_cstr("[test] "));
-  u8 mem[64] = {0};
-  Arena arena = arena_from_mem(mem, sizeof(mem));
 
   for (usize k = 0; k < 2; k++) {
     const bool kvlist = 1 == k;
@@ -9320,13 +9416,13 @@ static void test_otel_parse_protobuf_depth(void) {
 
     test_otel_any_value_nested(&pb, OTEL_PROTOBUF_DEPTH_MAX - 1, kvlist);
     assert(ErrKindNone == otel_parse_protobuf_any_value(
-                              bytes_make(pb.data, pb.len), &logger, &arena, 0)
+                              bytes_make(pb.data, pb.len), &logger, 0)
                               .kind);
 
     test_otel_any_value_nested(&pb, OTEL_PROTOBUF_DEPTH_MAX, kvlist);
     assert(ErrKindInvalidData ==
            otel_parse_protobuf_any_value(bytes_make(pb.data, pb.len), &logger,
-                                         &arena, 0)
+                                         0)
                .kind);
 
     // Through the whole message too.
@@ -9342,8 +9438,8 @@ static void test_otel_parse_protobuf_depth(void) {
     TestPb traces = {0};
     test_pb_msg(&traces, 1, &resource_spans);
     assert(ErrKindInvalidData ==
-           otel_parse_protobuf_traces_data(bytes_make(traces.data, traces.len),
-                                           &logger, &arena)
+           test_otel_parse_traces_data(bytes_make(traces.data, traces.len),
+                                       &logger)
                .kind);
   }
 }
@@ -9351,8 +9447,6 @@ static void test_otel_parse_protobuf_depth(void) {
 // A message with every field set, logged so that the formats run.
 static void test_otel_parse_protobuf_traces_data(void) {
   const Logger logger = logger_make(LogLevelAll, bytes_from_cstr("[test] "));
-  u8 mem[64] = {0};
-  Arena arena = arena_from_mem(mem, sizeof(mem));
 
   const u8 trace_id[16] = {0xf8, 0xfa, 0xe6, 0xc4, 0xbb, 0x96, 0xd9, 0xaa,
                            0xaa, 0xaf, 0x8e, 0x92, 0xf5, 0x8e, 0x36, 0xba};
@@ -9482,16 +9576,42 @@ static void test_otel_parse_protobuf_traces_data(void) {
   test_pb_msg(&traces, 1, &resource_spans);
   test_pb_msg(&traces, 1, &resource_spans);
 
+  OtelSpan spans[TEST_OTEL_SPANS_CAP] = {0};
+  usize spans_count = 0;
   assert(ErrKindNone ==
          otel_parse_protobuf_traces_data(bytes_make(traces.data, traces.len),
-                                         &logger, &arena)
+                                         spans, &spans_count,
+                                         TEST_OTEL_SPANS_CAP, &logger)
              .kind);
+  // Two `ResourceSpans` of two spans each.
+  assert(4 == spans_count);
+  for (usize i = 0; i < spans_count; i++) {
+    const OtelSpan *const s = &spans[i];
+    assert(bytes_eq(s->trace_id, bytes_make((u8 *)trace_id, sizeof(trace_id))));
+    assert(bytes_eq(s->id, bytes_make((u8 *)span_id, sizeof(span_id))));
+    assert(bytes_eq(s->parent_id, bytes_make((u8 *)span_id, sizeof(span_id))));
+    assert(bytes_eq_cstr(s->name, "GET /sessions/whoami"));
+    assert(OTEL_SPAN_KIND_SERVER == s->kind);
+    assert(1791375613802345000ULL == s->start_time_nano);
+    assert(1791375613803065792ULL == s->end_time_nano);
+    assert(OTEL_STATUS_CODE_ERROR == s->status_code);
+    otel_span_log(s, &logger);
+  }
+
+  // Too many spans.
+  assert(ErrKindRange ==
+         otel_parse_protobuf_traces_data(bytes_make(traces.data, traces.len),
+                                         spans, &spans_count, 3, &logger)
+             .kind);
+  assert(3 == spans_count);
 
   // Empty input is an empty `TracesData`.
   assert(ErrKindNone ==
-         otel_parse_protobuf_traces_data(bytes_make(traces.data, 0), &logger,
-                                         &arena)
+         otel_parse_protobuf_traces_data(bytes_make(traces.data, 0), spans,
+                                         &spans_count, TEST_OTEL_SPANS_CAP,
+                                         &logger)
              .kind);
+  assert(0 == spans_count);
 
   // With a single top level record, every strict prefix is cut inside it, so
   // it fails without reading past the end.
@@ -9501,8 +9621,8 @@ static void test_otel_parse_protobuf_traces_data(void) {
     test_pb_msg(&single, 1, &resource_spans);
     for (usize len = 1; len < single.len; len++) {
       assert(ErrKindInvalidData ==
-             otel_parse_protobuf_traces_data(bytes_make(single.data, len),
-                                             &quiet, &arena)
+             test_otel_parse_traces_data(bytes_make(single.data, len),
+                                         &quiet)
                  .kind);
     }
   }
@@ -9520,8 +9640,8 @@ static void test_otel_parse_protobuf_traces_data(void) {
     TestPb bad = {0};
     test_pb_msg(&bad, 1, &bad_resource_spans);
     assert(ErrKindInvalidData ==
-           otel_parse_protobuf_traces_data(bytes_make(bad.data, bad.len),
-                                           &logger, &arena)
+           test_otel_parse_traces_data(bytes_make(bad.data, bad.len),
+                                       &logger)
                .kind);
   }
 }

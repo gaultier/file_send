@@ -1143,7 +1143,8 @@ otel_parse_protobuf_span(Bytes body, OtelSpan *span, const Logger *logger) {
         return err;
       }
 
-      if (8 != tlv.value.len) {
+      // Empty for a root span.
+      if (0 != tlv.value.len && 8 != tlv.value.len) {
         return (Error){.kind = ErrKindInvalidData};
       }
       span->parent_id = tlv.value;
