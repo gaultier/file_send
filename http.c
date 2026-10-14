@@ -449,9 +449,6 @@ http_parse_resp(Bytes src, HttpResponseStatusLine *dst_status_line,
 
   assert(status_line_advanced > 0);
 
-  Bytes headers_bytes = bytes_take(src, headers_sep_find.idx);
-  bytes_advance(&headers_bytes, status_line_advanced);
-
   err = http_parse_headers(
       bytes_subslice(src, status_line_advanced, headers_sep_find.idx),
       dst_headers, dst_headers_len, headers_cap);
