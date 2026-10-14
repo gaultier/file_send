@@ -27,6 +27,12 @@ typedef struct {
   Bytes url; // Does not have a scheme, domain, port.
 } HttpRequestStatusLine;
 
+typedef struct {
+  u8 version_minor;
+  u8 version_major;
+  u16 status_code;
+} HttpResponseStatusLine;
+
 __attribute__((warn_unused_result)) static Find
 http_find_headers_end(Bytes haystack) {
   return bytes_find(haystack, bytes_from_cstr("\r\n\r\n"),
@@ -358,5 +364,50 @@ http_parse_req_status_line(Bytes src, HttpRequestStatusLine *res,
   assert(res->version_minor <= 9);
 
   *advanced = src.len - remaining.len;
+  return (Error){0};
+}
+
+__attribute__((warn_unused_result)) static Error
+http_parse_resp_status_line(Bytes src, HttpResponseStatusLine *res,
+                            usize *advanced) {
+  assert(res);
+  assert(advanced);
+
+  Bytes remaining = src;
+
+  {
+    const Bytes http_version = remaining;
+    Split split = bytes_split(http_version, bytes_from_cstr(" "));
+    if (!split.found) {
+      return (Error){.kind = ErrKindInvalidData};
+    }
+    if (!bytes_eat(&split.left, bytes_from_cstr("HTTP/"))) {
+      return (Error){.kind = ErrKindInvalidData};
+    }
+
+    // `DIGIT "." DIGIT` (RFC 9112 section 2.3). Which versions are supported is
+    // up to the caller.
+    const Bytes version = split.left;
+    if (3 != version.len || !char_is_digit_ascii(version.data[0]) ||
+        '.' != version.data[1] || !char_is_digit_ascii(version.data[2])) {
+      return (Error){.kind = ErrKindInvalidData};
+    }
+    res->version_major = (u8)(version.data[0] - '0');
+    res->version_minor = (u8)(version.data[2] - '0');
+    assert(res->version_major <= 9);
+    assert(res->version_minor <= 9);
+
+    remaining = split.right;
+  }
+
+  // Skip over status text.
+  if (!bytes_advance_until(&remaining, bytes_from_cstr("\r\n"),
+                           FindOptionsIndexAfterNeedleEnd)) {
+    return (Error){.kind = ErrKindInvalidData};
+  }
+
+  assert(remaining.len < src.len);
+  *advanced = src.len - remaining.len;
+
   return (Error){0};
 }

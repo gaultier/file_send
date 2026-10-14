@@ -1878,6 +1878,33 @@ __attribute__((warn_unused_result)) static Split bytes_split(Bytes haystack,
   return res;
 }
 
+__attribute__((warn_unused_result)) static bool bytes_eat(Bytes *haystack,
+                                                          Bytes needle) {
+  assert(haystack);
+
+  if (!bytes_starts_with(*haystack, needle)) {
+    return false;
+  }
+
+  bytes_advance(haystack, needle.len);
+
+  return true;
+}
+
+__attribute__((warn_unused_result)) static bool
+bytes_advance_until(Bytes *haystack, Bytes needle, FindOptions opts) {
+  assert(haystack);
+
+  const Find find = bytes_find(*haystack, needle, opts);
+  if (!find.found) {
+    return false;
+  }
+
+  haystack->data += find.idx;
+  haystack->len -= find.idx;
+
+  return true;
+}
 // ----------------- Pool (free list) ------------
 // A free chunk holds the link to the next free chunk in its first bytes. An
 // acquired chunk is all user data.
