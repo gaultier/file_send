@@ -324,6 +324,30 @@ __attribute__((warn_unused_result)) static Bytes bytes_take(Bytes input,
   return (Bytes){.data = input.data, .len = count};
 }
 
+__attribute__((unused)) __attribute__((warn_unused_result)) static Bytes
+bytes_skip(Bytes input, usize count) {
+  if (count > input.len) {
+    return (Bytes){0};
+  }
+
+  return (Bytes){.data = input.data + count, .len = input.len - count};
+}
+
+// [from, to)
+__attribute__((warn_unused_result)) static Bytes
+bytes_subslice(Bytes input, usize from, usize to) {
+  assert(from <= to);
+  assert(to <= input.len);
+
+  if (from == to) {
+    // Adding to NULL, even 0, is UB in C.
+    return (Bytes){.data = input.data ? input.data + from : NULL, .len = 0};
+  }
+  assert(input.data);
+
+  return (Bytes){.data = input.data + from, .len = to - from};
+}
+
 __attribute__((warn_unused_result)) static bool
 bytes_starts_with(Bytes s, Bytes prefix) {
   if (s.len < prefix.len) {

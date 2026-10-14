@@ -5110,6 +5110,96 @@ static void test_http_parse_headers(void) {
     }
   }
 }
+static void test_http_parse_resp(void) {
+  // Status line, headers, and the body is not read.
+  {
+    HttpResponseStatusLine sl = {0};
+    HttpHeader headers[4] = {0};
+    usize headers_len = 0;
+    usize advanced = 0;
+    const Bytes src = bytes_from_cstr("HTTP/1.1 200 OK\r\n"
+                                      "Content-Length: 4\r\n"
+                                      "A: b\r\n"
+                                      "\r\n"
+                                      "body");
+    assert(ErrKindNone == http_parse_resp(src, &sl, headers, &headers_len,
+                                          4, &advanced)
+                              .kind);
+    assert(1 == sl.version_major);
+    assert(1 == sl.version_minor);
+    assert(200 == sl.status_code);
+    assert(2 == headers_len);
+    assert(bytes_eq_cstr(headers[0].key, "Content-Length"));
+    assert(bytes_eq_cstr(headers[0].value, "4"));
+    assert(bytes_eq_cstr(headers[1].key, "A"));
+    assert(bytes_eq_cstr(headers[1].value, "b"));
+    assert(src.len - strlen("body") == advanced);
+    // Borrows from the input.
+    assert(src.data + strlen("HTTP/1.1 200 OK\r\n") == headers[0].key.data);
+  }
+
+  const struct {
+    const char *src;
+    ErrorKind err;
+    u16 status_code;
+    usize headers_len;
+    // Only checked on success.
+    usize advanced;
+  } cases[] = {
+      // No headers.
+      {"HTTP/1.1 204 No Content\r\n\r\n", ErrKindNone, 204, 0, 27},
+      {"HTTP/1.1 204 \r\n\r\n", ErrKindNone, 204, 0, 17},
+      // Only the first blank line counts: the rest is body, or the next
+      // response.
+      {"HTTP/1.1 200 OK\r\nA: b\r\n\r\n\r\n\r\n", ErrKindNone, 200, 1, 25},
+      {"HTTP/1.1 200 OK\r\n\r\nHTTP/1.1 500 Oops\r\n\r\n", ErrKindNone, 200, 0,
+       19},
+      // Exactly `headers_cap` headers fit.
+      {"HTTP/1.1 200 OK\r\nA: 1\r\nB: 2\r\n\r\n", ErrKindNone, 200, 2, 31},
+      // No blank line yet: more data is needed, whatever came before.
+      {"", ErrKindAgain, 0, 0, 0},
+      {"HTTP/1.1", ErrKindAgain, 0, 0, 0},
+      {"HTTP/1.1 200 OK\r\n", ErrKindAgain, 0, 0, 0},
+      {"HTTP/1.1 200 OK\r\nA: b\r\n", ErrKindAgain, 0, 0, 0},
+      {"HTTP/1.1 200 OK\r\nA: b\r\n\r", ErrKindAgain, 0, 0, 0},
+      {"garbage", ErrKindAgain, 0, 0, 0},
+      // LF alone does not end the headers.
+      {"HTTP/1.1 200 OK\n\n", ErrKindAgain, 0, 0, 0},
+      // Bad status line.
+      {"\r\n\r\n", ErrKindInvalidData, 0, 0, 0},
+      {"garbage\r\n\r\n", ErrKindInvalidData, 0, 0, 0},
+      {"HTTP/1.1 600 OK\r\n\r\n", ErrKindInvalidData, 0, 0, 0},
+      {"HTTP/1.1 200\r\n\r\n", ErrKindInvalidData, 0, 0, 0},
+      // The status line does not reach past the blank line.
+      {"HTTP/1.1\r\n\r\n 200 OK\r\n", ErrKindInvalidData, 0, 0, 0},
+      // Bad header.
+      {"HTTP/1.1 200 OK\r\nA b\r\n\r\n", ErrKindInvalidData, 0, 0, 0},
+      {"HTTP/1.1 200 OK\r\nA : b\r\n\r\n", ErrKindInvalidData, 0, 0, 0},
+      {"HTTP/1.1 200 OK\r\n A: b\r\n\r\n", ErrKindInvalidData, 0, 0, 0},
+      // More headers than `headers_cap`.
+      {"HTTP/1.1 200 OK\r\nA: 1\r\nB: 2\r\nC: 3\r\n\r\n", ErrKindOOM, 0, 0, 0},
+  };
+  for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    HttpResponseStatusLine sl = {0};
+    HttpHeader headers[2] = {0};
+    usize headers_len = 0;
+    usize advanced = 42;
+    const Bytes src = bytes_from_cstr(cases[i].src);
+    assert(cases[i].err == http_parse_resp(src, &sl, headers, &headers_len, 2,
+                                           &advanced)
+                               .kind);
+    if (ErrKindNone == cases[i].err) {
+      assert(cases[i].status_code == sl.status_code);
+      assert(cases[i].headers_len == headers_len);
+      assert(cases[i].advanced == advanced);
+      assert(advanced <= src.len);
+    } else {
+      // Untouched on error.
+      assert(42 == advanced);
+    }
+  }
+}
+
 
 // What `otel_on_accept` does with a fresh connection.
 __attribute__((warn_unused_result)) static HttpHandler *
@@ -9818,6 +9908,7 @@ static void test(const char *filter) {
       {"http_find_headers_end", test_http_find_headers_end},
       {"http_parse_req_status_line", test_http_parse_req_status_line},
       {"http_parse_resp_status_line", test_http_parse_resp_status_line},
+      {"http_parse_resp", test_http_parse_resp},
       {"http_parse_headers", test_http_parse_headers},
       {"http_server_pool", test_http_server_pool},
       {"otel", test_otel},
