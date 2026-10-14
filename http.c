@@ -367,6 +367,46 @@ http_parse_req_status_line(Bytes src, HttpRequestStatusLine *res,
   return (Error){0};
 }
 
+// Parse the start line and headers of a request (RFC 9112 section 2.1).
+// `dst_advanced` is where the body starts. `ErrKindAgain` when the headers are
+// not all in `src` yet. The status line and headers borrow from `src`.
+__attribute__((warn_unused_result)) static Error
+http_parse_req(Bytes src, HttpRequestStatusLine *dst_status_line,
+               HttpHeader *dst_headers, usize *dst_headers_len,
+               usize headers_cap, usize *dst_advanced) {
+  assert(dst_status_line);
+  assert(dst_headers);
+  assert(dst_headers_len);
+  assert(dst_advanced);
+
+  const Find headers_sep_find = http_find_headers_end(src);
+  if (!headers_sep_find.found) {
+    return (Error){.kind = ErrKindAgain};
+  }
+  assert(headers_sep_find.idx <= src.len);
+
+  usize status_line_advanced = 0;
+  const Error status_line_err =
+      http_parse_req_status_line(bytes_take(src, headers_sep_find.idx),
+                                 dst_status_line, &status_line_advanced);
+  if (ErrKindNone != status_line_err.kind) {
+    return status_line_err;
+  }
+  assert(status_line_advanced > 0);
+  assert(status_line_advanced <= headers_sep_find.idx);
+
+  const Error headers_err = http_parse_headers(
+      bytes_subslice(src, status_line_advanced, headers_sep_find.idx),
+      dst_headers, dst_headers_len, headers_cap);
+  if (ErrKindNone != headers_err.kind) {
+    return headers_err;
+  }
+
+  *dst_advanced = headers_sep_find.idx;
+
+  return (Error){0};
+}
+
 __attribute__((warn_unused_result)) static Error
 http_parse_resp_status_line(Bytes src, HttpResponseStatusLine *res,
                             usize *advanced) {

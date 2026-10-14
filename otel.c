@@ -139,8 +139,11 @@ static void otel_on_read(IoCompletion *completion, Error read_err,
   puts("");
 
   const Bytes recv = bytes_buffer_to_bytes(handler->recv);
-  const Find headers_body_sep = http_find_headers_end(recv);
-  if (!headers_body_sep.found) {
+  HttpRequestStatusLine sl = {0};
+  usize advanced = 0;
+  Error err = http_parse_req(recv, &sl, handler->headers, &handler->headers_len,
+                             handler->headers_cap, &advanced);
+  if (ErrKindAgain == err.kind) {
     // The headers do not fit.
     if (0 == bytes_buffer_space(handler->recv)) {
       log(&handler->logger, LogLevelError, "headers too big");
@@ -148,27 +151,21 @@ static void otel_on_read(IoCompletion *completion, Error read_err,
       return;
     }
 
-    const Error err =
-        io->read(io, &handler->completion, handler->socket,
-                 bytes_buffer_space_bytes(handler->recv), otel_on_read);
+    err = io->read(io, &handler->completion, handler->socket,
+                   bytes_buffer_space_bytes(handler->recv), otel_on_read);
     if (ErrKindNone != err.kind) {
       log_err(&handler->logger, "failed to read", err);
       otel_handler_close(handler);
     }
     return;
   }
-  assert(headers_body_sep.idx <= recv.len);
-
-  Bytes headers = bytes_take(recv, headers_body_sep.idx);
-  HttpRequestStatusLine sl = {0};
-  usize advanced = 0;
-  Error err = http_parse_req_status_line(headers, &sl, &advanced);
   if (ErrKindNone != err.kind) {
-    log_err(&handler->logger, "failed to parse http status line", err);
+    log_err(&handler->logger, "failed to parse http request", err);
     otel_handler_close(handler);
     return;
   }
-  assert(advanced <= headers.len);
+  assert(advanced <= recv.len);
+  assert(handler->headers_len <= handler->headers_cap);
 
   // HTTP/1.x only. A higher minor version is handled as 1.1 (RFC 9110 section
   // 2.5).
@@ -179,26 +176,10 @@ static void otel_on_read(IoCompletion *completion, Error read_err,
     return;
   }
 
-  bytes_advance(&headers, advanced);
-
-  // TODO: Only for debug, remove.
-  fwrite(headers.data, 1, headers.len, stdout);
-  puts("");
-
-  err = http_parse_headers(headers, handler->headers, &handler->headers_len,
-                           handler->headers_cap);
-  if (ErrKindNone != err.kind) {
-    log_err(&handler->logger, "failed to parse http headers", err);
-    otel_handler_close(handler);
-    return;
-  }
-  assert(handler->headers_len <= handler->headers_cap);
-
   log(&handler->logger, LogLevelDebug, "parsed %zu HTTP headers",
       handler->headers_len);
 
-  const Bytes body = (Bytes){.data = recv.data + headers_body_sep.idx,
-                             .len = recv.len - headers_body_sep.idx};
+  const Bytes body = bytes_subslice(recv, advanced, recv.len);
   {
     const usize max_spans_in_batch = 1024; // TODO: Adjust.
     OtelSpan *spans = arena_alloc(&handler->arena, __alignof__(OtelSpan),

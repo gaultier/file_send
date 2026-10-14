@@ -5110,6 +5110,103 @@ static void test_http_parse_headers(void) {
     }
   }
 }
+static void test_http_parse_req(void) {
+  // Status line, headers, and the body is not read.
+  {
+    HttpRequestStatusLine sl = {0};
+    HttpHeader headers[4] = {0};
+    usize headers_len = 0;
+    usize advanced = 0;
+    const Bytes src = bytes_from_cstr("POST /v1/traces HTTP/1.1\r\n"
+                                      "Host: x\r\n"
+                                      "Content-Length: 4\r\n"
+                                      "\r\n"
+                                      "body");
+    assert(ErrKindNone ==
+           http_parse_req(src, &sl, headers, &headers_len, 4, &advanced).kind);
+    assert(HTTP_METHOD_POST == sl.method);
+    assert(bytes_eq_cstr(sl.url, "/v1/traces"));
+    assert(1 == sl.version_major);
+    assert(1 == sl.version_minor);
+    assert(2 == headers_len);
+    assert(bytes_eq_cstr(headers[0].key, "Host"));
+    assert(bytes_eq_cstr(headers[0].value, "x"));
+    assert(bytes_eq_cstr(headers[1].key, "Content-Length"));
+    assert(bytes_eq_cstr(headers[1].value, "4"));
+    assert(src.len - strlen("body") == advanced);
+    // Borrows from the input.
+    assert(src.data + strlen("POST ") == sl.url.data);
+    assert(src.data + strlen("POST /v1/traces HTTP/1.1\r\n") ==
+           headers[0].key.data);
+  }
+
+  const struct {
+    const char *src;
+    ErrorKind err;
+    HttpMethod method;
+    usize headers_len;
+    // Only checked on success.
+    usize advanced;
+  } cases[] = {
+      // No headers.
+      {"GET / HTTP/1.1\r\n\r\n", ErrKindNone, HTTP_METHOD_GET, 0, 18},
+      // Only the first blank line counts: the rest is body, or the next
+      // request.
+      {"GET / HTTP/1.1\r\nA: b\r\n\r\n\r\n\r\n", ErrKindNone, HTTP_METHOD_GET,
+       1, 24},
+      {"GET / HTTP/1.1\r\n\r\nPUT / HTTP/1.1\r\n\r\n", ErrKindNone,
+       HTTP_METHOD_GET, 0, 18},
+      // Exactly `headers_cap` headers fit.
+      {"HEAD / HTTP/1.1\r\nA: 1\r\nB: 2\r\n\r\n", ErrKindNone, HTTP_METHOD_HEAD,
+       2, 31},
+      // No blank line yet: more data is needed, whatever came before.
+      {"", ErrKindAgain, HTTP_METHOD_GET, 0, 0},
+      {"GET", ErrKindAgain, HTTP_METHOD_GET, 0, 0},
+      {"GET / HTTP/1.1\r\n", ErrKindAgain, HTTP_METHOD_GET, 0, 0},
+      {"GET / HTTP/1.1\r\nA: b\r\n", ErrKindAgain, HTTP_METHOD_GET, 0, 0},
+      {"GET / HTTP/1.1\r\nA: b\r\n\r", ErrKindAgain, HTTP_METHOD_GET, 0, 0},
+      {"garbage", ErrKindAgain, HTTP_METHOD_GET, 0, 0},
+      // LF alone does not end the headers.
+      {"GET / HTTP/1.1\n\n", ErrKindAgain, HTTP_METHOD_GET, 0, 0},
+      // Bad status line.
+      {"\r\n\r\n", ErrKindInvalidData, HTTP_METHOD_GET, 0, 0},
+      {"garbage\r\n\r\n", ErrKindInvalidData, HTTP_METHOD_GET, 0, 0},
+      {"BREW / HTTP/1.1\r\n\r\n", ErrKindInvalidData, HTTP_METHOD_GET, 0, 0},
+      {"GET / HTTP/1.10\r\n\r\n", ErrKindInvalidData, HTTP_METHOD_GET, 0, 0},
+      // The status line does not reach past the blank line.
+      {"GET /\r\n\r\n HTTP/1.1\r\n", ErrKindInvalidData, HTTP_METHOD_GET, 0,
+       0},
+      // Bad header.
+      {"GET / HTTP/1.1\r\nA b\r\n\r\n", ErrKindInvalidData, HTTP_METHOD_GET, 0,
+       0},
+      {"GET / HTTP/1.1\r\nA : b\r\n\r\n", ErrKindInvalidData, HTTP_METHOD_GET,
+       0, 0},
+      {"GET / HTTP/1.1\r\n A: b\r\n\r\n", ErrKindInvalidData, HTTP_METHOD_GET,
+       0, 0},
+      // More headers than `headers_cap`.
+      {"GET / HTTP/1.1\r\nA: 1\r\nB: 2\r\nC: 3\r\n\r\n", ErrKindOOM,
+       HTTP_METHOD_GET, 0, 0},
+  };
+  for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    HttpRequestStatusLine sl = {0};
+    HttpHeader headers[2] = {0};
+    usize headers_len = 0;
+    usize advanced = 42;
+    const Bytes src = bytes_from_cstr(cases[i].src);
+    assert(cases[i].err ==
+           http_parse_req(src, &sl, headers, &headers_len, 2, &advanced).kind);
+    if (ErrKindNone == cases[i].err) {
+      assert(cases[i].method == sl.method);
+      assert(cases[i].headers_len == headers_len);
+      assert(cases[i].advanced == advanced);
+      assert(advanced <= src.len);
+    } else {
+      // Untouched on error.
+      assert(42 == advanced);
+    }
+  }
+}
+
 static void test_http_parse_resp(void) {
   // Status line, headers, and the body is not read.
   {
@@ -9908,6 +10005,7 @@ static void test(const char *filter) {
       {"http_find_headers_end", test_http_find_headers_end},
       {"http_parse_req_status_line", test_http_parse_req_status_line},
       {"http_parse_resp_status_line", test_http_parse_resp_status_line},
+      {"http_parse_req", test_http_parse_req},
       {"http_parse_resp", test_http_parse_resp},
       {"http_parse_headers", test_http_parse_headers},
       {"http_server_pool", test_http_server_pool},
