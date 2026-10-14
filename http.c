@@ -407,9 +407,9 @@ http_parse_resp_status_line(Bytes src, HttpResponseStatusLine *res,
         !char_is_digit_ascii(remaining.data[2]) || ' ' != remaining.data[3]) {
       return (Error){.kind = ErrKindInvalidData};
     }
-    const u16 status_code = (u16)((remaining.data[0] - '0') * 100 +
-                                  (remaining.data[1] - '0') * 10 +
-                                  (remaining.data[2] - '0'));
+    const u16 status_code =
+        (u16)((remaining.data[0] - '0') * 100 + (remaining.data[1] - '0') * 10 +
+              (remaining.data[2] - '0'));
     if (status_code < 100 || status_code > 599) {
       return (Error){.kind = ErrKindInvalidData};
     }
@@ -426,6 +426,38 @@ http_parse_resp_status_line(Bytes src, HttpResponseStatusLine *res,
 
   assert(remaining.len < src.len);
   *advanced = src.len - remaining.len;
+
+  return (Error){0};
+}
+
+__attribute__((warn_unused_result)) static Error
+http_parse_resp(Bytes src, HttpResponseStatusLine *dst_status_line,
+                HttpHeader *dst_headers, usize *dst_headers_len,
+                usize headers_cap, usize *dst_advanced) {
+  const Find headers_sep_find = http_find_headers_end(src);
+  if (!headers_sep_find.found) {
+    return (Error){.kind = ErrKindAgain};
+  }
+
+  usize status_line_advanced = 0;
+  Error err =
+      http_parse_resp_status_line(src, dst_status_line, &status_line_advanced);
+  if (ErrKindNone != err.kind) {
+    return err;
+  }
+
+  assert(status_line_advanced > 0);
+
+  Bytes headers_bytes = bytes_take(src, headers_sep_find.idx);
+  bytes_advance(&headers_bytes, status_line_advanced);
+
+  err = http_parse_headers(headers_bytes, dst_headers, dst_headers_len,
+                           headers_cap);
+  if (ErrKindNone != err.kind) {
+    return err;
+  }
+
+  *dst_advanced = headers_sep_find.idx;
 
   return (Error){0};
 }
