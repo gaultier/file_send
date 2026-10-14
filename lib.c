@@ -1905,6 +1905,7 @@ bytes_advance_until(Bytes *haystack, Bytes needle, FindOptions opts) {
 
   return true;
 }
+
 // ----------------- Pool (free list) ------------
 // A free chunk holds the link to the next free chunk in its first bytes. An
 // acquired chunk is all user data.

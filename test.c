@@ -4850,6 +4850,123 @@ static void test_http_parse_req_status_line(void) {
   }
 }
 
+// Cases follow RFC 9110 section 15 and RFC 9112 section 4.
+static void test_http_parse_resp_status_line(void) {
+  // The version and status code are kept, and only the status line is
+  // consumed.
+  {
+    HttpResponseStatusLine sl = {0};
+    usize advanced = 0;
+    const Bytes src =
+        bytes_from_cstr("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+    assert(ErrKindNone ==
+           http_parse_resp_status_line(src, &sl, &advanced).kind);
+    assert(1 == sl.version_major);
+    assert(1 == sl.version_minor);
+    assert(200 == sl.status_code);
+    assert(strlen("HTTP/1.1 200 OK\r\n") == advanced);
+  }
+
+  // Valid lines.
+  {
+    const struct {
+      const char *line;
+      u8 major;
+      u8 minor;
+      u16 status_code;
+    } cases[] = {
+        {"HTTP/1.0 200 OK\r\n", 1, 0, 200},
+        {"HTTP/1.1 404 Not Found\r\n", 1, 1, 404},
+        {"HTTP/2.0 500 Internal Server Error\r\n", 2, 0, 500},
+        {"HTTP/0.9 301 Moved Permanently\r\n", 0, 9, 301},
+        {"HTTP/9.9 204 No Content\r\n", 9, 9, 204},
+        // Bounds of the valid range.
+        {"HTTP/1.1 100 Continue\r\n", 1, 1, 100},
+        {"HTTP/1.1 599 \r\n", 1, 1, 599},
+        // Unknown codes in the range are fine.
+        {"HTTP/1.1 299 Whatever\r\n", 1, 1, 299},
+        // The reason phrase may be empty, but the space before it is required.
+        {"HTTP/1.1 200 \r\n", 1, 1, 200},
+        // The reason phrase is not inspected.
+        {"HTTP/1.1 200 \t ok  \x80\xff\r\n", 1, 1, 200},
+        {"HTTP/1.1 200 a\rb\r\n", 1, 1, 200},
+        {"HTTP/1.1 200 a\nb\r\n", 1, 1, 200},
+    };
+    for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+      HttpResponseStatusLine sl = {
+          .version_major = 42, .version_minor = 42, .status_code = 42};
+      usize advanced = 0;
+      const Bytes src = bytes_from_cstr(cases[i].line);
+      assert(ErrKindNone ==
+             http_parse_resp_status_line(src, &sl, &advanced).kind);
+      assert(cases[i].major == sl.version_major);
+      assert(cases[i].minor == sl.version_minor);
+      assert(cases[i].status_code == sl.status_code);
+      assert(src.len == advanced);
+    }
+  }
+
+  // Malformed lines.
+  {
+    const char *const cases[] = {
+        // Empty.
+        "",
+        // No space after the version.
+        "HTTP/1.1",
+        "HTTP/1.1\r\n",
+        // Not HTTP, and the name is case-sensitive.
+        "HTTPS/1.1 200 OK\r\n",
+        "http/1.1 200 OK\r\n",
+        "HTTP 200 OK\r\n",
+        " HTTP/1.1 200 OK\r\n",
+        // Not `DIGIT "." DIGIT`.
+        "HTTP/ 200 OK\r\n",
+        "HTTP/1 200 OK\r\n",
+        "HTTP/1. 200 OK\r\n",
+        "HTTP/.1 200 OK\r\n",
+        "HTTP/1.10 200 OK\r\n",
+        "HTTP/11.1 200 OK\r\n",
+        "HTTP/a.b 200 OK\r\n",
+        "HTTP/1,1 200 OK\r\n",
+        "HTTP/1a1 200 OK\r\n",
+        "HTTP/1.a 200 OK\r\n",
+        // Two spaces after the version.
+        "HTTP/1.1  200 OK\r\n",
+        // Not `3DIGIT`.
+        "HTTP/1.1 \r\n",
+        "HTTP/1.1 20 OK\r\n",
+        "HTTP/1.1 2000 OK\r\n",
+        "HTTP/1.1 a00 OK\r\n",
+        "HTTP/1.1 2a0 OK\r\n",
+        "HTTP/1.1 20a OK\r\n",
+        "HTTP/1.1 -20 OK\r\n",
+        // Out of `100..599`.
+        "HTTP/1.1 000 OK\r\n",
+        "HTTP/1.1 099 OK\r\n",
+        "HTTP/1.1 600 OK\r\n",
+        "HTTP/1.1 999 OK\r\n",
+        // No space after the status code.
+        "HTTP/1.1 200",
+        "HTTP/1.1 200\r\n",
+        "HTTP/1.1 200\tOK\r\n",
+        // No CRLF.
+        "HTTP/1.1 200 ",
+        "HTTP/1.1 200 OK",
+        "HTTP/1.1 200 OK\r",
+        "HTTP/1.1 200 OK\n",
+    };
+    for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+      HttpResponseStatusLine sl = {0};
+      usize advanced = 0;
+      assert(ErrKindInvalidData ==
+             http_parse_resp_status_line(bytes_from_cstr(cases[i]), &sl,
+                                         &advanced)
+                 .kind);
+      assert(0 == advanced);
+    }
+  }
+}
+
 static void test_http_parse_headers(void) {
   const struct {
     const char *src;
@@ -9700,6 +9817,7 @@ static void test(const char *filter) {
       {"bytes_split", test_bytes_split},
       {"http_find_headers_end", test_http_find_headers_end},
       {"http_parse_req_status_line", test_http_parse_req_status_line},
+      {"http_parse_resp_status_line", test_http_parse_resp_status_line},
       {"http_parse_headers", test_http_parse_headers},
       {"http_server_pool", test_http_server_pool},
       {"otel", test_otel},

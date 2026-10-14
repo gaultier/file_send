@@ -400,7 +400,25 @@ http_parse_resp_status_line(Bytes src, HttpResponseStatusLine *res,
     remaining = split.right;
   }
 
-  // Skip over status text.
+  // `3DIGIT SP` (RFC 9112 section 4), in `100..599` (RFC 9110 section 15).
+  {
+    if (remaining.len < 4 || !char_is_digit_ascii(remaining.data[0]) ||
+        !char_is_digit_ascii(remaining.data[1]) ||
+        !char_is_digit_ascii(remaining.data[2]) || ' ' != remaining.data[3]) {
+      return (Error){.kind = ErrKindInvalidData};
+    }
+    const u16 status_code = (u16)((remaining.data[0] - '0') * 100 +
+                                  (remaining.data[1] - '0') * 10 +
+                                  (remaining.data[2] - '0'));
+    if (status_code < 100 || status_code > 599) {
+      return (Error){.kind = ErrKindInvalidData};
+    }
+    res->status_code = status_code;
+
+    bytes_advance(&remaining, 4);
+  }
+
+  // Skip over the reason phrase, which may be empty.
   if (!bytes_advance_until(&remaining, bytes_from_cstr("\r\n"),
                            FindOptionsIndexAfterNeedleEnd)) {
     return (Error){.kind = ErrKindInvalidData};
