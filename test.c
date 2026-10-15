@@ -5302,6 +5302,285 @@ static void test_http_parse_resp(void) {
   }
 }
 
+typedef struct {
+  // Each call takes at most this many bytes. Zero means no limit.
+  usize chunk_max;
+  // From this call on, `write` fails with `fails_with`.
+  usize fails_from_call;
+  ErrorKind fails_with;
+
+  i32 fd;
+  usize calls;
+  u8 out[2048];
+  usize out_len;
+} TestHttpWriteCtx;
+
+__attribute__((warn_unused_result)) static Error
+test_http_write(Platform *platform, i32 fd, Bytes data, usize *dst_written) {
+  assert(platform);
+  assert(dst_written);
+
+  TestHttpWriteCtx *const ctx = platform->ctx;
+  assert(ctx);
+  assert(ctx->fd == fd);
+
+  ctx->calls += 1;
+  if (ErrKindNone != ctx->fails_with && ctx->calls >= ctx->fails_from_call) {
+    return (Error){.kind = ctx->fails_with};
+  }
+
+  const usize n =
+      (0 == ctx->chunk_max) ? data.len : min(data.len, ctx->chunk_max);
+  assert(ctx->out_len + n <= sizeof(ctx->out));
+  if (n > 0) {
+    memcpy(ctx->out + ctx->out_len, data.data, n);
+  }
+  ctx->out_len += n;
+  *dst_written = n;
+
+  return (Error){.kind = ErrKindNone};
+}
+
+// Accepts nothing and reports no error, like a full socket buffer would not.
+__attribute__((warn_unused_result)) static Error
+test_http_write_nothing(Platform *platform, i32 fd, Bytes data,
+                        usize *dst_written) {
+  assert(platform);
+  assert(dst_written);
+  (void)data;
+
+  TestHttpWriteCtx *const ctx = platform->ctx;
+  assert(ctx);
+  assert(ctx->fd == fd);
+
+  ctx->calls += 1;
+  *dst_written = 0;
+
+  return (Error){.kind = ErrKindNone};
+}
+
+// Only `write`: building the request must touch nothing else.
+__attribute__((warn_unused_result)) static Platform
+test_env_http_write_make(TestHttpWriteCtx *ctx) {
+  assert(ctx);
+
+  ctx->fd = 7;
+
+  return (Platform){.write = test_http_write, .ctx = ctx};
+}
+
+static void test_http_req_write(void) {
+  // Every method, with no headers: the request line and the blank line.
+  {
+    const struct {
+      HttpMethod method;
+      const char *expected;
+    } cases[] = {
+        {HTTP_METHOD_OPTIONS, "OPTIONS / HTTP/1.1\r\n\r\n"},
+        {HTTP_METHOD_GET, "GET / HTTP/1.1\r\n\r\n"},
+        {HTTP_METHOD_HEAD, "HEAD / HTTP/1.1\r\n\r\n"},
+        {HTTP_METHOD_POST, "POST / HTTP/1.1\r\n\r\n"},
+        {HTTP_METHOD_PUT, "PUT / HTTP/1.1\r\n\r\n"},
+        {HTTP_METHOD_DELETE, "DELETE / HTTP/1.1\r\n\r\n"},
+        {HTTP_METHOD_TRACE, "TRACE / HTTP/1.1\r\n\r\n"},
+        {HTTP_METHOD_CONNECT, "CONNECT / HTTP/1.1\r\n\r\n"},
+    };
+    for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+      TestHttpWriteCtx ctx = {0};
+      Platform platform = test_env_http_write_make(&ctx);
+      const Arena scratch = test_arena(1 * KiB);
+      usize written = 42;
+
+      assert(ErrKindNone == http_req_write(&platform, ctx.fd, cases[i].method,
+                                           bytes_from_cstr("/"), NULL, 0,
+                                           scratch, 0, &written)
+                                .kind);
+      assert(
+          bytes_eq_cstr(bytes_make(ctx.out, ctx.out_len), cases[i].expected));
+      assert(strlen(cases[i].expected) == written);
+      // All of it in one call, and no call after it was all out.
+      assert(1 == ctx.calls);
+    }
+  }
+
+  // Headers in order, each on its own line.
+  {
+    TestHttpWriteCtx ctx = {0};
+    Platform platform = test_env_http_write_make(&ctx);
+    const Arena scratch = test_arena(1 * KiB);
+    HttpHeader headers[] = {
+        {.key = bytes_from_cstr("Host"), .value = bytes_from_cstr("a.b")},
+        {.key = bytes_from_cstr("Content-Length"),
+         .value = bytes_from_cstr("0")},
+    };
+    usize written = 42;
+
+    assert(ErrKindNone == http_req_write(&platform, ctx.fd, HTTP_METHOD_POST,
+                                         bytes_from_cstr("/v1/traces?x=1"),
+                                         headers,
+                                         sizeof(headers) / sizeof(headers[0]),
+                                         scratch, 0, &written)
+                              .kind);
+    assert(bytes_eq_cstr(bytes_make(ctx.out, ctx.out_len),
+                         "POST /v1/traces?x=1 HTTP/1.1\r\n"
+                         "Host: a.b\r\n"
+                         "Content-Length: 0\r\n"
+                         "\r\n"));
+    assert(ctx.out_len == written);
+  }
+
+  // Headers much longer than the URL: the buffer is sized for them too.
+  {
+    TestHttpWriteCtx ctx = {0};
+    Platform platform = test_env_http_write_make(&ctx);
+    const Arena scratch = test_arena(4 * KiB);
+    static u8 long_value[1000];
+    memset(long_value, 'v', sizeof(long_value));
+    HttpHeader headers[] = {
+        {.key = bytes_from_cstr("A"),
+         .value = bytes_make(long_value, sizeof(long_value))},
+        {.key = bytes_from_cstr("B"), .value = bytes_from_cstr("")},
+    };
+    usize written = 42;
+
+    assert(ErrKindNone == http_req_write(&platform, ctx.fd, HTTP_METHOD_GET,
+                                         bytes_from_cstr("/"), headers,
+                                         sizeof(headers) / sizeof(headers[0]),
+                                         scratch, 0, &written)
+                              .kind);
+    const usize expected_len = sizeof("GET / HTTP/1.1\r\n") - 1 +
+                               sizeof("A: \r\n") - 1 + sizeof(long_value) +
+                               sizeof("B: \r\n") - 1 + sizeof("\r\n") - 1;
+    assert(expected_len == ctx.out_len);
+    assert(expected_len == written);
+    const Bytes out = bytes_make(ctx.out, ctx.out_len);
+    assert(bytes_eq_cstr(bytes_take(out, 19), "GET / HTTP/1.1\r\nA: "));
+    assert(bytes_eq(bytes_take(bytes_skip(out, 19), sizeof(long_value)),
+                    bytes_make(long_value, sizeof(long_value))));
+    assert(bytes_eq_cstr(bytes_skip(out, 19 + sizeof(long_value)),
+                         "\r\nB: \r\n\r\n"));
+  }
+
+  // Short writes: the rest goes out in further calls, nothing twice.
+  {
+    TestHttpWriteCtx ctx = {.chunk_max = 3};
+    Platform platform = test_env_http_write_make(&ctx);
+    const Arena scratch = test_arena(1 * KiB);
+    const char *const expected = "GET /abc HTTP/1.1\r\n\r\n";
+    usize written = 42;
+
+    assert(ErrKindNone == http_req_write(&platform, ctx.fd, HTTP_METHOD_GET,
+                                         bytes_from_cstr("/abc"), NULL, 0,
+                                         scratch, 0, &written)
+                              .kind);
+    assert(bytes_eq_cstr(bytes_make(ctx.out, ctx.out_len), expected));
+    assert(strlen(expected) == written);
+    assert((strlen(expected) + 2) / 3 == ctx.calls);
+  }
+
+  // A write error is returned as is, on the first call or after progress,
+  // with what did go out before it.
+  {
+    const ErrorKind kinds[] = {ErrKindConnReset, ErrKindAgain};
+    const usize from_calls[] = {1, 2, 3};
+    for (usize i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+      for (usize j = 0; j < sizeof(from_calls) / sizeof(from_calls[0]); j++) {
+        TestHttpWriteCtx ctx = {.chunk_max = 4,
+                                .fails_from_call = from_calls[j],
+                                .fails_with = kinds[i]};
+        Platform platform = test_env_http_write_make(&ctx);
+        const Arena scratch = test_arena(1 * KiB);
+        usize written = 42;
+
+        assert(kinds[i] == http_req_write(&platform, ctx.fd, HTTP_METHOD_GET,
+                                          bytes_from_cstr("/"), NULL, 0,
+                                          scratch, 0, &written)
+                               .kind);
+        // No call after the failure.
+        assert(from_calls[j] == ctx.calls);
+        assert(4 * (from_calls[j] - 1) == ctx.out_len);
+        assert(ctx.out_len == written);
+      }
+    }
+  }
+
+  // A descriptor that takes nothing: `ErrKindAgain` after a bounded number of
+  // tries, rather than spinning.
+  {
+    TestHttpWriteCtx ctx = {.chunk_max = 0};
+    Platform platform = test_env_http_write_make(&ctx);
+    platform.write = test_http_write_nothing;
+    const Arena scratch = test_arena(1 * KiB);
+    usize written = 42;
+
+    assert(ErrKindAgain == http_req_write(&platform, ctx.fd, HTTP_METHOD_GET,
+                                          bytes_from_cstr("/"), NULL, 0,
+                                          scratch, 0, &written)
+                               .kind);
+    assert(0 == ctx.out_len);
+    assert(0 == written);
+    assert(ctx.calls > 0);
+    assert(ctx.calls <= sizeof("GET / HTTP/1.1\r\n\r\n") - 1);
+  }
+
+  // No room in the scratch arena for the request: nothing is written.
+  {
+    TestHttpWriteCtx ctx = {0};
+    Platform platform = test_env_http_write_make(&ctx);
+    const Arena scratch = test_arena(16);
+    usize written = 42;
+
+    assert(ErrKindOOM == http_req_write(&platform, ctx.fd, HTTP_METHOD_GET,
+                                        bytes_from_cstr("/"), NULL, 0, scratch,
+                                        0, &written)
+                             .kind);
+    assert(0 == ctx.calls);
+    assert(0 == written);
+  }
+
+  // Resuming after `ErrKindAgain` with the offset: the request arrives once,
+  // whole, and each call reports only what it wrote itself.
+  {
+    TestHttpWriteCtx ctx = {
+        .chunk_max = 4, .fails_from_call = 3, .fails_with = ErrKindAgain};
+    Platform platform = test_env_http_write_make(&ctx);
+    const char *const expected = "GET /abc HTTP/1.1\r\n\r\n";
+    usize offset = 0;
+    usize written = 42;
+
+    assert(ErrKindAgain == http_req_write(&platform, ctx.fd, HTTP_METHOD_GET,
+                                          bytes_from_cstr("/abc"), NULL, 0,
+                                          test_arena(1 * KiB), offset, &written)
+                               .kind);
+    assert(8 == written);
+    offset += written;
+
+    // The descriptor is writable again.
+    ctx.fails_with = ErrKindNone;
+    assert(ErrKindNone == http_req_write(&platform, ctx.fd, HTTP_METHOD_GET,
+                                         bytes_from_cstr("/abc"), NULL, 0,
+                                         test_arena(1 * KiB), offset, &written)
+                              .kind);
+    assert(strlen(expected) - 8 == written);
+    assert(bytes_eq_cstr(bytes_make(ctx.out, ctx.out_len), expected));
+  }
+
+  // An offset at the very end: everything already went out, so no call.
+  {
+    TestHttpWriteCtx ctx = {0};
+    Platform platform = test_env_http_write_make(&ctx);
+    const usize len = strlen("GET / HTTP/1.1\r\n\r\n");
+    usize written = 42;
+
+    assert(ErrKindNone == http_req_write(&platform, ctx.fd, HTTP_METHOD_GET,
+                                         bytes_from_cstr("/"), NULL, 0,
+                                         test_arena(1 * KiB), len, &written)
+                              .kind);
+    assert(0 == written);
+    assert(0 == ctx.calls);
+  }
+}
+
 // What `otel_on_accept` does with a fresh connection.
 __attribute__((warn_unused_result)) static HttpHandler *
 test_http_accept(HttpServer *server, i32 socket) {
@@ -10133,6 +10412,7 @@ static void test(const char *filter) {
       {"http_parse_resp_status_line", test_http_parse_resp_status_line},
       {"http_parse_req", test_http_parse_req},
       {"http_parse_resp", test_http_parse_resp},
+      {"http_req_write", test_http_req_write},
       {"http_parse_headers", test_http_parse_headers},
       {"http_server_pool", test_http_server_pool},
       {"otel", test_otel},

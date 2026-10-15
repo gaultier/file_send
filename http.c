@@ -503,8 +503,15 @@ http_parse_resp(Bytes src, HttpResponseStatusLine *dst_status_line,
 
 __attribute__((unused, warn_unused_result)) static Error
 http_req_write(Platform *platform, i32 fd, HttpMethod method, Bytes url,
-               HttpHeader *headers, usize headers_len, Arena scratch) {
+               HttpHeader *headers, usize headers_len, Arena scratch,
+               usize offset, usize *dst_written) {
   assert(platform);
+  if (0 != headers_len) {
+    assert(headers);
+  }
+  assert(dst_written);
+
+  *dst_written = 0;
 
   BytesBuffer sb = {0};
   usize sb_size = url.len + 32;
@@ -515,6 +522,7 @@ http_req_write(Platform *platform, i32 fd, HttpMethod method, Bytes url,
     assert(!__builtin_add_overflow(sb_size, h.value.len, &sb_size));
   }
   assert(!__builtin_add_overflow(sb_size, 4, &sb_size));
+  assert(offset <= sb_size);
 
   Error err = bytes_buffer_make(sb_size, &scratch, &sb);
   if (ErrKindNone != err.kind) {
@@ -557,35 +565,33 @@ http_req_write(Platform *platform, i32 fd, HttpMethod method, Bytes url,
 
   for (usize i = 0; i < headers_len; i++) {
     const HttpHeader header = headers[i];
-    if (!bytes_buffer_extend_within_cap(&sb, header.key)) {
-      return (Error){.kind = ErrKindOOM};
-    }
-    if (!bytes_buffer_extend_within_cap(&sb, bytes_from_cstr(": "))) {
-      return (Error){.kind = ErrKindOOM};
-    }
-    if (!bytes_buffer_extend_within_cap(&sb, header.value)) {
-      return (Error){.kind = ErrKindOOM};
-    }
-    if (!bytes_buffer_extend_within_cap(&sb, bytes_from_cstr("\r\n"))) {
-      return (Error){.kind = ErrKindOOM};
-    }
+    assert(bytes_buffer_extend_within_cap(&sb, header.key));
+    assert(bytes_buffer_extend_within_cap(&sb, bytes_from_cstr(": ")));
+    assert(bytes_buffer_extend_within_cap(&sb, header.value));
+    assert(bytes_buffer_extend_within_cap(&sb, bytes_from_cstr("\r\n")));
   }
 
-  if (!bytes_buffer_extend_within_cap(&sb, bytes_from_cstr("\r\n"))) {
-    return (Error){.kind = ErrKindOOM};
-  }
+  assert(bytes_buffer_extend_within_cap(&sb, bytes_from_cstr("\r\n")));
 
   Bytes remaining = bytes_buffer_to_bytes(sb);
+  bytes_advance(&remaining, offset);
   const usize total_to_write = remaining.len;
   for (usize _i = 0; _i < total_to_write; _i++) {
+    if (0 == remaining.len) {
+      break;
+    }
+
     usize written = 0;
     err = platform->write(platform, fd, remaining, &written);
     if (ErrKindNone != err.kind) {
+      *dst_written = total_to_write - remaining.len;
       return err;
     }
     assert(written <= remaining.len);
     bytes_advance(&remaining, written);
   }
+  assert(total_to_write >= remaining.len);
+  *dst_written = total_to_write - remaining.len;
 
   if (remaining.len > 0) {
     return (Error){.kind = ErrKindAgain};
