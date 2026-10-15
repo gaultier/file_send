@@ -8346,6 +8346,99 @@ static void test_platform_open_errors(void) {
 // `write_all_to_file` and `map_file` are only ever used as a pair, so they
 // are checked as one: against a real file, because a fake filesystem would
 // only be testing itself.
+// The synchronous slots, against the real OS: each one is the syscall, made
+// once, with its answer handed back.
+static void test_platform_sync(void) {
+  Platform *const platform = env_platform_make();
+
+  char buf[256] = {0};
+  const Bytes path = test_tmp_path(buf, sizeof(buf), "sync");
+  (void)platform->remove_file(platform, path);
+
+  const u8 payload[] = {'d', '3', ':', 'a', 'b', 'c', 0x00, 'e'};
+  const Bytes data = bytes_make((u8 *)payload, sizeof(payload));
+
+  {
+    i32 fd = -1;
+    assert(ErrKindNone ==
+           platform
+               ->open(platform, path,
+                      FileOpenOptionsWriteOnly | FileOpenOptionsCreate |
+                          FileOpenOptionsTruncate,
+                      &fd)
+               .kind);
+    assert(fd >= 0);
+
+    usize written = 0;
+    assert(ErrKindNone == platform->write(platform, fd, data, &written).kind);
+    assert(data.len == written);
+
+    assert(ErrKindNone == platform->close(platform, fd).kind);
+  }
+
+  {
+    i32 fd = -1;
+    assert(ErrKindNone ==
+           platform->open(platform, path, FileOpenOptionsReadOnly, &fd).kind);
+    assert(fd >= 0);
+
+    usize size = 0;
+    assert(ErrKindNone == platform->file_size(platform, fd, &size).kind);
+    assert(data.len == size);
+
+    u8 got[sizeof(payload) + 1] = {0};
+    usize got_len = 0;
+    assert(ErrKindNone ==
+           platform->read(platform, fd, bytes_make(got, sizeof(got)), &got_len)
+               .kind);
+    assert(data.len == got_len);
+    assert(0 == memcmp(payload, got, sizeof(payload)));
+
+    // End of file is a read of zero bytes, not an error.
+    assert(ErrKindNone ==
+           platform->read(platform, fd, bytes_make(got, sizeof(got)), &got_len)
+               .kind);
+    assert(0 == got_len);
+
+    assert(ErrKindNone == platform->close(platform, fd).kind);
+  }
+
+  assert(ErrKindNone == platform->remove_file(platform, path).kind);
+
+  // Gone, so both of these fail on the spot.
+  assert(ErrKindNone != platform->remove_file(platform, path).kind);
+  {
+    i32 fd = -1;
+    assert(ErrKindNone !=
+           platform->open(platform, path, FileOpenOptionsReadOnly, &fd).kind);
+    assert(-1 == fd);
+  }
+
+  assert(ErrKindNone != platform->close(platform, -1).kind);
+
+  // A socket is non-blocking, so a slot that would have to wait does not: it
+  // answers `ErrKindAgain`, and waiting is the caller's business.
+  {
+    i32 listen_socket = -1;
+    assert(ErrKindNone == platform
+                              ->socket(platform, SocketDomainIpv4,
+                                       SocketTypeTcp, &listen_socket)
+                              .kind);
+    Ipv4Addr addr = {.ip = 0x7f000001, .port = 0};
+    assert(ErrKindNone ==
+           platform->tcp_bind_ipv4(platform, listen_socket, &addr).kind);
+    assert(ErrKindNone == platform->listen(platform, listen_socket, 1).kind);
+
+    i32 accepted = -1;
+    Ipv4Addr peer = {0};
+    assert(ErrKindAgain ==
+           platform->accept(platform, listen_socket, &accepted, &peer).kind);
+    assert(-1 == accepted);
+
+    assert(ErrKindNone == platform->close(platform, listen_socket).kind);
+  }
+}
+
 static void test_platform_file_round_trip(void) {
   // Room for the real `Platform`, whose changelist is the bulk of it.
   Arena arena = test_arena(256 * KiB);
@@ -8826,8 +8919,9 @@ test_file_perform(TestPlatform *test_platform, PlatformCompletion *completion,
     // `open` produces a descriptor rather than acting on one.
     assert(-1 == fd);
     i32 opened = -1;
-    *dst_err = unix_open(completion->action.v.open.path,
-                         completion->action.v.open.options, &opened);
+    Platform *const platform = &test_platform->platform;
+    *dst_err = platform->open(platform, completion->action.v.open.path,
+                              completion->action.v.open.options, &opened);
     if (ErrKindNone == dst_err->kind) {
       assert(opened >= 0);
       *dst_res = (usize)(u32)opened;
@@ -8837,7 +8931,7 @@ test_file_perform(TestPlatform *test_platform, PlatformCompletion *completion,
 
   case PlatformActionKindClose:
     c->close_calls += 1;
-    *dst_err = unix_close(fd);
+    *dst_err = test_platform->platform.close(&test_platform->platform, fd);
     return TestPlatformPerformDone;
 
   case PlatformActionKindFileSize:
@@ -8846,7 +8940,8 @@ test_file_perform(TestPlatform *test_platform, PlatformCompletion *completion,
       *dst_err = (Error){.kind = c->file_size_fails_with};
       return TestPlatformPerformDone;
     }
-    *dst_err = unix_file_size(fd, dst_res);
+    *dst_err = test_platform->platform.file_size(&test_platform->platform, fd,
+                                                 dst_res);
     return TestPlatformPerformDone;
 
   case PlatformActionKindWrite: {
@@ -8869,7 +8964,8 @@ test_file_perform(TestPlatform *test_platform, PlatformCompletion *completion,
     const usize chunk = (0 != c->write_chunk && c->write_chunk < data.len)
                             ? c->write_chunk
                             : data.len;
-    *dst_err = unix_write(fd, bytes_take(data, chunk), dst_res);
+    *dst_err = test_platform->platform.write(&test_platform->platform, fd,
+                                             bytes_take(data, chunk), dst_res);
     return TestPlatformPerformDone;
   }
 
@@ -10030,6 +10126,7 @@ static void test(const char *filter) {
       {"error_kind_to_cstr", test_error_kind_to_cstr},
       {"platform_open_errors", test_platform_open_errors},
       {"platform_file_round_trip", test_platform_file_round_trip},
+      {"platform_sync", test_platform_sync},
       {"torrent_gen_torrent_file_data_oom",
        test_torrent_gen_torrent_file_data_oom},
       {"bytes", test_bytes},

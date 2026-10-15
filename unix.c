@@ -211,7 +211,8 @@ unix_listen(Platform *platform, i32 fd, i32 backlog) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_open(Bytes path, FileOpenOptions options, i32 *fd) {
+unix_open(Platform *platform, Bytes path, FileOpenOptions options, i32 *fd) {
+  (void)platform;
   assert(fd);
 
   i32 unix_options = 0;
@@ -303,8 +304,9 @@ unix_tcp_bind_ipv4(Platform *platform, i32 listen_socket, Ipv4Addr *addr) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_accept(i32 listen_socket, i32 *dst_accept_socket,
+unix_accept(Platform *platform, i32 listen_socket, i32 *dst_accept_socket,
             Ipv4Addr *dst_accept_addr) {
+  (void)platform;
 
   assert(dst_accept_socket);
   assert(dst_accept_addr);
@@ -367,7 +369,10 @@ unix_thread_create(Platform *platform, ThreadCallback cb, void *data) {
   return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static Error unix_close(i32 fd) {
+__attribute__((warn_unused_result)) static Error unix_close(Platform *platform,
+                                                            i32 fd) {
+  (void)platform;
+
   const i32 ret = close(fd);
 
   if (-1 == ret) {
@@ -402,8 +407,9 @@ unix_enable_socket_reuse(Platform *platform, i32 fd) {
   return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static Error unix_read(i32 fd, Bytes data,
-                                                           usize *dst_read) {
+__attribute__((warn_unused_result)) static Error
+unix_read(Platform *platform, i32 fd, Bytes data, usize *dst_read) {
+  (void)platform;
   assert(dst_read);
 
   isize ret = 0;
@@ -422,7 +428,8 @@ __attribute__((warn_unused_result)) static Error unix_read(i32 fd, Bytes data,
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_write(i32 fd, Bytes data, usize *dst_written) {
+unix_write(Platform *platform, i32 fd, Bytes data, usize *dst_written) {
+  (void)platform;
   assert(dst_written);
 
   isize ret = 0;
@@ -483,8 +490,10 @@ unix_udp_multicast_open_ipv4(Platform *platform, u32 ipv4, i32 *dst_fd) {
 // writable, and calls this again. That second call is what reports the outcome
 // -- `EISCONN` for a connection that came up, the real reason otherwise -- so
 // there is no handshake state to keep anywhere.
-__attribute__((warn_unused_result)) static Error unix_connect(i32 fd,
-                                                              Ipv4Addr addr) {
+__attribute__((warn_unused_result)) static Error
+unix_connect(Platform *platform, i32 fd, Ipv4Addr addr) {
+  (void)platform;
+
   const struct sockaddr_in sock_addr_in = {
       .sin_family = AF_INET,
       .sin_port = htons(addr.port),
@@ -517,7 +526,9 @@ __attribute__((warn_unused_result)) static Error unix_connect(i32 fd,
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_udp_send_to_ipv4(i32 fd, Ipv4Addr addr, Bytes msg, usize *dst_sent) {
+unix_send_to(Platform *platform, i32 fd, Ipv4Addr addr, Bytes msg,
+             usize *dst_sent) {
+  (void)platform;
   assert(dst_sent);
 
   const struct sockaddr_in sock_addr_in = {
@@ -542,7 +553,8 @@ unix_udp_send_to_ipv4(i32 fd, Ipv4Addr addr, Bytes msg, usize *dst_sent) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_file_size(i32 fd, usize *dst_size) {
+unix_file_size(Platform *platform, i32 fd, usize *dst_size) {
+  (void)platform;
   assert(dst_size);
 
   struct stat st = {0};
@@ -557,7 +569,10 @@ unix_file_size(i32 fd, usize *dst_size) {
   return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static Error unix_remove_file(Bytes path) {
+__attribute__((warn_unused_result)) static Error
+unix_remove_file(Platform *platform, Bytes path) {
+  (void)platform;
+
   // Same bound and the same reason as `unix_open`: the name has to reach the
   // kernel as a NUL terminated string, and `Bytes` carries no terminator.
   char unix_path[4096] = {0};
@@ -714,7 +729,9 @@ unix_platform_action_can_wait(PlatformActionKind kind) {
 // Try the operation once. Whatever it answers is the answer, `ErrKindAgain`
 // included: it is the backend above that turns that one into a wait.
 __attribute__((warn_unused_result)) static Error
-unix_platform_perform(PlatformCompletion *completion, i32 fd, usize *dst_res) {
+unix_platform_perform(Platform *platform, PlatformCompletion *completion,
+                      i32 fd, usize *dst_res) {
+  assert(platform);
   assert(completion);
   assert(dst_res);
 
@@ -727,7 +744,7 @@ unix_platform_perform(PlatformCompletion *completion, i32 fd, usize *dst_res) {
   case PlatformActionKindOpen: {
     assert(-1 == fd);
     i32 opened = -1;
-    err = unix_open(completion->action.v.open.path,
+    err = unix_open(platform, completion->action.v.open.path,
                     completion->action.v.open.options, &opened);
     if (ErrKindNone == err.kind) {
       assert(opened >= 0);
@@ -736,21 +753,22 @@ unix_platform_perform(PlatformCompletion *completion, i32 fd, usize *dst_res) {
   } break;
 
   case PlatformActionKindClose:
-    err = unix_close(fd);
+    err = unix_close(platform, fd);
     break;
 
   case PlatformActionKindRead:
-    err = unix_read(fd, completion->action.v.read.data, &res);
+    err = unix_read(platform, fd, completion->action.v.read.data, &res);
     break;
 
   case PlatformActionKindWrite:
-    err = unix_write(fd, completion->action.v.write.data, &res);
+    err = unix_write(platform, fd, completion->action.v.write.data, &res);
     break;
 
   // `fd` is the listener; what it reports is the connection.
   case PlatformActionKindAccept: {
     i32 accepted = -1;
-    err = unix_accept(fd, &accepted, &completion->action.v.accept.addr);
+    err =
+        unix_accept(platform, fd, &accepted, &completion->action.v.accept.addr);
     if (ErrKindNone == err.kind) {
       assert(accepted >= 0);
       res = (usize)(u32)accepted;
@@ -758,22 +776,22 @@ unix_platform_perform(PlatformCompletion *completion, i32 fd, usize *dst_res) {
   } break;
 
   case PlatformActionKindConnect:
-    err = unix_connect(fd, completion->action.v.connect.addr);
+    err = unix_connect(platform, fd, completion->action.v.connect.addr);
     break;
 
   case PlatformActionKindSendTo:
-    err = unix_udp_send_to_ipv4(fd, completion->action.v.send_to.addr,
-                                completion->action.v.send_to.data, &res);
+    err = unix_send_to(platform, fd, completion->action.v.send_to.addr,
+                       completion->action.v.send_to.data, &res);
     break;
 
   case PlatformActionKindFileSize:
-    err = unix_file_size(fd, &res);
+    err = unix_file_size(platform, fd, &res);
     break;
 
   // Works on a name, so it has no descriptor either.
   case PlatformActionKindRemoveFile:
     assert(-1 == fd);
-    err = unix_remove_file(completion->action.v.remove_file.path);
+    err = unix_remove_file(platform, completion->action.v.remove_file.path);
     break;
 
   // A completion reported without an action is this code having got a slot
@@ -825,6 +843,16 @@ __attribute__((warn_unused_result)) static Platform *env_platform_make(void) {
       .udp_multicast_open_ipv4 = unix_udp_multicast_open_ipv4,
       .close_socket = unix_close_socket,
       .map_fd = unix_map_fd,
+
+      .open = unix_open,
+      .close = unix_close,
+      .read = unix_read,
+      .write = unix_write,
+      .accept = unix_accept,
+      .connect = unix_connect,
+      .send_to = unix_send_to,
+      .file_size = unix_file_size,
+      .remove_file = unix_remove_file,
 
       .thread_create = unix_thread_create,
 

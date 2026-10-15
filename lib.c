@@ -677,6 +677,21 @@ struct Platform {
   Error (*stdout_silence)(Platform *platform, i32 *dst_saved);
   Error (*stdout_restore)(Platform *platform, i32 saved);
 
+  // Synchronous counterparts of the `xxx_async` slots below. Each makes the
+  // syscall once and returns its answer, `ErrKindAgain` included.
+  Error (*open)(Platform *platform, Bytes path, FileOpenOptions options,
+                i32 *dst_fd);
+  Error (*close)(Platform *platform, i32 fd);
+  Error (*read)(Platform *platform, i32 fd, Bytes data, usize *dst_read);
+  Error (*write)(Platform *platform, i32 fd, Bytes data, usize *dst_written);
+  Error (*accept)(Platform *platform, i32 listen_socket, i32 *dst_accept_socket,
+                  Ipv4Addr *dst_accept_addr);
+  Error (*connect)(Platform *platform, i32 fd, Ipv4Addr addr);
+  Error (*send_to)(Platform *platform, i32 fd, Ipv4Addr addr, Bytes data,
+                   usize *dst_sent);
+  Error (*file_size)(Platform *platform, i32 fd, usize *dst_size);
+  Error (*remove_file)(Platform *platform, Bytes path);
+
   void *ctx;
 
   Error (*run_for_ns)(Platform *platform, usize ns);

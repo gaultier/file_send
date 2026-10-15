@@ -225,7 +225,8 @@ static void linux_advance(PlatformLinux *platform_linux, u32 idx) {
   assert(completion->cb);
 
   usize res = 0;
-  Error err = unix_platform_perform(completion, fd, &res);
+  Error err =
+      unix_platform_perform(&platform_linux->platform, completion, fd, &res);
 
   if (ErrKindAgain == err.kind &&
       unix_platform_action_can_wait(completion->action.kind)) {

@@ -183,7 +183,8 @@ static void darwin_advance(PlatformDarwin *platform_darwin,
   assert(completion->cb);
 
   usize res = 0;
-  Error err = unix_platform_perform(completion, fd, &res);
+  Error err =
+      unix_platform_perform(&platform_darwin->platform, completion, fd, &res);
 
   if (ErrKindAgain == err.kind &&
       unix_platform_action_can_wait(completion->action.kind)) {
