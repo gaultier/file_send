@@ -683,26 +683,27 @@ struct Platform {
 
   u64 (*monotonic_ns)(Platform *platform);
 
-  Error (*open)(Platform *platform, PlatformCompletion *completion, Bytes path,
-                FileOpenOptions options, PlatformCallback cb);
-  Error (*close)(Platform *platform, PlatformCompletion *completion, i32 fd,
-                 PlatformCallback cb);
-  Error (*read)(Platform *platform, PlatformCompletion *completion, i32 fd,
-                Bytes data, PlatformCallback cb);
-  Error (*write)(Platform *platform, PlatformCompletion *completion, i32 fd,
-                 Bytes data, PlatformCallback cb);
+  Error (*open_async)(Platform *platform, PlatformCompletion *completion,
+                      Bytes path, FileOpenOptions options, PlatformCallback cb);
+  Error (*close_async)(Platform *platform, PlatformCompletion *completion,
+                       i32 fd, PlatformCallback cb);
+  Error (*read_async)(Platform *platform, PlatformCompletion *completion,
+                      i32 fd, Bytes data, PlatformCallback cb);
+  Error (*write_async)(Platform *platform, PlatformCompletion *completion,
+                       i32 fd, Bytes data, PlatformCallback cb);
   // On success the callback's `res` is the accepted socket, and the peer is in
   // `completion->action.v.accept.addr`.
-  Error (*accept)(Platform *platform, PlatformCompletion *completion,
-                  i32 listen_socket, PlatformCallback cb);
-  Error (*connect)(Platform *platform, PlatformCompletion *completion, i32 fd,
-                   Ipv4Addr addr, PlatformCallback cb);
-  Error (*send_to)(Platform *platform, PlatformCompletion *completion, i32 fd,
-                   Ipv4Addr addr, Bytes data, PlatformCallback cb);
-  Error (*file_size)(Platform *platform, PlatformCompletion *completion, i32 fd,
-                     PlatformCallback cb);
-  Error (*remove_file)(Platform *platform, PlatformCompletion *completion,
-                       Bytes path, PlatformCallback cb);
+  Error (*accept_async)(Platform *platform, PlatformCompletion *completion,
+                        i32 listen_socket, PlatformCallback cb);
+  Error (*connect_async)(Platform *platform, PlatformCompletion *completion,
+                         i32 fd, Ipv4Addr addr, PlatformCallback cb);
+  Error (*send_to_async)(Platform *platform, PlatformCompletion *completion,
+                         i32 fd, Ipv4Addr addr, Bytes data,
+                         PlatformCallback cb);
+  Error (*file_size_async)(Platform *platform, PlatformCompletion *completion,
+                           i32 fd, PlatformCallback cb);
+  Error (*remove_file_async)(Platform *platform, PlatformCompletion *completion,
+                             Bytes path, PlatformCallback cb);
 };
 
 typedef enum {
@@ -828,8 +829,8 @@ static void platform_map_file_close(PlatformMapFile *ctx) {
   assert(ctx->platform);
   assert(ctx->fd >= 0);
 
-  const Error err = ctx->platform->close(ctx->platform, &ctx->completion,
-                                         ctx->fd, platform_map_file_on_close);
+  const Error err = ctx->platform->close_async(
+      ctx->platform, &ctx->completion, ctx->fd, platform_map_file_on_close);
   if (ErrKindNone != err.kind) {
     // The close was never submitted, so nothing else is going to finish this.
     // The descriptor is leaked, which is the lesser of the two problems.
@@ -879,7 +880,7 @@ static void platform_map_file_on_open(PlatformCompletion *completion, Error err,
   ctx->fd = (i32)res;
   assert(ctx->fd >= 0);
 
-  const Error err_size = ctx->platform->file_size(
+  const Error err_size = ctx->platform->file_size_async(
       ctx->platform, &ctx->completion, ctx->fd, platform_map_file_on_file_size);
   if (ErrKindNone != err_size.kind) {
     ctx->err = err_size;
@@ -898,8 +899,9 @@ platform_map_file(Platform *platform, PlatformMapFile *ctx, Bytes path,
       .platform = platform, .opts = opts, .dst = dst, .fd = -1};
   ctx->completion.ctx = ctx;
 
-  return platform->open(platform, &ctx->completion, path,
-                        FileOpenOptionsReadOnly, platform_map_file_on_open);
+  return platform->open_async(platform, &ctx->completion, path,
+                              FileOpenOptionsReadOnly,
+                              platform_map_file_on_open);
 }
 
 // ---------- Platform: writing a whole file ----------
@@ -933,8 +935,8 @@ static void platform_write_all_to_file_close(PlatformWriteAllToFile *ctx) {
   assert(ctx->fd >= 0);
 
   const Error err =
-      ctx->platform->close(ctx->platform, &ctx->completion, ctx->fd,
-                           platform_write_all_to_file_on_close);
+      ctx->platform->close_async(ctx->platform, &ctx->completion, ctx->fd,
+                                 platform_write_all_to_file_on_close);
   if (ErrKindNone != err.kind) {
     if (ErrKindNone == ctx->err.kind) {
       ctx->err = err;
@@ -957,9 +959,9 @@ static void platform_write_all_to_file_step(PlatformWriteAllToFile *ctx) {
     return;
   }
 
-  const Error err =
-      ctx->platform->write(ctx->platform, &ctx->completion, ctx->fd,
-                           ctx->remaining, platform_write_all_to_file_on_write);
+  const Error err = ctx->platform->write_async(
+      ctx->platform, &ctx->completion, ctx->fd, ctx->remaining,
+      platform_write_all_to_file_on_write);
   if (ErrKindNone != err.kind) {
     ctx->err = err;
     platform_write_all_to_file_close(ctx);
@@ -1035,10 +1037,10 @@ platform_write_all_to_file(Platform *platform, PlatformWriteAllToFile *ctx,
     return (Error){.kind = ErrKindNone};
   }
 
-  return platform->open(platform, &ctx->completion, path,
-                        FileOpenOptionsWriteOnly | FileOpenOptionsCreate |
-                            FileOpenOptionsTruncate,
-                        platform_write_all_to_file_on_open);
+  return platform->open_async(platform, &ctx->completion, path,
+                              FileOpenOptionsWriteOnly | FileOpenOptionsCreate |
+                                  FileOpenOptionsTruncate,
+                              platform_write_all_to_file_on_open);
 }
 
 // ---------- Platform: the file composites, waited out ----------
@@ -1196,9 +1198,9 @@ static void platform_server_shutdown(PlatformServer *server, Error err) {
     server->err = err;
   }
 
-  const Error err_close =
-      server->platform->close(server->platform, &server->completion,
-                              server->listen_socket, platform_server_on_close);
+  const Error err_close = server->platform->close_async(
+      server->platform, &server->completion, server->listen_socket,
+      platform_server_on_close);
   if (ErrKindNone != err_close.kind) {
     server->done = true;
   }
@@ -1208,7 +1210,7 @@ static void platform_server_arm(PlatformServer *server) {
   assert(server);
   assert(server->platform);
 
-  const Error err = server->platform->accept(
+  const Error err = server->platform->accept_async(
       server->platform, &server->completion, server->listen_socket,
       platform_server_on_accept);
   if (ErrKindNone != err.kind) {

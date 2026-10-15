@@ -2040,8 +2040,8 @@ static void torrent_peer_close(TorrentPeer *peer) {
 
   Platform *const platform = peer->platform;
 
-  const Error err = platform->close(platform, &peer->completion_close,
-                                    peer->socket, torrent_peer_on_close);
+  const Error err = platform->close_async(platform, &peer->completion_close,
+                                          peer->socket, torrent_peer_on_close);
   if (ErrKindNone != err.kind) {
     // The close was never submitted, so `torrent_peer_on_close` will not run:
     // hang up here instead, and hand the slot back, or the connection would
@@ -2119,8 +2119,9 @@ torrent_peer_read(TorrentPeer *peer, Platform *platform) {
   const Bytes dst = bytes_make(peer->recv_buf + peer->recv_len,
                                TORRENT_PEER_RECV_BUF_CAP - peer->recv_len);
 
-  const Error err = platform->read(platform, &peer->completion_read,
-                                   peer->socket, dst, torrent_peer_on_read);
+  const Error err =
+      platform->read_async(platform, &peer->completion_read, peer->socket, dst,
+                           torrent_peer_on_read);
   if (ErrKindNone == err.kind) {
     peer->read_in_flight = true;
   }
@@ -2143,8 +2144,9 @@ torrent_peer_write(TorrentPeer *peer, Platform *platform) {
 
   const Bytes src = bytes_make(peer->send_buf, peer->send_len);
 
-  const Error err = platform->write(platform, &peer->completion_write,
-                                    peer->socket, src, torrent_peer_on_write);
+  const Error err =
+      platform->write_async(platform, &peer->completion_write, peer->socket,
+                            src, torrent_peer_on_write);
   if (ErrKindNone == err.kind) {
     peer->write_in_flight = true;
   }

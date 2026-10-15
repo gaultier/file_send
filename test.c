@@ -811,8 +811,9 @@ test_platform_monotonic_ns(Platform *platform) {
 // was asked for, and ask for a turn of the loop.
 
 __attribute__((warn_unused_result)) static Error
-test_platform_open(Platform *platform, PlatformCompletion *completion,
-                   Bytes path, FileOpenOptions options, PlatformCallback cb) {
+test_platform_open_async(Platform *platform, PlatformCompletion *completion,
+                         Bytes path, FileOpenOptions options,
+                         PlatformCallback cb) {
   assert(completion);
 
   completion->action =
@@ -823,8 +824,8 @@ test_platform_open(Platform *platform, PlatformCompletion *completion,
 }
 
 __attribute__((warn_unused_result)) static Error
-test_platform_close(Platform *platform, PlatformCompletion *completion, i32 fd,
-                    PlatformCallback cb) {
+test_platform_close_async(Platform *platform, PlatformCompletion *completion,
+                          i32 fd, PlatformCallback cb) {
   assert(completion);
 
   completion->action = (PlatformAction){.kind = PlatformActionKindClose};
@@ -833,8 +834,8 @@ test_platform_close(Platform *platform, PlatformCompletion *completion, i32 fd,
 }
 
 __attribute__((warn_unused_result)) static Error
-test_platform_read(Platform *platform, PlatformCompletion *completion, i32 fd,
-                   Bytes data, PlatformCallback cb) {
+test_platform_read_async(Platform *platform, PlatformCompletion *completion,
+                         i32 fd, Bytes data, PlatformCallback cb) {
   assert(completion);
   assert(data.data);
   assert(data.len > 0);
@@ -846,8 +847,8 @@ test_platform_read(Platform *platform, PlatformCompletion *completion, i32 fd,
 }
 
 __attribute__((warn_unused_result)) static Error
-test_platform_write(Platform *platform, PlatformCompletion *completion, i32 fd,
-                    Bytes data, PlatformCallback cb) {
+test_platform_write_async(Platform *platform, PlatformCompletion *completion,
+                          i32 fd, Bytes data, PlatformCallback cb) {
   assert(completion);
   assert(data.data);
   assert(data.len > 0);
@@ -859,8 +860,8 @@ test_platform_write(Platform *platform, PlatformCompletion *completion, i32 fd,
 }
 
 __attribute__((warn_unused_result)) static Error
-test_platform_accept(Platform *platform, PlatformCompletion *completion,
-                     i32 listen_socket, PlatformCallback cb) {
+test_platform_accept_async(Platform *platform, PlatformCompletion *completion,
+                           i32 listen_socket, PlatformCallback cb) {
   assert(completion);
 
   completion->action = (PlatformAction){.kind = PlatformActionKindAccept};
@@ -869,8 +870,9 @@ test_platform_accept(Platform *platform, PlatformCompletion *completion,
 }
 
 __attribute__((warn_unused_result)) static Error
-test_platform_file_size(Platform *platform, PlatformCompletion *completion,
-                        i32 fd, PlatformCallback cb) {
+test_platform_file_size_async(Platform *platform,
+                              PlatformCompletion *completion, i32 fd,
+                              PlatformCallback cb) {
   assert(completion);
 
   completion->action = (PlatformAction){.kind = PlatformActionKindFileSize};
@@ -895,17 +897,18 @@ static void test_platform_make(TestPlatform *test_platform,
   test_platform->platform = platform;
   test_platform->platform.run_for_ns = test_platform_run_for_ns;
   test_platform->platform.monotonic_ns = test_platform_monotonic_ns;
-  test_platform->platform.open = test_platform_open;
-  test_platform->platform.close = test_platform_close;
-  test_platform->platform.read = test_platform_read;
-  test_platform->platform.write = test_platform_write;
-  test_platform->platform.accept = test_platform_accept;
-  test_platform->platform.file_size = test_platform_file_size;
-  // `connect`, `send_to` and `remove_file` stay null: no test drives one,
-  // and a null slot crashes rather than quietly doing something real.
-  test_platform->platform.connect = NULL;
-  test_platform->platform.send_to = NULL;
-  test_platform->platform.remove_file = NULL;
+  test_platform->platform.open_async = test_platform_open_async;
+  test_platform->platform.close_async = test_platform_close_async;
+  test_platform->platform.read_async = test_platform_read_async;
+  test_platform->platform.write_async = test_platform_write_async;
+  test_platform->platform.accept_async = test_platform_accept_async;
+  test_platform->platform.file_size_async = test_platform_file_size_async;
+  // `connect_async`, `send_to_async` and `remove_file_async` stay null: no test
+  // drives one, and a null slot crashes rather than quietly doing something
+  // real.
+  test_platform->platform.connect_async = NULL;
+  test_platform->platform.send_to_async = NULL;
+  test_platform->platform.remove_file_async = NULL;
 }
 
 // More turns than draining anything here can need. A turn answers every
@@ -1014,7 +1017,7 @@ typedef struct {
   usize accept_calls;
   usize read_calls;
   usize write_calls;
-  // `close`, which is a step in a chain: the listener's own, and each
+  // `close_async`, which is a step in a chain: the listener's own, and each
   // connection's.
   usize close_calls;
   // `close_socket`, which is the hang-up on a connection that was refused.
@@ -1510,7 +1513,7 @@ static void test_torrent_peer_pool_exhaustion(void) {
   }
 
   // The refused connection was hung up on through `close_socket`, there being
-  // no slot to keep a completion in; the listener went through `close` as
+  // no slot to keep a completion in; the listener went through `close_async` as
   // always.
   assert(1 == ctx.close_socket_calls);
   assert(1 == ctx.close_calls);
@@ -1948,7 +1951,7 @@ typedef struct {
   usize written_len;
   ErrorKind write_fails_with;
 
-  // `close`, the hang-up with a callback behind it.
+  // `close_async`, the hang-up with a callback behind it.
   usize close_calls;
   // `close_socket`, the hang-up taken when the close could not even be
   // submitted.
@@ -3091,7 +3094,7 @@ static void test_torrent_peer_deadlines(void) {
                                        test_platform.now_ns));
 
     // The hang-up is waiting on the read that is still with the kernel, so the
-    // slot is still held and `close` has not been asked for yet.
+    // slot is still held and `close_async` has not been asked for yet.
     assert(peer->closing);
     assert(0 == ctx.close_calls);
     assert(!test_peer_pool_is_empty(&network_ctx));
@@ -5489,9 +5492,9 @@ typedef struct {
 
   usize read_calls;
   usize write_calls;
-  // `close`.
+  // `close_async`.
   usize close_calls;
-  // `close_socket`, taken when no `close` is coming.
+  // `close_socket`, taken when no `close_async` is coming.
   usize close_socket_calls;
 } TestOtelCtx;
 
@@ -8246,8 +8249,8 @@ test_remove_file(Platform *platform, Bytes path) {
   PlatformOnce once = {0};
   platform_once_init(&once);
 
-  const Error err = platform->remove_file(platform, &once.completion, path,
-                                          platform_once_on_done);
+  const Error err = platform->remove_file_async(platform, &once.completion,
+                                                path, platform_once_on_done);
   if (ErrKindNone != err.kind) {
     return err;
   }
@@ -8266,8 +8269,8 @@ test_open(Platform *platform, Bytes path, FileOpenOptions opts, i32 *dst_fd) {
   PlatformOnce once = {0};
   platform_once_init(&once);
 
-  const Error err_submit = platform->open(platform, &once.completion, path,
-                                          opts, platform_once_on_done);
+  const Error err_submit = platform->open_async(
+      platform, &once.completion, path, opts, platform_once_on_done);
   if (ErrKindNone != err_submit.kind) {
     return err_submit;
   }
@@ -8427,10 +8430,10 @@ static void test_platform_file_round_trip(void) {
     {
       PlatformOnce once = {0};
       platform_once_init(&once);
-      assert(
-          ErrKindNone ==
-          platform->close(platform, &once.completion, fd, platform_once_on_done)
-              .kind);
+      assert(ErrKindNone == platform
+                                ->close_async(platform, &once.completion, fd,
+                                              platform_once_on_done)
+                                .kind);
       assert(ErrKindNone == platform_once_wait(platform, &once).kind);
     }
 
@@ -8640,8 +8643,8 @@ static void test_platform_syscall_failures(void) {
     once.res = 0xAA;
 
     assert(ErrKindNone == platform
-                              ->file_size(platform, &once.completion, -1,
-                                          platform_once_on_done)
+                              ->file_size_async(platform, &once.completion, -1,
+                                                platform_once_on_done)
                               .kind);
     const Error err = platform_once_wait(platform, &once);
     assert(ErrKindNone != err.kind);
@@ -8650,15 +8653,15 @@ static void test_platform_syscall_failures(void) {
     assert(0 == once.res);
   }
 
-  // `close` of the same.
+  // `close_async` of the same.
   {
     PlatformOnce once = {0};
     platform_once_init(&once);
 
-    assert(
-        ErrKindNone ==
-        platform->close(platform, &once.completion, -1, platform_once_on_done)
-            .kind);
+    assert(ErrKindNone == platform
+                              ->close_async(platform, &once.completion, -1,
+                                            platform_once_on_done)
+                              .kind);
     const Error err = platform_once_wait(platform, &once);
     assert(ErrKindNone != err.kind);
     assert(EBADF == (i32)err.data);

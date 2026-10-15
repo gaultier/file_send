@@ -81,8 +81,8 @@ static void otel_handler_close(HttpHandler *handler) {
   Platform *const platform = handler->platform;
   assert(platform);
 
-  const Error err = platform->close(platform, &handler->completion,
-                                    handler->socket, http_handler_on_close);
+  const Error err = platform->close_async(
+      platform, &handler->completion, handler->socket, http_handler_on_close);
   if (ErrKindNone == err.kind) {
     return;
   }
@@ -151,8 +151,9 @@ static void otel_on_read(PlatformCompletion *completion, Error read_err,
       return;
     }
 
-    err = platform->read(platform, &handler->completion, handler->socket,
-                         bytes_buffer_space_bytes(handler->recv), otel_on_read);
+    err = platform->read_async(platform, &handler->completion, handler->socket,
+                               bytes_buffer_space_bytes(handler->recv),
+                               otel_on_read);
     if (ErrKindNone != err.kind) {
       log_err(&handler->logger, "failed to read", err);
       otel_handler_close(handler);
@@ -207,8 +208,9 @@ static void otel_on_read(PlatformCompletion *completion, Error read_err,
       &handler->resp,
       bytes_from_cstr("HTTP/1.1 200\r\nConnection:Close\r\n\r\nHello")));
 
-  err = platform->write(platform, &handler->completion, handler->socket,
-                        bytes_buffer_to_bytes(handler->resp), otel_on_write);
+  err = platform->write_async(platform, &handler->completion, handler->socket,
+                              bytes_buffer_to_bytes(handler->resp),
+                              otel_on_write);
   if (ErrKindNone != err.kind) {
     log_err(&handler->logger, "failed to write", err);
     otel_handler_close(handler);
@@ -234,9 +236,9 @@ static void otel_on_accept(Platform *platform, void *vctx, Ipv4Addr accept_addr,
 
   log(&handler->logger, LogLevelInfo, "accepted");
 
-  const Error err =
-      platform->read(platform, &handler->completion, accept_socket,
-                     bytes_buffer_space_bytes(handler->recv), otel_on_read);
+  const Error err = platform->read_async(
+      platform, &handler->completion, accept_socket,
+      bytes_buffer_space_bytes(handler->recv), otel_on_read);
   if (ErrKindNone != err.kind) {
     log_err(&handler->logger, "failed to read", err);
     otel_handler_close(handler);

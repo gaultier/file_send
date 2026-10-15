@@ -332,8 +332,8 @@ linux_run_for_ns(Platform *platform, usize ns) {
 // reaches the callback.
 
 __attribute__((warn_unused_result)) static Error
-linux_open(Platform *platform, PlatformCompletion *completion, Bytes path,
-           FileOpenOptions options, PlatformCallback cb) {
+linux_open_async(Platform *platform, PlatformCompletion *completion, Bytes path,
+                 FileOpenOptions options, PlatformCallback cb) {
   assert(platform);
   assert(completion);
   assert(cb);
@@ -347,8 +347,8 @@ linux_open(Platform *platform, PlatformCompletion *completion, Bytes path,
 }
 
 __attribute__((warn_unused_result)) static Error
-linux_close(Platform *platform, PlatformCompletion *completion, i32 fd,
-            PlatformCallback cb) {
+linux_close_async(Platform *platform, PlatformCompletion *completion, i32 fd,
+                  PlatformCallback cb) {
   assert(platform);
   assert(completion);
   assert(cb);
@@ -360,8 +360,8 @@ linux_close(Platform *platform, PlatformCompletion *completion, i32 fd,
 }
 
 __attribute__((warn_unused_result)) static Error
-linux_read(Platform *platform, PlatformCompletion *completion, i32 fd,
-           Bytes data, PlatformCallback cb) {
+linux_read_async(Platform *platform, PlatformCompletion *completion, i32 fd,
+                 Bytes data, PlatformCallback cb) {
   assert(platform);
   assert(completion);
   assert(cb);
@@ -376,8 +376,8 @@ linux_read(Platform *platform, PlatformCompletion *completion, i32 fd,
 }
 
 __attribute__((warn_unused_result)) static Error
-linux_write(Platform *platform, PlatformCompletion *completion, i32 fd,
-            Bytes data, PlatformCallback cb) {
+linux_write_async(Platform *platform, PlatformCompletion *completion, i32 fd,
+                  Bytes data, PlatformCallback cb) {
   assert(platform);
   assert(completion);
   assert(cb);
@@ -392,8 +392,8 @@ linux_write(Platform *platform, PlatformCompletion *completion, i32 fd,
 }
 
 __attribute__((warn_unused_result)) static Error
-linux_accept(Platform *platform, PlatformCompletion *completion,
-             i32 listen_socket, PlatformCallback cb) {
+linux_accept_async(Platform *platform, PlatformCompletion *completion,
+                   i32 listen_socket, PlatformCallback cb) {
   assert(platform);
   assert(completion);
   assert(cb);
@@ -405,8 +405,8 @@ linux_accept(Platform *platform, PlatformCompletion *completion,
 }
 
 __attribute__((warn_unused_result)) static Error
-linux_connect(Platform *platform, PlatformCompletion *completion, i32 fd,
-              Ipv4Addr addr, PlatformCallback cb) {
+linux_connect_async(Platform *platform, PlatformCompletion *completion, i32 fd,
+                    Ipv4Addr addr, PlatformCallback cb) {
   assert(platform);
   assert(completion);
   assert(cb);
@@ -419,8 +419,8 @@ linux_connect(Platform *platform, PlatformCompletion *completion, i32 fd,
 }
 
 __attribute__((warn_unused_result)) static Error
-linux_send_to(Platform *platform, PlatformCompletion *completion, i32 fd,
-              Ipv4Addr addr, Bytes data, PlatformCallback cb) {
+linux_send_to_async(Platform *platform, PlatformCompletion *completion, i32 fd,
+                    Ipv4Addr addr, Bytes data, PlatformCallback cb) {
   assert(platform);
   assert(completion);
   assert(cb);
@@ -436,8 +436,8 @@ linux_send_to(Platform *platform, PlatformCompletion *completion, i32 fd,
 }
 
 __attribute__((warn_unused_result)) static Error
-linux_file_size(Platform *platform, PlatformCompletion *completion, i32 fd,
-                PlatformCallback cb) {
+linux_file_size_async(Platform *platform, PlatformCompletion *completion,
+                      i32 fd, PlatformCallback cb) {
   assert(platform);
   assert(completion);
   assert(cb);
@@ -449,8 +449,8 @@ linux_file_size(Platform *platform, PlatformCompletion *completion, i32 fd,
 }
 
 __attribute__((warn_unused_result)) static Error
-linux_remove_file(Platform *platform, PlatformCompletion *completion,
-                  Bytes path, PlatformCallback cb) {
+linux_remove_file_async(Platform *platform, PlatformCompletion *completion,
+                        Bytes path, PlatformCallback cb) {
   assert(platform);
   assert(completion);
   assert(cb);
@@ -501,15 +501,15 @@ linux_platform_epoll_make(Arena *arena, Platform **dst) {
   platform_linux->platform = *env_platform_make();
   platform_linux->platform.run_for_ns = linux_run_for_ns;
   platform_linux->platform.monotonic_ns = unix_monotonic_ns;
-  platform_linux->platform.open = linux_open;
-  platform_linux->platform.close = linux_close;
-  platform_linux->platform.read = linux_read;
-  platform_linux->platform.write = linux_write;
-  platform_linux->platform.accept = linux_accept;
-  platform_linux->platform.connect = linux_connect;
-  platform_linux->platform.send_to = linux_send_to;
-  platform_linux->platform.file_size = linux_file_size;
-  platform_linux->platform.remove_file = linux_remove_file;
+  platform_linux->platform.open_async = linux_open_async;
+  platform_linux->platform.close_async = linux_close_async;
+  platform_linux->platform.read_async = linux_read_async;
+  platform_linux->platform.write_async = linux_write_async;
+  platform_linux->platform.accept_async = linux_accept_async;
+  platform_linux->platform.connect_async = linux_connect_async;
+  platform_linux->platform.send_to_async = linux_send_to_async;
+  platform_linux->platform.file_size_async = linux_file_size_async;
+  platform_linux->platform.remove_file_async = linux_remove_file_async;
 
   *dst = &platform_linux->platform;
 

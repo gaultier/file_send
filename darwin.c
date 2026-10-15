@@ -282,8 +282,8 @@ darwin_run_for_ns(Platform *platform, usize ns) {
 // say reaches the callback.
 
 __attribute__((warn_unused_result)) static Error
-darwin_open(Platform *platform, PlatformCompletion *completion, Bytes path,
-            FileOpenOptions options, PlatformCallback cb) {
+darwin_open_async(Platform *platform, PlatformCompletion *completion,
+                  Bytes path, FileOpenOptions options, PlatformCallback cb) {
   assert(platform);
   assert(completion);
   assert(cb);
@@ -297,8 +297,8 @@ darwin_open(Platform *platform, PlatformCompletion *completion, Bytes path,
 }
 
 __attribute__((warn_unused_result)) static Error
-darwin_close(Platform *platform, PlatformCompletion *completion, i32 fd,
-             PlatformCallback cb) {
+darwin_close_async(Platform *platform, PlatformCompletion *completion, i32 fd,
+                   PlatformCallback cb) {
   assert(platform);
   assert(completion);
   assert(cb);
@@ -310,8 +310,8 @@ darwin_close(Platform *platform, PlatformCompletion *completion, i32 fd,
 }
 
 __attribute__((warn_unused_result)) static Error
-darwin_read(Platform *platform, PlatformCompletion *completion, i32 fd,
-            Bytes data, PlatformCallback cb) {
+darwin_read_async(Platform *platform, PlatformCompletion *completion, i32 fd,
+                  Bytes data, PlatformCallback cb) {
   assert(platform);
   assert(completion);
   assert(cb);
@@ -326,8 +326,8 @@ darwin_read(Platform *platform, PlatformCompletion *completion, i32 fd,
 }
 
 __attribute__((warn_unused_result)) static Error
-darwin_write(Platform *platform, PlatformCompletion *completion, i32 fd,
-             Bytes data, PlatformCallback cb) {
+darwin_write_async(Platform *platform, PlatformCompletion *completion, i32 fd,
+                   Bytes data, PlatformCallback cb) {
   assert(platform);
   assert(completion);
   assert(cb);
@@ -342,8 +342,8 @@ darwin_write(Platform *platform, PlatformCompletion *completion, i32 fd,
 }
 
 __attribute__((warn_unused_result)) static Error
-darwin_accept(Platform *platform, PlatformCompletion *completion,
-              i32 listen_socket, PlatformCallback cb) {
+darwin_accept_async(Platform *platform, PlatformCompletion *completion,
+                    i32 listen_socket, PlatformCallback cb) {
   assert(platform);
   assert(completion);
   assert(cb);
@@ -355,8 +355,8 @@ darwin_accept(Platform *platform, PlatformCompletion *completion,
 }
 
 __attribute__((warn_unused_result)) static Error
-darwin_connect(Platform *platform, PlatformCompletion *completion, i32 fd,
-               Ipv4Addr addr, PlatformCallback cb) {
+darwin_connect_async(Platform *platform, PlatformCompletion *completion, i32 fd,
+                     Ipv4Addr addr, PlatformCallback cb) {
   assert(platform);
   assert(completion);
   assert(cb);
@@ -369,8 +369,8 @@ darwin_connect(Platform *platform, PlatformCompletion *completion, i32 fd,
 }
 
 __attribute__((warn_unused_result)) static Error
-darwin_send_to(Platform *platform, PlatformCompletion *completion, i32 fd,
-               Ipv4Addr addr, Bytes data, PlatformCallback cb) {
+darwin_send_to_async(Platform *platform, PlatformCompletion *completion, i32 fd,
+                     Ipv4Addr addr, Bytes data, PlatformCallback cb) {
   assert(platform);
   assert(completion);
   assert(cb);
@@ -386,8 +386,8 @@ darwin_send_to(Platform *platform, PlatformCompletion *completion, i32 fd,
 }
 
 __attribute__((warn_unused_result)) static Error
-darwin_file_size(Platform *platform, PlatformCompletion *completion, i32 fd,
-                 PlatformCallback cb) {
+darwin_file_size_async(Platform *platform, PlatformCompletion *completion,
+                       i32 fd, PlatformCallback cb) {
   assert(platform);
   assert(completion);
   assert(cb);
@@ -399,8 +399,8 @@ darwin_file_size(Platform *platform, PlatformCompletion *completion, i32 fd,
 }
 
 __attribute__((warn_unused_result)) static Error
-darwin_remove_file(Platform *platform, PlatformCompletion *completion,
-                   Bytes path, PlatformCallback cb) {
+darwin_remove_file_async(Platform *platform, PlatformCompletion *completion,
+                         Bytes path, PlatformCallback cb) {
   assert(platform);
   assert(completion);
   assert(cb);
@@ -436,15 +436,15 @@ darwin_platform_kqueue_make(Arena *arena, Platform **dst) {
   platform_darwin->platform = *env_platform_make();
   platform_darwin->platform.run_for_ns = darwin_run_for_ns;
   platform_darwin->platform.monotonic_ns = unix_monotonic_ns;
-  platform_darwin->platform.open = darwin_open;
-  platform_darwin->platform.close = darwin_close;
-  platform_darwin->platform.read = darwin_read;
-  platform_darwin->platform.write = darwin_write;
-  platform_darwin->platform.accept = darwin_accept;
-  platform_darwin->platform.connect = darwin_connect;
-  platform_darwin->platform.send_to = darwin_send_to;
-  platform_darwin->platform.file_size = darwin_file_size;
-  platform_darwin->platform.remove_file = darwin_remove_file;
+  platform_darwin->platform.open_async = darwin_open_async;
+  platform_darwin->platform.close_async = darwin_close_async;
+  platform_darwin->platform.read_async = darwin_read_async;
+  platform_darwin->platform.write_async = darwin_write_async;
+  platform_darwin->platform.accept_async = darwin_accept_async;
+  platform_darwin->platform.connect_async = darwin_connect_async;
+  platform_darwin->platform.send_to_async = darwin_send_to_async;
+  platform_darwin->platform.file_size_async = darwin_file_size_async;
+  platform_darwin->platform.remove_file_async = darwin_remove_file_async;
 
   *dst = &platform_darwin->platform;
 

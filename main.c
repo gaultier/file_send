@@ -218,8 +218,8 @@ int main(i32 argc, char *argv[]) {
       platform_once_init(&once);
 
       Error err_sendto =
-          platform->send_to(platform, &once.completion, udp_socket, lsd_addr,
-                            udp_msg, platform_once_on_done);
+          platform->send_to_async(platform, &once.completion, udp_socket,
+                                  lsd_addr, udp_msg, platform_once_on_done);
       if (ErrKindNone == err_sendto.kind) {
         err_sendto = platform_once_wait(platform, &once);
       }
