@@ -54,12 +54,27 @@ int main(i32 argc, char *argv[]) {
   }
 
   Platform *platform = NULL;
-  Error err = platform_make(&arena, backend, &platform);
+  Error err = platform_init(&arena, backend, &platform);
   if (ErrKindNone != err.kind) {
     fprintf(stderr, "IO backend: %s\n", platform_backend_to_cstr(backend));
     log_err(&logger, "failed to create the IO implementation for the platform",
             err);
     return 1;
+  }
+
+  {
+  }
+  Ipv4Addr addrs[16] = {0};
+  usize addrs_len = 0;
+  err = platform->dns_resolve(platform, bytes_from_cstr("google.com"), 80,
+                              addrs, &addrs_len, 16);
+  assert(ErrKindNone == err.kind);
+  for (usize i = 0; i < addrs_len; i++) {
+    Ipv4Addr addr = addrs[i];
+
+    printf("[%zu] %u.%u.%u.%u:%hu\n", i, addr.ip >> 24 & 0xff,
+           addr.ip >> 16 & 0xff, addr.ip >> 8 & 0xff, addr.ip >> 0 & 0xff,
+           addr.port);
   }
 
 #ifdef WITH_TESTS

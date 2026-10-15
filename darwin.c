@@ -170,7 +170,6 @@ darwin_event_fd(const struct kevent *event) {
   return (i32)event->ident;
 }
 
-
 // One report from the kernel: try the operation, and either run its callback or
 // ask to be told when to try again. The only place a callback is ever called
 // from, so "the callback runs from inside `run_for_ns`" holds for an operation
@@ -456,7 +455,7 @@ darwin_platform_kqueue_make(Arena *arena, Platform **dst) {
 // for it by name. A Linux backend named here would be a lie, and a caller that
 // asked for one gets told so rather than silently getting kqueue.
 __attribute__((warn_unused_result)) static Error
-platform_make(Arena *arena, PlatformBackend backend, Platform **dst) {
+platform_init(Arena *arena, PlatformBackend backend, Platform **dst) {
   assert(arena);
   assert(dst);
 

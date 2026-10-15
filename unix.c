@@ -3,8 +3,10 @@
 #include "lib.c"
 
 #include <fcntl.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -825,11 +827,68 @@ unix_monotonic_ns(Platform *platform) {
   return (u64)ts.tv_sec * Second + (u64)ts.tv_nsec;
 }
 
+__attribute__((warn_unused_result)) static Error
+unix_dns_resolve(Platform *platform, Bytes hostname, u16 port,
+                 Ipv4Addr *dst_addrs, usize *dst_addrs_len,
+                 usize dst_addrs_cap) {
+  assert(platform);
+  assert(dst_addrs);
+  assert(dst_addrs_len);
+  assert(dst_addrs_cap > 0);
+
+  struct addrinfo hints = {0};
+  hints.ai_socktype = SOCK_STREAM;
+  hints.ai_protocol = IPPROTO_TCP;
+
+  struct addrinfo *addr_info = NULL;
+  int res_getaddrinfo = 0;
+  char hostname_cstr[4096] = {0};
+  memcpy(hostname_cstr, hostname.data,
+         min(hostname.len, sizeof(hostname_cstr) - 1));
+
+  char port_cstr[6] = {0};
+  snprintf(port_cstr, sizeof(port_cstr), "%hu", port);
+
+  do {
+    res_getaddrinfo = getaddrinfo(hostname_cstr, port_cstr, &hints, &addr_info);
+  } while (-1 == res_getaddrinfo && EINTR == errno);
+
+  if (-1 == res_getaddrinfo) {
+    return unix_error_from_errno(errno);
+  }
+
+  struct addrinfo *rp = NULL;
+  for (rp = addr_info; rp != NULL; rp = rp->ai_next) {
+    assert(*dst_addrs_len < dst_addrs_cap);
+
+    if (rp->ai_family != AF_INET) {
+      continue;
+    }
+
+    // TODO: Check UDP/TCP?
+
+    // Too many?
+    if (*dst_addrs_len == dst_addrs_cap) {
+      return (Error){0};
+    }
+
+    const struct sockaddr_in *const sockaddr =
+        (struct sockaddr_in *)rp->ai_addr;
+
+    dst_addrs[*dst_addrs_len] = (Ipv4Addr){
+        .ip = sockaddr->sin_addr.s_addr,
+        .port = sockaddr->sin_port,
+    };
+    *dst_addrs_len += 1;
+  };
+  return (Error){.kind = ErrKindNone};
+}
+
 __attribute__((warn_unused_result)) static Platform *env_platform_make(void) {
   // A `static` rather than a value handed back: there is one per process, and
   // `platform_make` copies it rather than holding on to it. The Unix
-  // implementation is stateless, so `ctx` stays null; a test's fake is what it
-  // is for.
+  // implementation is stateless, so `ctx` stays null; a test's fake is what
+  // it is for.
   static Platform platform = {
       .get_page_size = unix_get_page_size,
       .valloc = unix_valloc,
@@ -853,6 +912,7 @@ __attribute__((warn_unused_result)) static Platform *env_platform_make(void) {
       .send_to = unix_send_to,
       .file_size = unix_file_size,
       .remove_file = unix_remove_file,
+      .dns_resolve = unix_dns_resolve,
 
       .thread_create = unix_thread_create,
 

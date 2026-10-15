@@ -691,6 +691,8 @@ struct Platform {
                    usize *dst_sent);
   Error (*file_size)(Platform *platform, i32 fd, usize *dst_size);
   Error (*remove_file)(Platform *platform, Bytes path);
+  Error (*dns_resolve)(Platform *platform, Bytes hostname, u16 port,
+                       Ipv4Addr *dst_addrs, usize *addrs_len, usize addrs_cap);
 
   void *ctx;
 
@@ -751,7 +753,7 @@ platform_backend_to_cstr(PlatformBackend backend) {
 }
 
 __attribute__((warn_unused_result)) static Error
-platform_make(Arena *arena, PlatformBackend backend, Platform **dst);
+platform_init(Arena *arena, PlatformBackend backend, Platform **dst);
 
 // ---------- Platform: waiting for one thing ----------
 

@@ -150,12 +150,13 @@ __attribute__((warn_unused_result)) static Platform *env_platform_make(void) {
 // is that this process does not make the call -- and `PlatformAction` is what
 // an `OVERLAPPED` is filled in from.
 __attribute__((warn_unused_result)) static Error
-platform_make(Arena *arena, PlatformBackend backend, Platform **dst) {
+platform_init(Arena *arena, PlatformBackend backend, Platform **dst) {
   (void)arena;
   (void)dst;
   (void)backend;
 
   // Every backend, `Default` included: there is nothing here to hand back yet,
-  // and saying so is better than handing back a vtable that faults on first use.
+  // and saying so is better than handing back a vtable that faults on first
+  // use.
   return (Error){.kind = ErrKindUnsupported};
 }

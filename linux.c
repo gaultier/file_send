@@ -139,11 +139,11 @@ linux_submit(PlatformLinux *platform_linux, PlatformCompletion *completion,
 
 // "Say when this descriptor is worth trying again."
 //
-// A registration is per descriptor, so this cannot be used for two operations on
-// one descriptor at a time: the second would replace the first, and the first
-// would never be reported. Nothing does that -- a connection has one operation
-// in flight and the composites are sequences -- and kqueue would have tolerated
-// it, so it is written down here rather than left to be discovered.
+// A registration is per descriptor, so this cannot be used for two operations
+// on one descriptor at a time: the second would replace the first, and the
+// first would never be reported. Nothing does that -- a connection has one
+// operation in flight and the composites are sequences -- and kqueue would have
+// tolerated it, so it is written down here rather than left to be discovered.
 __attribute__((warn_unused_result)) static Error
 linux_arm(PlatformLinux *platform_linux, u32 idx) {
   assert(platform_linux);
@@ -253,9 +253,9 @@ linux_run_for_ns(Platform *platform, usize ns) {
 
   PlatformLinux *const platform_linux = (PlatformLinux *)platform;
 
-  // What was submitted before this turn began. A callback below may submit more;
-  // that goes on the list proper and waits for the next turn, so one turn cannot
-  // be spun forever by a callback that keeps resubmitting.
+  // What was submitted before this turn began. A callback below may submit
+  // more; that goes on the list proper and waits for the next turn, so one turn
+  // cannot be spun forever by a callback that keeps resubmitting.
   {
     u32 idx = platform_linux->submitted_head;
     platform_linux->submitted_head = IO_LINUX_OP_NONE;
@@ -294,8 +294,8 @@ linux_run_for_ns(Platform *platform, usize ns) {
   const i32 ret = epoll_wait(platform_linux->epoll_fd, events, EPOLL_MAX_EVENTS,
                              timeout_ms);
   if (-1 == ret) {
-    // A signal during the wait reported nothing and broke nothing: the next turn
-    // waits again.
+    // A signal during the wait reported nothing and broke nothing: the next
+    // turn waits again.
     if (EINTR == errno) {
       return (Error){.kind = ErrKindNone};
     }
@@ -316,9 +316,9 @@ linux_run_for_ns(Platform *platform, usize ns) {
     platform_linux->armed_count -= 1;
 
     // `EPOLLERR` and `EPOLLHUP` need nothing of their own: they make the
-    // descriptor ready, and the syscall `linux_advance` is about to make reports
-    // what actually went wrong. Which is one thing epoll makes easier than
-    // kqueue, where a rejected registration comes back as an event.
+    // descriptor ready, and the syscall `linux_advance` is about to make
+    // reports what actually went wrong. Which is one thing epoll makes easier
+    // than kqueue, where a rejected registration comes back as an event.
     linux_advance(platform_linux, idx);
   }
 
@@ -328,9 +328,9 @@ linux_run_for_ns(Platform *platform, usize ns) {
 // ---------- The slots ----------
 //
 // Each one records what was asked for and asks for a turn of the loop. Nothing
-// here touches the operating system, so the only thing a slot can report is that
-// it had no room to take the operation; what the operation itself has to say
-// reaches the callback.
+// here touches the operating system, so the only thing a slot can report is
+// that it had no room to take the operation; what the operation itself has to
+// say reaches the callback.
 
 __attribute__((warn_unused_result)) static Error
 linux_open_async(Platform *platform, PlatformCompletion *completion, Bytes path,
@@ -477,8 +477,8 @@ linux_platform_epoll_make(Arena *arena, Platform **dst) {
   // mean something.
   memset(platform_linux, 0, sizeof(*platform_linux));
 
-  // `EPOLL_CLOEXEC`: nothing here execs, but a descriptor that would survive one
-  // is the kind of thing that is only ever noticed much later.
+  // `EPOLL_CLOEXEC`: nothing here execs, but a descriptor that would survive
+  // one is the kind of thing that is only ever noticed much later.
   const i32 ret = epoll_create1(EPOLL_CLOEXEC);
   if (-1 == ret) {
     return unix_error_from_errno(errno);
@@ -488,8 +488,8 @@ linux_platform_epoll_make(Arena *arena, Platform **dst) {
   platform_linux->submitted_head = IO_LINUX_OP_NONE;
   platform_linux->submitted_tail = IO_LINUX_OP_NONE;
 
-  // Every slot free, chained in order so that the first operations of a run take
-  // the first slots.
+  // Every slot free, chained in order so that the first operations of a run
+  // take the first slots.
   platform_linux->free_head = 0;
   for (u32 i = 0; i < IO_LINUX_OPS_MAX; i++) {
     platform_linux->ops[i].completion = NULL;
@@ -524,7 +524,7 @@ linux_platform_epoll_make(Arena *arena, Platform **dst) {
 // itself. It goes here as `linux_io_uring_make`, with the default below picking
 // it when the running kernel has it.
 __attribute__((warn_unused_result)) static Error
-platform_make(Arena *arena, PlatformBackend backend, Platform **dst) {
+platform_init(Arena *arena, PlatformBackend backend, Platform **dst) {
   assert(arena);
   assert(dst);
 
