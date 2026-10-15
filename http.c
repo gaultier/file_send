@@ -500,3 +500,96 @@ http_parse_resp(Bytes src, HttpResponseStatusLine *dst_status_line,
 
   return (Error){0};
 }
+
+__attribute__((unused, warn_unused_result)) static Error
+http_req_write(Platform *platform, i32 fd, HttpMethod method, Bytes url,
+               HttpHeader *headers, usize headers_len, Arena scratch) {
+  assert(platform);
+
+  BytesBuffer sb = {0};
+  usize sb_size = url.len + 32;
+  for (usize i = 0; i < headers_len; i++) {
+    HttpHeader h = headers[i];
+    assert(!__builtin_add_overflow(sb_size, h.key.len, &sb_size));
+    assert(!__builtin_add_overflow(sb_size, 2 + 2, &sb_size));
+    assert(!__builtin_add_overflow(sb_size, h.value.len, &sb_size));
+  }
+  assert(!__builtin_add_overflow(sb_size, 4, &sb_size));
+
+  Error err = bytes_buffer_make(sb_size, &scratch, &sb);
+  if (ErrKindNone != err.kind) {
+    return err;
+  }
+
+  const char *method_cstr = NULL;
+  switch (method) {
+  case HTTP_METHOD_OPTIONS:
+    method_cstr = "OPTIONS";
+    break;
+  case HTTP_METHOD_GET:
+    method_cstr = "GET";
+    break;
+  case HTTP_METHOD_HEAD:
+    method_cstr = "HEAD";
+    break;
+  case HTTP_METHOD_POST:
+    method_cstr = "POST";
+    break;
+  case HTTP_METHOD_PUT:
+    method_cstr = "PUT";
+    break;
+  case HTTP_METHOD_DELETE:
+    method_cstr = "DELETE";
+    break;
+  case HTTP_METHOD_TRACE:
+    method_cstr = "TRACE";
+    break;
+  case HTTP_METHOD_CONNECT:
+    method_cstr = "CONNECT";
+    break;
+  }
+  assert(method_cstr);
+  assert(bytes_buffer_extend_within_cap(&sb, bytes_from_cstr(method_cstr)));
+  assert(bytes_buffer_extend_within_cap(&sb, bytes_from_cstr(" ")));
+  assert(bytes_buffer_extend_within_cap(&sb, url));
+
+  assert(bytes_buffer_extend_within_cap(&sb, bytes_from_cstr(" HTTP/1.1\r\n")));
+
+  for (usize i = 0; i < headers_len; i++) {
+    const HttpHeader header = headers[i];
+    if (!bytes_buffer_extend_within_cap(&sb, header.key)) {
+      return (Error){.kind = ErrKindOOM};
+    }
+    if (!bytes_buffer_extend_within_cap(&sb, bytes_from_cstr(": "))) {
+      return (Error){.kind = ErrKindOOM};
+    }
+    if (!bytes_buffer_extend_within_cap(&sb, header.value)) {
+      return (Error){.kind = ErrKindOOM};
+    }
+    if (!bytes_buffer_extend_within_cap(&sb, bytes_from_cstr("\r\n"))) {
+      return (Error){.kind = ErrKindOOM};
+    }
+  }
+
+  if (!bytes_buffer_extend_within_cap(&sb, bytes_from_cstr("\r\n"))) {
+    return (Error){.kind = ErrKindOOM};
+  }
+
+  Bytes remaining = bytes_buffer_to_bytes(sb);
+  const usize total_to_write = remaining.len;
+  for (usize _i = 0; _i < total_to_write; _i++) {
+    usize written = 0;
+    err = platform->write(platform, fd, remaining, &written);
+    if (ErrKindNone != err.kind) {
+      return err;
+    }
+    assert(written <= remaining.len);
+    bytes_advance(&remaining, written);
+  }
+
+  if (remaining.len > 0) {
+    return (Error){.kind = ErrKindAgain};
+  }
+
+  return (Error){0};
+}
