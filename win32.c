@@ -139,8 +139,6 @@ win32_dns_resolve(Platform *platform, Bytes hostname, u16 port,
 // for the arena, `GetCurrentProcessId`, Winsock for the sockets, and
 // `CreateFileMapping` plus `MapViewOfFile` for `map_fd`.
 __attribute__((warn_unused_result)) static Platform *env_platform_make(void) {
-  // A `static` for the same reason as on Unix: there is one per process, and
-  // `platform_init` copies it rather than holding on to it.
   static Platform platform = {
       .open = win32_open,
       .close = win32_close,
@@ -151,6 +149,7 @@ __attribute__((warn_unused_result)) static Platform *env_platform_make(void) {
       .send_to = win32_send_to,
       .file_size = win32_file_size,
       .remove_file = win32_remove_file,
+      .dns_resolve = win32_dns_resolve,
   };
 
   return &platform;
