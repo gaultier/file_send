@@ -692,7 +692,8 @@ struct Platform {
   Error (*file_size)(Platform *platform, i32 fd, usize *dst_size);
   Error (*remove_file)(Platform *platform, Bytes path);
   Error (*dns_resolve)(Platform *platform, Bytes hostname, u16 port,
-                       Ipv4Addr *dst_addrs, usize *addrs_len, usize addrs_cap);
+                       Ipv4Addr *dst_addrs, usize *dst_addrs_len,
+                       usize addrs_cap);
 
   void *ctx;
 

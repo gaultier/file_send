@@ -122,6 +122,19 @@ win32_remove_file(Platform *platform, Bytes path) {
   return (Error){.kind = ErrKindUnsupported};
 }
 
+__attribute__((warn_unused_result)) static Error
+win32_dns_resolve(Platform *platform, Bytes hostname, u16 port,
+                  Ipv4Addr *dst_addrs, usize *dst_addrs_len, usize addrs_cap) {
+  (void)platform;
+  (void)hostname;
+  (void)port;
+  (void)dst_addrs;
+  (void)dst_addrs_len;
+  (void)addrs_cap;
+
+  return (Error){.kind = ErrKindUnsupported};
+}
+
 // TODO: `GetSystemInfo` for the page size, `VirtualAlloc` and `VirtualProtect`
 // for the arena, `GetCurrentProcessId`, Winsock for the sockets, and
 // `CreateFileMapping` plus `MapViewOfFile` for `map_fd`.

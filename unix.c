@@ -7,7 +7,6 @@
 #include <netinet/in.h>
 #include <pthread.h>
 #include <stdio.h>
-#include <sys/_endian.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -830,14 +829,13 @@ unix_monotonic_ns(Platform *platform) {
 
 __attribute__((warn_unused_result)) static Error
 unix_dns_resolve(Platform *platform, Bytes hostname, u16 port,
-                 Ipv4Addr *dst_addrs, usize *dst_addrs_len,
-                 usize dst_addrs_cap) {
+                 Ipv4Addr *dst_addrs, usize *dst_addrs_len, usize addrs_cap) {
   assert(platform);
   assert(dst_addrs);
   assert(dst_addrs_len);
-  assert(dst_addrs_cap > 0);
+  assert(addrs_cap > 0);
 
-  const usize max_hostname_len = 4096;
+  const usize max_hostname_len = 255;
   if (hostname.len > max_hostname_len) {
     return (Error){.kind = ErrKindInvalidData};
   }
@@ -851,8 +849,8 @@ unix_dns_resolve(Platform *platform, Bytes hostname, u16 port,
 
   struct addrinfo *addr_info = NULL;
 
-  char hostname_cstr[4096] = {0};
-  assert(sizeof(hostname_cstr) == max_hostname_len);
+  char hostname_cstr[256] = {0};
+  assert(sizeof(hostname_cstr) == 1 + max_hostname_len);
 
   memcpy(hostname_cstr, hostname.data,
          min(hostname.len, sizeof(hostname_cstr) - 1));
@@ -860,20 +858,19 @@ unix_dns_resolve(Platform *platform, Bytes hostname, u16 port,
   char port_cstr[6] = {0};
   snprintf(port_cstr, sizeof(port_cstr), "%hu", port);
 
-  i32 res_getaddrinfo = 0;
-  do {
-    res_getaddrinfo = getaddrinfo(hostname_cstr, port_cstr, &hints, &addr_info);
-  } while (-1 == res_getaddrinfo && EINTR == errno);
-
-  if (-1 == res_getaddrinfo) {
+  const i32 res = getaddrinfo(hostname_cstr, port_cstr, &hints, &addr_info);
+  if (EAI_SYSTEM == res) {
     return unix_error_from_errno(errno);
+  }
+  if (0 != res) {
+    return (Error){.kind = ErrKindInvalidData};
   }
 
   Error err = {0};
 
   struct addrinfo *it = addr_info;
   for (usize _i = 0; _i < 256; _i++) {
-    assert(*dst_addrs_len <= dst_addrs_cap);
+    assert(*dst_addrs_len <= addrs_cap);
 
     if (NULL == it) {
       goto end;
@@ -882,7 +879,7 @@ unix_dns_resolve(Platform *platform, Bytes hostname, u16 port,
     assert(it->ai_family == AF_INET);
 
     // Too many?
-    if (*dst_addrs_len == dst_addrs_cap) {
+    if (*dst_addrs_len == addrs_cap) {
       goto end;
     }
 
@@ -902,7 +899,7 @@ unix_dns_resolve(Platform *platform, Bytes hostname, u16 port,
     *dst_addrs_len += 1;
 
     it = it->ai_next;
-  };
+  }
 
 end:
   freeaddrinfo(addr_info);
