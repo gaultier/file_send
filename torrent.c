@@ -1416,19 +1416,19 @@ typedef struct TorrentNetworkCtx TorrentNetworkCtx;
 #define TORRENT_PEER_SEND_BUF_CAP 1024
 
 typedef struct {
-  // The caller's, passed through `io_listen_and_serve_tcp_ipv4`.
+  // The caller's, passed through `platform_listen_and_serve_tcp_ipv4`.
   void *cb_ctx;
-  IO *io;
+  Platform *platform;
   TorrentNetworkCtx *network_ctx;
   i32 socket;
   Ipv4Addr addr;
 
-  IoCompletion completion_read;
+  PlatformCompletion completion_read;
   // TODO: Pipelining?
-  IoCompletion completion_write;
+  PlatformCompletion completion_write;
   // The close reuses neither of those: a hang-up can be decided while a read or
   // a write is still with the kernel, and one completion holds one operation.
-  IoCompletion completion_close;
+  PlatformCompletion completion_close;
 
   // What the kernel is still holding. Each completion carries one operation at
   // a time, and both the read path and the write path drive the tick, so
@@ -1451,7 +1451,7 @@ typedef struct {
   // More: torrent, etc.
   TorrentPeerState state;
 
-  // Deadlines, as absolute instants on the clock `IO.monotonic_ns` reads;
+  // Deadlines, as absolute instants on the clock `Platform.monotonic_ns` reads;
   // `TORRENT_PEER_DEADLINE_NONE` is one that is not set. Absolute and not
   // intervals, so that the walk below compares them without repeating the
   // arithmetic and so that re-arming one is a single assignment.
@@ -1916,18 +1916,18 @@ torrent_peer_ctx_pool_acquire(TorrentpeerHandleCtxPool *pool) {
 
     TorrentPeer *res = &pool->slots[slot_idx];
     assert(0 == res->cb_ctx);
-    assert(0 == res->io);
+    assert(0 == res->platform);
     assert(0 == res->network_ctx);
     assert(0 == res->socket);
     assert(0 == res->addr.ip);
     assert(0 == res->addr.port);
     // Nothing is in flight on a free slot, so nothing is pointing at its
     // completion either.
-    assert(IoActionKindNone == res->completion_read.action.kind);
+    assert(PlatformActionKindNone == res->completion_read.action.kind);
     assert(NULL == res->completion_read.cb);
-    assert(IoActionKindNone == res->completion_write.action.kind);
+    assert(PlatformActionKindNone == res->completion_write.action.kind);
     assert(NULL == res->completion_write.cb);
-    assert(IoActionKindNone == res->completion_close.action.kind);
+    assert(PlatformActionKindNone == res->completion_close.action.kind);
     assert(NULL == res->completion_close.cb);
     assert(!res->read_in_flight);
     assert(!res->write_in_flight);
@@ -1967,8 +1967,7 @@ static void torrent_peer_ctx_pool_release(TorrentpeerHandleCtxPool *pool,
 // wherever it happens to show.
 static void torrent_peer_assert_invariants(const TorrentPeer *peer) {
   assert(peer);
-  assert(peer->io);
-  assert(peer->io->env);
+  assert(peer->platform);
   assert(peer->network_ctx);
   assert(peer->socket >= 0);
   assert(TORRENT_INFO_HASH_LEN == peer->info_hash.len);
@@ -1999,7 +1998,7 @@ static void torrent_peer_assert_invariants(const TorrentPeer *peer) {
 }
 
 // A connection, one callback at a time.
-static void torrent_peer_on_close(IoCompletion *completion, Error err,
+static void torrent_peer_on_close(PlatformCompletion *completion, Error err,
                                   usize res) {
   assert(completion);
   (void)err;
@@ -2039,16 +2038,16 @@ static void torrent_peer_close(TorrentPeer *peer) {
     return;
   }
 
-  IO *const io = peer->io;
+  Platform *const platform = peer->platform;
 
-  const Error err = io->close(io, &peer->completion_close, peer->socket,
-                              torrent_peer_on_close);
+  const Error err = platform->close(platform, &peer->completion_close,
+                                    peer->socket, torrent_peer_on_close);
   if (ErrKindNone != err.kind) {
     // The close was never submitted, so `torrent_peer_on_close` will not run:
     // hang up here instead, and hand the slot back, or the connection would
     // cost a slot for the life of the process.
     log_err(&peer->logger, "failed to hang up on a peer", err);
-    (void)io->env->close_socket(io->env, peer->socket);
+    (void)platform->close_socket(platform, peer->socket);
     torrent_peer_ctx_pool_release(&peer->network_ctx->pool, peer);
   }
 }
@@ -2091,23 +2090,24 @@ torrent_check_handshake(Bytes data, Bytes info_hash_expected, Bytes *peer_id) {
   return true;
 }
 
-static void torrent_peer_tick(TorrentPeer *peer, IO *io, u64 now_ns);
+static void torrent_peer_tick(TorrentPeer *peer, Platform *platform,
+                              u64 now_ns);
 
 __attribute__((warn_unused_result)) static bool
 torrent_peer_dispatch(TorrentPeer *peer, TorrentEvent event, u64 now_ns);
 
-static void torrent_peer_on_read(IoCompletion *completion, Error err,
+static void torrent_peer_on_read(PlatformCompletion *completion, Error err,
                                  usize res);
 
-static void torrent_peer_on_write(IoCompletion *completion, Error err,
+static void torrent_peer_on_write(PlatformCompletion *completion, Error err,
                                   usize res);
 
 // Wait for more from the peer, after the bytes already buffered: a read aimed
 // at the front of the buffer would overwrite a message that is still arriving.
 __attribute__((warn_unused_result)) static Error
-torrent_peer_read(TorrentPeer *peer, IO *io) {
+torrent_peer_read(TorrentPeer *peer, Platform *platform) {
   torrent_peer_assert_invariants(peer);
-  assert(io == peer->io);
+  assert(platform == peer->platform);
   // There is somewhere to put what arrives.
   assert(peer->recv_len < TORRENT_PEER_RECV_BUF_CAP);
   assert(!peer->read_in_flight);
@@ -2119,8 +2119,8 @@ torrent_peer_read(TorrentPeer *peer, IO *io) {
   const Bytes dst = bytes_make(peer->recv_buf + peer->recv_len,
                                TORRENT_PEER_RECV_BUF_CAP - peer->recv_len);
 
-  const Error err = io->read(io, &peer->completion_read, peer->socket, dst,
-                             torrent_peer_on_read);
+  const Error err = platform->read(platform, &peer->completion_read,
+                                   peer->socket, dst, torrent_peer_on_read);
   if (ErrKindNone == err.kind) {
     peer->read_in_flight = true;
   }
@@ -2131,9 +2131,9 @@ torrent_peer_read(TorrentPeer *peer, IO *io) {
 // Send what is in the send buffer. One write at a time, like the read: what a
 // short write leaves behind goes out from the callback.
 __attribute__((warn_unused_result)) static Error
-torrent_peer_write(TorrentPeer *peer, IO *io) {
+torrent_peer_write(TorrentPeer *peer, Platform *platform) {
   torrent_peer_assert_invariants(peer);
-  assert(io == peer->io);
+  assert(platform == peer->platform);
   // There is something to send.
   assert(peer->send_len > 0);
   assert(!peer->write_in_flight);
@@ -2143,8 +2143,8 @@ torrent_peer_write(TorrentPeer *peer, IO *io) {
 
   const Bytes src = bytes_make(peer->send_buf, peer->send_len);
 
-  const Error err = io->write(io, &peer->completion_write, peer->socket, src,
-                              torrent_peer_on_write);
+  const Error err = platform->write(platform, &peer->completion_write,
+                                    peer->socket, src, torrent_peer_on_write);
   if (ErrKindNone == err.kind) {
     peer->write_in_flight = true;
   }
@@ -2152,7 +2152,7 @@ torrent_peer_write(TorrentPeer *peer, IO *io) {
   return err;
 }
 
-static void torrent_peer_on_write(IoCompletion *completion, Error err,
+static void torrent_peer_on_write(PlatformCompletion *completion, Error err,
                                   usize res) {
   assert(completion);
 
@@ -2185,7 +2185,7 @@ static void torrent_peer_on_write(IoCompletion *completion, Error err,
 
     const bool alive = torrent_peer_dispatch(
         peer, (TorrentEvent){.kind = TorrentEventKindHangup},
-        peer->io->monotonic_ns(peer->io));
+        peer->platform->monotonic_ns(peer->platform));
     assert(!alive);
     return;
   }
@@ -2198,10 +2198,11 @@ static void torrent_peer_on_write(IoCompletion *completion, Error err,
   memmove(peer->send_buf, peer->send_buf + res, unsent);
   peer->send_len = unsent;
 
-  torrent_peer_tick(peer, peer->io, peer->io->monotonic_ns(peer->io));
+  torrent_peer_tick(peer, peer->platform,
+                    peer->platform->monotonic_ns(peer->platform));
 }
 
-static void torrent_peer_on_read(IoCompletion *completion, Error err,
+static void torrent_peer_on_read(PlatformCompletion *completion, Error err,
                                  usize res) {
   assert(completion);
 
@@ -2234,7 +2235,7 @@ static void torrent_peer_on_read(IoCompletion *completion, Error err,
 
     const bool alive = torrent_peer_dispatch(
         peer, (TorrentEvent){.kind = TorrentEventKindHangup},
-        peer->io->monotonic_ns(peer->io));
+        peer->platform->monotonic_ns(peer->platform));
     assert(!alive);
     return;
   }
@@ -2242,7 +2243,8 @@ static void torrent_peer_on_read(IoCompletion *completion, Error err,
   assert(!__builtin_add_overflow(peer->recv_len, res, &peer->recv_len));
   assert(peer->recv_len <= TORRENT_PEER_RECV_BUF_CAP);
 
-  torrent_peer_tick(peer, peer->io, peer->io->monotonic_ns(peer->io));
+  torrent_peer_tick(peer, peer->platform,
+                    peer->platform->monotonic_ns(peer->platform));
 }
 
 // Put our own handshake in the send buffer. 68 bytes, the same shape as the one
@@ -2415,13 +2417,13 @@ torrent_peer_dispatch(TorrentPeer *peer, const TorrentEvent event,
 // Like `torrent_peer_dispatch`, this can end the connection -- an operation
 // that cannot even be submitted has no callback coming -- so `peer` is not to
 // be touched afterwards.
-static void torrent_peer_pump(TorrentPeer *peer, IO *io) {
+static void torrent_peer_pump(TorrentPeer *peer, Platform *platform) {
   torrent_peer_assert_invariants(peer);
-  assert(io == peer->io);
+  assert(platform == peer->platform);
   assert(!peer->closing);
 
   if (peer->send_len > 0 && !peer->write_in_flight) {
-    const Error err = torrent_peer_write(peer, io);
+    const Error err = torrent_peer_write(peer, platform);
     if (ErrKindNone != err.kind) {
       log_err(&peer->logger, "failed to write to a peer", err);
       torrent_peer_close(peer);
@@ -2434,7 +2436,7 @@ static void torrent_peer_pump(TorrentPeer *peer, IO *io) {
   // malformed, and everything smaller has been taken out of it.
   assert(peer->recv_len < TORRENT_PEER_RECV_BUF_CAP);
   if (!peer->read_in_flight) {
-    const Error err = torrent_peer_read(peer, io);
+    const Error err = torrent_peer_read(peer, platform);
     if (ErrKindNone != err.kind) {
       log_err(&peer->logger, "failed to read from a peer", err);
       torrent_peer_close(peer);
@@ -2446,9 +2448,10 @@ static void torrent_peer_pump(TorrentPeer *peer, IO *io) {
 // The bridge's read side: whatever has arrived, turned into events one at a
 // time, and then a read and a write put out for what comes next. Run from
 // whichever callback has just reported.
-static void torrent_peer_tick(TorrentPeer *peer, IO *io, const u64 now_ns) {
+static void torrent_peer_tick(TorrentPeer *peer, Platform *platform,
+                              const u64 now_ns) {
   torrent_peer_assert_invariants(peer);
-  assert(io == peer->io);
+  assert(platform == peer->platform);
   assert(!peer->closing);
 
   log(&peer->logger, LogLevelDebug, "tick in %s",
@@ -2571,17 +2574,17 @@ static void torrent_peer_tick(TorrentPeer *peer, IO *io, const u64 now_ns) {
     assert(drained);
   }
 
-  torrent_peer_pump(peer, io);
+  torrent_peer_pump(peer, platform);
 }
 
 // Point a freshly acquired slot at a connection. Its own function because the
 // listener is not the only way a connection starts: an outgoing `connect` lands
 // in the same state, waiting for the same handshake.
-static void torrent_peer_init(TorrentPeer *peer, IO *io,
+static void torrent_peer_init(TorrentPeer *peer, Platform *platform,
                               TorrentNetworkCtx *network_ctx, Ipv4Addr addr,
                               i32 socket, u32 ip) {
   assert(peer);
-  assert(io);
+  assert(platform);
   assert(network_ctx);
   assert(TORRENT_INFO_HASH_LEN == network_ctx->info_hash.len);
   assert(socket >= 0);
@@ -2592,7 +2595,7 @@ static void torrent_peer_init(TorrentPeer *peer, IO *io,
   peer->cb_ctx = network_ctx;
   peer->addr = addr;
   peer->socket = socket;
-  peer->io = io;
+  peer->platform = platform;
   peer->network_ctx = network_ctx;
   peer->completion_read.ctx = peer;
   peer->completion_write.ctx = peer;
@@ -2620,9 +2623,9 @@ static void torrent_peer_init(TorrentPeer *peer, IO *io,
   log(&peer->logger, LogLevelDebug, "init");
 }
 
-static void torrent_peer_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
-                                   i32 accept_socket) {
-  assert(io);
+static void torrent_peer_on_accept(Platform *platform, void *vctx,
+                                   Ipv4Addr accept_addr, i32 accept_socket) {
+  assert(platform);
   assert(vctx);
   TorrentNetworkCtx *const network_ctx = vctx;
   assert(TORRENT_INFO_HASH_LEN == network_ctx->info_hash.len);
@@ -2633,12 +2636,13 @@ static void torrent_peer_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
   if (!peer) {
     fprintf(stderr, "backpressure: no available pool slot for peer\n");
     // Refused, so there is no slot to keep a completion in and nothing waiting
-    // on the answer: this is the hang-up `Env` is for.
-    (void)io->env->close_socket(io->env, accept_socket);
+    // on the answer: this is the hang-up `close_socket` is for.
+    (void)platform->close_socket(platform, accept_socket);
     return;
   }
 
-  torrent_peer_init(peer, io, network_ctx, accept_addr, accept_socket, ip);
+  torrent_peer_init(peer, platform, network_ctx, accept_addr, accept_socket,
+                    ip);
   log(&peer->logger, LogLevelInfo, "accepted");
 
   // The transport having a connection is the first thing the peer is told, and
@@ -2651,11 +2655,11 @@ static void torrent_peer_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
   // one in the drain above.
   if (!torrent_peer_dispatch(peer,
                              (TorrentEvent){.kind = TorrentEventKindAccepted},
-                             io->monotonic_ns(io))) {
+                             platform->monotonic_ns(platform))) {
     return;
   }
 
-  torrent_peer_pump(peer, io);
+  torrent_peer_pump(peer, platform);
 }
 
 // Give every peer whose deadline has passed a `Deadline` event, and answer with
@@ -2675,10 +2679,10 @@ static void torrent_peer_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
 // coming back: a re-arm has to move buckets and a closing peer leaves an entry
 // behind. Worth it somewhere past a few thousand peers, and not before.
 __attribute__((warn_unused_result)) static u64
-torrent_peers_deadlines_run(TorrentNetworkCtx *network_ctx, IO *io,
+torrent_peers_deadlines_run(TorrentNetworkCtx *network_ctx, Platform *platform,
                             const u64 now_ns) {
   assert(network_ctx);
-  assert(io);
+  assert(platform);
 
   TorrentpeerHandleCtxPool *const pool = &network_ctx->pool;
 
@@ -2733,7 +2737,7 @@ torrent_peers_deadlines_run(TorrentNetworkCtx *network_ctx, IO *io,
         // callback coming -- and a released slot is a zeroed one whose deadline
         // reads as long past. Waking once more for a peer that has gone costs
         // one walk; taking that zero as the minimum would spin.
-        torrent_peer_pump(peer, io);
+        torrent_peer_pump(peer, platform);
       }
 
       if (due_at < earliest) {

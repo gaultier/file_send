@@ -10,18 +10,18 @@
 #include "win32.c"
 #endif
 
-// The whole test suite, plus the mock `IO` implementations it runs the real
-// code against. Included by `main.c` last, so a test can reach anything the
-// program defines.
+// The whole test suite, plus the mock `Platform` implementations it runs the
+// real code against. Included by `main.c` last, so a test can reach anything
+// the program defines.
 
 // Arena memory comes straight from `mmap` and is therefore zeroed, which
 // makes a read of never-written memory look like a perfectly valid zeroed
 // struct. Poison it so such a read shows up as an obviously bogus value
 // instead.
 __attribute__((warn_unused_result)) static Arena test_arena(usize bytes_count) {
-  const Env *const env = env_platform_make();
+  Platform *const platform = env_platform_make();
   Arena arena = {0};
-  assert(ErrKindNone == arena_valloc(env, bytes_count, &arena).kind);
+  assert(ErrKindNone == arena_valloc(platform, bytes_count, &arena).kind);
   assert(arena.start);
   assert(arena.end);
   assert((usize)arena.end - (usize)arena.start >= bytes_count);
@@ -477,20 +477,20 @@ static void test_unix_error_from_errno(void) {
 }
 #endif // PLATFORM_UNIX
 
-// ---------- The fake `Env` ----------
+// ---------- The fake `Platform`, the slots that never wait ----------
 //
-// An `Env` is a vtable and nothing else -- the real one is stateless -- so a
-// fake is a value on the test's own stack with `ctx` pointing at whatever it
-// needs to remember. Anything it does not fake is delegated to `real` rather
-// than reimplemented, so the code under test still gets memory it can write to
-// and descriptors it can use.
+// A `Platform` from `env_platform_make` is a vtable and nothing else -- the
+// real one is stateless -- so a fake is a value on the test's own stack with
+// `ctx` pointing at whatever it needs to remember. Anything it does not fake is
+// delegated to `real` rather than reimplemented, so the code under test still
+// gets memory it can write to and descriptors it can use.
 
-// A fake `Env` for the arena. It records what `arena_valloc` asked the OS for,
-// answers with a page size the host does not have, and can make the mapping
-// fail on demand: the real `mmap` only fails for sizes so large that the
-// request says nothing about *which* error comes back.
+// A fake `Platform` for the arena. It records what `arena_valloc` asked the OS
+// for, answers with a page size the host does not have, and can make the
+// mapping fail on demand: the real `mmap` only fails for sizes so large that
+// the request says nothing about *which* error comes back.
 typedef struct {
-  const Env *real;
+  Platform *real;
   usize page_size;
 
   // When set, `valloc` fails with this instead of mapping.
@@ -505,16 +505,16 @@ typedef struct {
 } TestAllocCtx;
 
 __attribute__((warn_unused_result)) static usize
-test_alloc_get_page_size(const Env *env) {
-  TestAllocCtx *const c = env->ctx;
+test_alloc_get_page_size(Platform *platform) {
+  TestAllocCtx *const c = platform->ctx;
   assert(c);
 
   return c->page_size;
 }
 
 __attribute__((warn_unused_result)) static Error
-test_alloc_valloc(const Env *env, usize bytes_count, u8 **res) {
-  TestAllocCtx *const c = env->ctx;
+test_alloc_valloc(Platform *platform, usize bytes_count, u8 **res) {
+  TestAllocCtx *const c = platform->ctx;
   assert(c);
 
   c->alloc_calls += 1;
@@ -528,8 +528,8 @@ test_alloc_valloc(const Env *env, usize bytes_count, u8 **res) {
 }
 
 __attribute__((warn_unused_result)) static Error
-test_alloc_vprotect_none(const Env *env, void *ptr, usize size) {
-  TestAllocCtx *const c = env->ctx;
+test_alloc_vprotect_none(Platform *platform, void *ptr, usize size) {
+  TestAllocCtx *const c = platform->ctx;
   assert(c);
 
   c->protect_calls += 1;
@@ -541,13 +541,13 @@ test_alloc_vprotect_none(const Env *env, void *ptr, usize size) {
 
 // Only the slots `arena_valloc` reaches for; the rest stay null so that a call
 // to any of them crashes rather than silently doing something real.
-__attribute__((warn_unused_result)) static Env
+__attribute__((warn_unused_result)) static Platform
 test_env_alloc_make(TestAllocCtx *ctx) {
   assert(ctx);
 
   ctx->real = env_platform_make();
 
-  return (Env){
+  return (Platform){
       .get_page_size = test_alloc_get_page_size,
       .valloc = test_alloc_valloc,
       .vprotect_none = test_alloc_vprotect_none,
@@ -564,10 +564,10 @@ static void test_arena_valloc_mocked(void) {
   // A single byte still costs a whole page, plus a whole page of guard.
   {
     TestAllocCtx ctx = {.page_size = page_size};
-    const Env env = test_env_alloc_make(&ctx);
+    Platform platform = test_env_alloc_make(&ctx);
     Arena arena = {0};
 
-    assert(ErrKindNone == arena_valloc(&env, 1, &arena).kind);
+    assert(ErrKindNone == arena_valloc(&platform, 1, &arena).kind);
 
     assert(1 == ctx.alloc_calls);
     assert(2 * page_size == ctx.alloc_bytes_count);
@@ -586,10 +586,10 @@ static void test_arena_valloc_mocked(void) {
   // One byte past a page rounds up to two, so three pages are mapped.
   {
     TestAllocCtx ctx = {.page_size = page_size};
-    const Env env = test_env_alloc_make(&ctx);
+    Platform platform = test_env_alloc_make(&ctx);
     Arena arena = {0};
 
-    assert(ErrKindNone == arena_valloc(&env, page_size + 1, &arena).kind);
+    assert(ErrKindNone == arena_valloc(&platform, page_size + 1, &arena).kind);
     assert(3 * page_size == ctx.alloc_bytes_count);
     assert((void *)arena.end == ctx.protect_ptr);
   }
@@ -597,10 +597,10 @@ static void test_arena_valloc_mocked(void) {
   // An exact multiple is not rounded up past itself.
   {
     TestAllocCtx ctx = {.page_size = page_size};
-    const Env env = test_env_alloc_make(&ctx);
+    Platform platform = test_env_alloc_make(&ctx);
     Arena arena = {0};
 
-    assert(ErrKindNone == arena_valloc(&env, 2 * page_size, &arena).kind);
+    assert(ErrKindNone == arena_valloc(&platform, 2 * page_size, &arena).kind);
     assert(3 * page_size == ctx.alloc_bytes_count);
   }
 
@@ -608,10 +608,10 @@ static void test_arena_valloc_mocked(void) {
   // untouched. Nothing is protected either: there is no mapping to protect.
   {
     TestAllocCtx ctx = {.page_size = page_size, .alloc_fails_with = ErrKindOOM};
-    const Env env = test_env_alloc_make(&ctx);
+    Platform platform = test_env_alloc_make(&ctx);
     Arena arena = {.start = (u8 *)0xAA, .end = (u8 *)0xBB};
 
-    assert(ErrKindOOM == arena_valloc(&env, 1, &arena).kind);
+    assert(ErrKindOOM == arena_valloc(&platform, 1, &arena).kind);
     assert(1 == ctx.alloc_calls);
     assert(0 == ctx.protect_calls);
     assert((u8 *)0xAA == arena.start);
@@ -624,10 +624,10 @@ static void test_arena_valloc_mocked(void) {
   {
     TestAllocCtx ctx = {.page_size = page_size,
                         .alloc_fails_with = ErrOSKindPermission};
-    const Env env = test_env_alloc_make(&ctx);
+    Platform platform = test_env_alloc_make(&ctx);
     Arena arena = {0};
 
-    assert(ErrOSKindPermission == arena_valloc(&env, 1, &arena).kind);
+    assert(ErrOSKindPermission == arena_valloc(&platform, 1, &arena).kind);
     assert(NULL == arena.start);
   }
 }
@@ -636,29 +636,29 @@ static void test_arena_valloc_mocked(void) {
 // a test, more so at a thousand connections, so it is swallowed for the
 // duration.
 //
-// The real platform, never the `io` the test itself is driving: the tests that
-// want quiet are exactly the ones running against a mock, and redirecting this
-// process's output is the harness's own business either way.
+// The real platform, never the `platform` the test itself is driving: the tests
+// that want quiet are exactly the ones running against a mock, and redirecting
+// this process's output is the harness's own business either way.
 __attribute__((warn_unused_result)) static i32 test_stdout_silence(void) {
-  const Env *const env = env_platform_make();
+  Platform *const platform = env_platform_make();
 
   i32 saved = -1;
-  assert(ErrKindNone == env->stdout_silence(env, &saved).kind);
+  assert(ErrKindNone == platform->stdout_silence(platform, &saved).kind);
 
   return saved;
 }
 
 static void test_stdout_restore(i32 saved) {
-  const Env *const env = env_platform_make();
+  Platform *const platform = env_platform_make();
 
-  assert(ErrKindNone == env->stdout_restore(env, saved).kind);
+  assert(ErrKindNone == platform->stdout_restore(platform, saved).kind);
 }
 
-// ---------- The fake `IO` ----------
+// ---------- The fake `Platform`, the slots that wait ----------
 //
-// A scripted `IO`, shared by every test that drives one. It keeps the same
-// discipline as the real implementation -- an operation is submitted, and its
-// callback runs from inside `run_for_ns` -- because what is under test is a
+// A scripted `Platform`, shared by every test that drives one. It keeps the
+// same discipline as the real implementation -- an operation is submitted, and
+// its callback runs from inside `run_for_ns` -- because what is under test is a
 // chain of callbacks, and a fake that answered on the spot would exercise none
 // of the chaining and would recurse as deep as the chain is long.
 //
@@ -666,33 +666,33 @@ static void test_stdout_restore(i32 saved) {
 // submitted operations to kqueue and gets them back, this holds them in an
 // array of its own.
 
-typedef struct TestIo TestIo;
+typedef struct TestPlatform TestPlatform;
 
 // How a script answers one operation.
 typedef enum {
   // `*dst_err` and `*dst_res` are the answer, and the callback runs with them.
-  TestIoPerformDone,
+  TestPlatformPerformDone,
   // The operation is never answered, the way a peer that has gone quiet never
   // answers: the completion is dropped and its callback never runs. The only
   // way for a test to hold a connection open, which is what filling the peer
   // pool needs.
-  TestIoPerformParked,
-} TestIoPerformResult;
+  TestPlatformPerformParked,
+} TestPlatformPerformResult;
 
-typedef TestIoPerformResult (*TestIoPerform)(TestIo *test_io,
-                                             IoCompletion *completion, i32 fd,
-                                             Error *dst_err, usize *dst_res);
+typedef TestPlatformPerformResult (*TestPlatformPerform)(
+    TestPlatform *test_platform, PlatformCompletion *completion, i32 fd,
+    Error *dst_err, usize *dst_res);
 
 // Enough for every slot of the peer pool to have an operation in flight, plus
 // the listener's own.
 #define TEST_IO_IN_FLIGHT_MAX (TORRENT_PEERS_MAX + 16)
 
-struct TestIo {
-  // Must be first: a `TestIo *` is an `IO *`, the same arrangement the real
-  // implementation uses to find itself from a slot.
-  IO io;
+struct TestPlatform {
+  // Must be first: a `TestPlatform *` is a `Platform *`, the same arrangement
+  // the real implementation uses to find itself from a slot.
+  Platform platform;
 
-  TestIoPerform perform;
+  TestPlatformPerform perform;
   // The script's own state, whatever it is.
   void *script;
 
@@ -706,34 +706,35 @@ struct TestIo {
   // taken. Every caller of a slot has a branch for that -- the callback will
   // never run, so whatever it would have cleaned up has to be cleaned up on the
   // spot -- and this is the only way to reach it.
-  IoActionKind submit_fails_for;
+  PlatformActionKind submit_fails_for;
   ErrorKind submit_fails_with;
 
   // Submitted, not yet answered, each with the descriptor it was submitted
   // against: a completion does not carry one, so whoever is holding the
   // operation has to, and here that is this.
-  IoCompletion *submitted[TEST_IO_IN_FLIGHT_MAX];
+  PlatformCompletion *submitted[TEST_IO_IN_FLIGHT_MAX];
   i32 submitted_fd[TEST_IO_IN_FLIGHT_MAX];
   usize submitted_len;
   // What the turn in progress is working through. A second pair of arrays and
   // not an index into the first, because a callback may submit while it runs
   // and that has to go somewhere that is not being iterated.
-  IoCompletion *running[TEST_IO_IN_FLIGHT_MAX];
+  PlatformCompletion *running[TEST_IO_IN_FLIGHT_MAX];
   i32 running_fd[TEST_IO_IN_FLIGHT_MAX];
 };
 
 __attribute__((warn_unused_result)) static Error
-test_io_submit(IO *io, IoCompletion *completion, i32 fd, IoCallback cb) {
-  assert(io);
+test_platform_submit(Platform *platform, PlatformCompletion *completion, i32 fd,
+                     PlatformCallback cb) {
+  assert(platform);
   assert(completion);
   assert(cb);
 
-  TestIo *const test_io = (TestIo *)io;
-  assert(test_io->perform);
+  TestPlatform *const test_platform = (TestPlatform *)platform;
+  assert(test_platform->perform);
 
-  if (IoActionKindNone != test_io->submit_fails_for &&
-      completion->action.kind == test_io->submit_fails_for) {
-    return (Error){.kind = test_io->submit_fails_with};
+  if (PlatformActionKindNone != test_platform->submit_fails_for &&
+      completion->action.kind == test_platform->submit_fails_for) {
+    return (Error){.kind = test_platform->submit_fails_with};
   }
 
   // One operation per completion, which every backend relies on: the Darwin one
@@ -742,53 +743,53 @@ test_io_submit(IO *io, IoCompletion *completion, i32 fd, IoCallback cb) {
   // down. A close landing on a completion that still holds a read is worse
   // again: the slot goes back to the pool with a registration still pointing
   // into it.
-  for (usize i = 0; i < test_io->submitted_len; i++) {
-    assert(test_io->submitted[i] != completion &&
+  for (usize i = 0; i < test_platform->submitted_len; i++) {
+    assert(test_platform->submitted[i] != completion &&
            "one operation per completion");
   }
 
-  if (test_io->submitted_len >= TEST_IO_IN_FLIGHT_MAX) {
+  if (test_platform->submitted_len >= TEST_IO_IN_FLIGHT_MAX) {
     // The same backpressure the real implementation reports when it has no
     // room left to take an operation.
     return (Error){.kind = ErrKindAgain};
   }
 
   completion->cb = cb;
-  test_io->submitted[test_io->submitted_len] = completion;
-  test_io->submitted_fd[test_io->submitted_len] = fd;
-  test_io->submitted_len += 1;
+  test_platform->submitted[test_platform->submitted_len] = completion;
+  test_platform->submitted_fd[test_platform->submitted_len] = fd;
+  test_platform->submitted_len += 1;
 
   return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static Error test_io_run_for_ns(IO *io,
-                                                                    usize ns) {
-  assert(io);
+__attribute__((warn_unused_result)) static Error
+test_platform_run_for_ns(Platform *platform, usize ns) {
+  assert(platform);
   (void)ns;
 
-  TestIo *const test_io = (TestIo *)io;
-  assert(test_io->perform);
+  TestPlatform *const test_platform = (TestPlatform *)platform;
+  assert(test_platform->perform);
 
   // What was submitted before this turn began, for the same reason the real
   // implementation works off what the kernel had already taken: a callback may
   // submit more, and that waits for the next turn.
-  const usize running_len = test_io->submitted_len;
-  memcpy(test_io->running, test_io->submitted,
-         running_len * sizeof(test_io->running[0]));
-  memcpy(test_io->running_fd, test_io->submitted_fd,
-         running_len * sizeof(test_io->running_fd[0]));
-  test_io->submitted_len = 0;
+  const usize running_len = test_platform->submitted_len;
+  memcpy(test_platform->running, test_platform->submitted,
+         running_len * sizeof(test_platform->running[0]));
+  memcpy(test_platform->running_fd, test_platform->submitted_fd,
+         running_len * sizeof(test_platform->running_fd[0]));
+  test_platform->submitted_len = 0;
 
   for (usize i = 0; i < running_len; i++) {
-    IoCompletion *const completion = test_io->running[i];
+    PlatformCompletion *const completion = test_platform->running[i];
     assert(completion);
     assert(completion->cb);
 
     Error err = {.kind = ErrKindNone};
     usize res = 0;
-    if (TestIoPerformParked == test_io->perform(test_io, completion,
-                                                test_io->running_fd[i], &err,
-                                                &res)) {
+    if (TestPlatformPerformParked ==
+        test_platform->perform(test_platform, completion,
+                               test_platform->running_fd[i], &err, &res)) {
       continue;
     }
 
@@ -798,107 +799,113 @@ __attribute__((warn_unused_result)) static Error test_io_run_for_ns(IO *io,
   return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static u64 test_io_monotonic_ns(IO *io) {
-  assert(io);
+__attribute__((warn_unused_result)) static u64
+test_platform_monotonic_ns(Platform *platform) {
+  assert(platform);
 
-  const TestIo *const test_io = (const TestIo *)io;
-  return test_io->now_ns;
+  const TestPlatform *const test_platform = (const TestPlatform *)platform;
+  return test_platform->now_ns;
 }
 
 // The slots, which do between them exactly what the real ones do: record what
 // was asked for, and ask for a turn of the loop.
 
 __attribute__((warn_unused_result)) static Error
-test_io_open(IO *io, IoCompletion *completion, Bytes path,
-             FileOpenOptions options, IoCallback cb) {
+test_platform_open(Platform *platform, PlatformCompletion *completion,
+                   Bytes path, FileOpenOptions options, PlatformCallback cb) {
   assert(completion);
 
-  completion->action = (IoAction){.kind = IoActionKindOpen,
-                                  .v.open = {.path = path, .options = options}};
+  completion->action =
+      (PlatformAction){.kind = PlatformActionKindOpen,
+                       .v.open = {.path = path, .options = options}};
 
-  return test_io_submit(io, completion, -1, cb);
+  return test_platform_submit(platform, completion, -1, cb);
 }
 
 __attribute__((warn_unused_result)) static Error
-test_io_close(IO *io, IoCompletion *completion, i32 fd, IoCallback cb) {
+test_platform_close(Platform *platform, PlatformCompletion *completion, i32 fd,
+                    PlatformCallback cb) {
   assert(completion);
 
-  completion->action = (IoAction){.kind = IoActionKindClose};
+  completion->action = (PlatformAction){.kind = PlatformActionKindClose};
 
-  return test_io_submit(io, completion, fd, cb);
+  return test_platform_submit(platform, completion, fd, cb);
 }
 
 __attribute__((warn_unused_result)) static Error
-test_io_read(IO *io, IoCompletion *completion, i32 fd, Bytes data,
-             IoCallback cb) {
+test_platform_read(Platform *platform, PlatformCompletion *completion, i32 fd,
+                   Bytes data, PlatformCallback cb) {
   assert(completion);
   assert(data.data);
   assert(data.len > 0);
 
   completion->action =
-      (IoAction){.kind = IoActionKindRead, .v.read.data = data};
+      (PlatformAction){.kind = PlatformActionKindRead, .v.read.data = data};
 
-  return test_io_submit(io, completion, fd, cb);
+  return test_platform_submit(platform, completion, fd, cb);
 }
 
 __attribute__((warn_unused_result)) static Error
-test_io_write(IO *io, IoCompletion *completion, i32 fd, Bytes data,
-              IoCallback cb) {
+test_platform_write(Platform *platform, PlatformCompletion *completion, i32 fd,
+                    Bytes data, PlatformCallback cb) {
   assert(completion);
   assert(data.data);
   assert(data.len > 0);
 
   completion->action =
-      (IoAction){.kind = IoActionKindWrite, .v.write.data = data};
+      (PlatformAction){.kind = PlatformActionKindWrite, .v.write.data = data};
 
-  return test_io_submit(io, completion, fd, cb);
+  return test_platform_submit(platform, completion, fd, cb);
 }
 
 __attribute__((warn_unused_result)) static Error
-test_io_accept(IO *io, IoCompletion *completion, i32 listen_socket,
-               IoCallback cb) {
+test_platform_accept(Platform *platform, PlatformCompletion *completion,
+                     i32 listen_socket, PlatformCallback cb) {
   assert(completion);
 
-  completion->action = (IoAction){.kind = IoActionKindAccept};
+  completion->action = (PlatformAction){.kind = PlatformActionKindAccept};
 
-  return test_io_submit(io, completion, listen_socket, cb);
+  return test_platform_submit(platform, completion, listen_socket, cb);
 }
 
 __attribute__((warn_unused_result)) static Error
-test_io_file_size(IO *io, IoCompletion *completion, i32 fd, IoCallback cb) {
+test_platform_file_size(Platform *platform, PlatformCompletion *completion,
+                        i32 fd, PlatformCallback cb) {
   assert(completion);
 
-  completion->action = (IoAction){.kind = IoActionKindFileSize};
+  completion->action = (PlatformAction){.kind = PlatformActionKindFileSize};
 
-  return test_io_submit(io, completion, fd, cb);
+  return test_platform_submit(platform, completion, fd, cb);
 }
 
-// `*test_io` has to outlive every operation submitted to it, and `env` has to
-// outlive `*test_io`: a composite reaches the platform's `mmap` through
-// `io->env`, and the fakes reach the real syscalls the same way the real
-// implementation does.
-static void test_io_make(TestIo *test_io, const Env *env, TestIoPerform perform,
-                         void *script) {
-  assert(test_io);
-  assert(env);
+// `*test_platform` has to outlive every operation submitted to it. The slots
+// that never wait and `ctx` are kept from `test_platform->platform`, which the
+// caller sets first: a composite reaches the platform's `mmap` through them,
+// and the fakes reach the real syscalls the same way the real implementation
+// does.
+static void test_platform_make(TestPlatform *test_platform,
+                               TestPlatformPerform perform, void *script) {
+  assert(test_platform);
   assert(perform);
 
-  memset(test_io, 0, sizeof(*test_io));
-  test_io->perform = perform;
-  test_io->script = script;
-  test_io->io = (IO){
-      .env = env,
-      .run_for_ns = test_io_run_for_ns,
-      .monotonic_ns = test_io_monotonic_ns,
-      .open = test_io_open,
-      .close = test_io_close,
-      .read = test_io_read,
-      .write = test_io_write,
-      .accept = test_io_accept,
-      .file_size = test_io_file_size,
-      // `connect`, `send_to` and `remove_file` stay null: no test drives one,
-      // and a null slot crashes rather than quietly doing something real.
-  };
+  const Platform platform = test_platform->platform;
+  memset(test_platform, 0, sizeof(*test_platform));
+  test_platform->perform = perform;
+  test_platform->script = script;
+  test_platform->platform = platform;
+  test_platform->platform.run_for_ns = test_platform_run_for_ns;
+  test_platform->platform.monotonic_ns = test_platform_monotonic_ns;
+  test_platform->platform.open = test_platform_open;
+  test_platform->platform.close = test_platform_close;
+  test_platform->platform.read = test_platform_read;
+  test_platform->platform.write = test_platform_write;
+  test_platform->platform.accept = test_platform_accept;
+  test_platform->platform.file_size = test_platform_file_size;
+  // `connect`, `send_to` and `remove_file` stay null: no test drives one,
+  // and a null slot crashes rather than quietly doing something real.
+  test_platform->platform.connect = NULL;
+  test_platform->platform.send_to = NULL;
+  test_platform->platform.remove_file = NULL;
 }
 
 // More turns than draining anything here can need. A turn answers every
@@ -909,17 +916,18 @@ static void test_io_make(TestIo *test_io, const Env *env, TestIoPerform perform,
 
 // Turn the loop until nothing is outstanding. A parked operation is dropped
 // rather than answered, so a script that parks reaches this too.
-static void test_io_drain(TestIo *test_io) {
-  assert(test_io);
+static void test_platform_drain(TestPlatform *test_platform) {
+  assert(test_platform);
 
   bool drained = false;
   for (usize i = 0; i < TEST_IO_DRAIN_TURNS_MAX; i++) {
-    if (0 == test_io->submitted_len) {
+    if (0 == test_platform->submitted_len) {
       drained = true;
       break;
     }
 
-    const Error err = test_io->io.run_for_ns(&test_io->io, 1);
+    const Error err =
+        test_platform->platform.run_for_ns(&test_platform->platform, 1);
     assert(ErrKindNone == err.kind);
   }
 
@@ -971,9 +979,9 @@ static void test_handshake_fill(u8 dst[TEST_HANDSHAKE_LEN], Bytes info_hash,
 // ---------- The TCP server ----------
 
 // The script behind the listener tests. It is split the way the code under test
-// is: setting a listener up is `Env` -- a socket, a socket option, a bind, a
-// listen, none of which waits for anything -- and everything from the first
-// accept on is `IO`.
+// is: setting a listener up is the slots that never wait -- a socket, a socket
+// option, a bind, a listen -- and everything from the first accept on is the
+// loop.
 //
 // `accept` is told in advance how many connections to hand over before it
 // stops: the listener goes back for another one for as long as it is answered,
@@ -1006,10 +1014,10 @@ typedef struct {
   usize accept_calls;
   usize read_calls;
   usize write_calls;
-  // `IO`'s close, which is a step in a chain: the listener's own, and each
+  // `close`, which is a step in a chain: the listener's own, and each
   // connection's.
   usize close_calls;
-  // `Env`'s, which is the hang-up on a connection that was refused.
+  // `close_socket`, which is the hang-up on a connection that was refused.
   usize close_socket_calls;
 
   Ipv4Addr bound_addr;
@@ -1022,9 +1030,9 @@ typedef struct {
 #define TEST_SERVER_ASSIGNED_PORT 54321
 
 __attribute__((warn_unused_result)) static Error
-test_server_socket(const Env *env, SocketDomain domain, SocketType type,
+test_server_socket(Platform *platform, SocketDomain domain, SocketType type,
                    i32 *fd) {
-  TestServerCtx *const c = env->ctx;
+  TestServerCtx *const c = platform->ctx;
   assert(c);
   assert(fd);
   assert(SocketDomainIpv4 == domain);
@@ -1040,8 +1048,8 @@ test_server_socket(const Env *env, SocketDomain domain, SocketType type,
 }
 
 __attribute__((warn_unused_result)) static Error
-test_server_enable_socket_reuse(const Env *env, i32 fd) {
-  TestServerCtx *const c = env->ctx;
+test_server_enable_socket_reuse(Platform *platform, i32 fd) {
+  TestServerCtx *const c = platform->ctx;
   assert(c);
   assert(TEST_SERVER_LISTEN_FD == fd);
 
@@ -1050,8 +1058,8 @@ test_server_enable_socket_reuse(const Env *env, i32 fd) {
 }
 
 __attribute__((warn_unused_result)) static Error
-test_server_tcp_bind_ipv4(const Env *env, i32 fd, Ipv4Addr *addr) {
-  TestServerCtx *const c = env->ctx;
+test_server_tcp_bind_ipv4(Platform *platform, i32 fd, Ipv4Addr *addr) {
+  TestServerCtx *const c = platform->ctx;
   assert(c);
   assert(addr);
   assert(TEST_SERVER_LISTEN_FD == fd);
@@ -1069,8 +1077,8 @@ test_server_tcp_bind_ipv4(const Env *env, i32 fd, Ipv4Addr *addr) {
 }
 
 __attribute__((warn_unused_result)) static Error
-test_server_listen(const Env *env, i32 fd, i32 backlog) {
-  TestServerCtx *const c = env->ctx;
+test_server_listen(Platform *platform, i32 fd, i32 backlog) {
+  TestServerCtx *const c = platform->ctx;
   assert(c);
   assert(TEST_SERVER_LISTEN_FD == fd);
 
@@ -1080,8 +1088,8 @@ test_server_listen(const Env *env, i32 fd, i32 backlog) {
 }
 
 __attribute__((warn_unused_result)) static Error
-test_server_close_socket(const Env *env, i32 fd) {
-  TestServerCtx *const c = env->ctx;
+test_server_close_socket(Platform *platform, i32 fd) {
+  TestServerCtx *const c = platform->ctx;
   assert(c);
   assert(fd > 0);
 
@@ -1089,11 +1097,11 @@ test_server_close_socket(const Env *env, i32 fd) {
   return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static Env
+__attribute__((warn_unused_result)) static Platform
 test_env_server_make(TestServerCtx *ctx) {
   assert(ctx);
 
-  return (Env){
+  return (Platform){
       .socket = test_server_socket,
       .enable_socket_reuse = test_server_enable_socket_reuse,
       .tcp_bind_ipv4 = test_server_tcp_bind_ipv4,
@@ -1103,46 +1111,46 @@ test_env_server_make(TestServerCtx *ctx) {
   };
 }
 
-static TestIoPerformResult test_server_perform(TestIo *test_io,
-                                               IoCompletion *completion, i32 fd,
-                                               Error *dst_err, usize *dst_res) {
-  TestServerCtx *const c = test_io->script;
+static TestPlatformPerformResult
+test_server_perform(TestPlatform *test_platform, PlatformCompletion *completion,
+                    i32 fd, Error *dst_err, usize *dst_res) {
+  TestServerCtx *const c = test_platform->script;
   assert(c);
   assert(completion);
 
   switch (completion->action.kind) {
-  case IoActionKindAccept: {
+  case PlatformActionKindAccept: {
     assert(TEST_SERVER_LISTEN_FD == fd);
     c->accept_calls += 1;
 
     if (c->accept_calls == c->conn_reset_at) {
       *dst_err = (Error){.kind = ErrKindConnReset};
-      return TestIoPerformDone;
+      return TestPlatformPerformDone;
     }
 
     // A reset hands over nothing, so it does not count against the budget.
     if (c->accept_handed_over >= c->accept_success_max) {
       *dst_err = (Error){.kind = c->accept_ends_with};
-      return TestIoPerformDone;
+      return TestPlatformPerformDone;
     }
     c->accept_handed_over += 1;
 
     completion->action.v.accept.addr =
         (Ipv4Addr){.ip = 0x7f000001, .port = 4000};
     *dst_res = 5000 + c->accept_calls;
-    return TestIoPerformDone;
+    return TestPlatformPerformDone;
   }
 
-  case IoActionKindRead: {
+  case PlatformActionKindRead: {
     assert(fd > 0);
     c->read_calls += 1;
 
     if (c->read_parks) {
-      return TestIoPerformParked;
+      return TestPlatformPerformParked;
     }
     if (ErrKindNone != c->read_fails_with) {
       *dst_err = (Error){.kind = c->read_fails_with};
-      return TestIoPerformDone;
+      return TestPlatformPerformDone;
     }
 
     // A whole handshake's worth of bytes, and a wrong handshake: a connection
@@ -1156,33 +1164,33 @@ static TestIoPerformResult test_server_perform(TestIo *test_io,
     assert(data.len >= sizeof(msg));
     memcpy(data.data, msg, sizeof(msg));
     *dst_res = sizeof(msg);
-    return TestIoPerformDone;
+    return TestPlatformPerformDone;
   }
 
   // Our own handshake on its way out. It all goes in one go, which is what a
   // socket with room in its send buffer does.
-  case IoActionKindWrite:
+  case PlatformActionKindWrite:
     assert(fd > 0);
     c->write_calls += 1;
     *dst_res = completion->action.v.write.data.len;
-    return TestIoPerformDone;
+    return TestPlatformPerformDone;
 
-  case IoActionKindClose:
+  case PlatformActionKindClose:
     assert(fd > 0);
     c->close_calls += 1;
-    return TestIoPerformDone;
+    return TestPlatformPerformDone;
 
-  case IoActionKindNone:
-  case IoActionKindOpen:
-  case IoActionKindConnect:
-  case IoActionKindSendTo:
-  case IoActionKindFileSize:
-  case IoActionKindRemoveFile:
+  case PlatformActionKindNone:
+  case PlatformActionKindOpen:
+  case PlatformActionKindConnect:
+  case PlatformActionKindSendTo:
+  case PlatformActionKindFileSize:
+  case PlatformActionKindRemoveFile:
     break;
   }
 
   assert(0 && "the server drives none of these");
-  return TestIoPerformDone;
+  return TestPlatformPerformDone;
 }
 
 // The same info hash as `TEST_LSD_INFOHASH`, in the other representation: the
@@ -1207,26 +1215,28 @@ static void test_network_ctx_init(TorrentNetworkCtx *network_ctx) {
 // these tests is the same shape: set the listener up, turn the loop until there
 // is nothing left in flight, and look at what was recorded.
 __attribute__((warn_unused_result)) static Error
-test_server_run(TestIo *test_io, TestServerCtx *ctx, const Env *env,
-                IoServer *server, TorrentNetworkCtx *network_ctx,
+test_server_run(TestPlatform *test_platform, TestServerCtx *ctx,
+                PlatformServer *server, TorrentNetworkCtx *network_ctx,
                 Ipv4Addr addr) {
-  assert(test_io);
+  assert(test_platform);
   assert(ctx);
   assert(server);
   assert(network_ctx);
 
-  test_io_make(test_io, env, test_server_perform, ctx);
+  test_platform_make(test_platform, test_server_perform, ctx);
 
   const i32 saved = test_stdout_silence();
 
   const Logger logger = logger_make(LogLevelAll, bytes_from_cstr("[test]"));
-  const Error err_listen = io_listen_and_serve_tcp_ipv4(
-      &test_io->io, server, network_ctx, addr, &logger, torrent_peer_on_accept);
+  const Error err_listen = platform_listen_and_serve_tcp_ipv4(
+      &test_platform->platform, server, network_ctx, addr, &logger,
+      torrent_peer_on_accept);
 
   // Whether the setup failed or the listener ran and stopped, the loop is
   // turned until nothing is outstanding: a listener that came down still has a
   // hang-up of its own to finish.
-  const Error err_run = io_run_until(&test_io->io, &server->done, 1);
+  const Error err_run =
+      platform_run_until(&test_platform->platform, &server->done, 1);
   assert(ErrKindNone == err_run.kind);
 
   // The listener stopping says nothing about the connections it handed over:
@@ -1234,7 +1244,7 @@ test_server_run(TestIo *test_io, TestServerCtx *ctx, const Env *env,
   // go of its slot in the last of them. Keep turning until the fake has nothing
   // in flight at all, which is also what makes the slot counts below mean
   // anything.
-  test_io_drain(test_io);
+  test_platform_drain(test_platform);
 
   test_stdout_restore(saved);
 
@@ -1250,7 +1260,7 @@ test_server_run(TestIo *test_io, TestServerCtx *ctx, const Env *env,
 // Setting the listener up: each step's failure stops the sequence and travels
 // back verbatim, and every failure after the socket exists hands the descriptor
 // back.
-static void test_io_listen_and_serve_setup_failures(void) {
+static void test_platform_listen_and_serve_setup_failures(void) {
   const Ipv4Addr addr = {.ip = 0x7f000001, .port = 12345};
 
   const struct {
@@ -1282,16 +1292,15 @@ static void test_io_listen_and_serve_setup_failures(void) {
         .listen_fails_with = cases[i].listen,
         .accept_ends_with = ErrKindInvalidData,
     };
-    const Env env = test_env_server_make(&ctx);
-    TestIo test_io = {0};
-    IoServer server = {0};
+    TestPlatform test_platform = {.platform = test_env_server_make(&ctx)};
+    PlatformServer server = {0};
     // `static`: the pool is a couple of megabytes of slots, which is more than
     // a stack frame should hold, and a send buffer per slot doubled it.
     static TorrentNetworkCtx network_ctx;
     test_network_ctx_init(&network_ctx);
 
     const Error err =
-        test_server_run(&test_io, &ctx, &env, &server, &network_ctx, addr);
+        test_server_run(&test_platform, &ctx, &server, &network_ctx, addr);
 
     assert(cases[i].expected == err.kind);
     assert(cases[i].expected_closes == ctx.close_calls);
@@ -1302,16 +1311,15 @@ static void test_io_listen_and_serve_setup_failures(void) {
   // The listener is bound to what it was asked for, with a backlog.
   {
     TestServerCtx ctx = {.accept_ends_with = ErrKindInvalidData};
-    const Env env = test_env_server_make(&ctx);
-    TestIo test_io = {0};
-    IoServer server = {0};
+    TestPlatform test_platform = {.platform = test_env_server_make(&ctx)};
+    PlatformServer server = {0};
     // `static`: the pool is a couple of megabytes of slots, which is more than
     // a stack frame should hold, and a send buffer per slot doubled it.
     static TorrentNetworkCtx network_ctx;
     test_network_ctx_init(&network_ctx);
 
     assert(ErrKindInvalidData ==
-           test_server_run(&test_io, &ctx, &env, &server, &network_ctx, addr)
+           test_server_run(&test_platform, &ctx, &server, &network_ctx, addr)
                .kind);
 
     assert(addr.ip == ctx.bound_addr.ip);
@@ -1326,14 +1334,13 @@ static void test_io_listen_and_serve_setup_failures(void) {
   // Port 0: the port the OS picked is the one the server reports.
   {
     TestServerCtx ctx = {.accept_ends_with = ErrKindInvalidData};
-    const Env env = test_env_server_make(&ctx);
-    TestIo test_io = {0};
-    IoServer server = {0};
+    TestPlatform test_platform = {.platform = test_env_server_make(&ctx)};
+    PlatformServer server = {0};
     static TorrentNetworkCtx network_ctx;
     test_network_ctx_init(&network_ctx);
 
     const Ipv4Addr any_port = {.ip = addr.ip, .port = 0};
-    assert(ErrKindInvalidData == test_server_run(&test_io, &ctx, &env, &server,
+    assert(ErrKindInvalidData == test_server_run(&test_platform, &ctx, &server,
                                                  &network_ctx, any_port)
                                      .kind);
 
@@ -1344,7 +1351,7 @@ static void test_io_listen_and_serve_setup_failures(void) {
 }
 
 // The accept loop and the chain of callbacks behind it.
-static void test_io_listen_and_serve_accept(void) {
+static void test_platform_listen_and_serve_accept(void) {
   const Ipv4Addr addr = {.ip = 0x7f000001, .port = 12345};
 
   // A peer that vanishes between the handshake and the `accept` is one dead
@@ -1354,16 +1361,15 @@ static void test_io_listen_and_serve_accept(void) {
     TestServerCtx ctx = {.accept_success_max = 2,
                          .conn_reset_at = 1,
                          .accept_ends_with = ErrKindInvalidData};
-    const Env env = test_env_server_make(&ctx);
-    TestIo test_io = {0};
-    IoServer server = {0};
+    TestPlatform test_platform = {.platform = test_env_server_make(&ctx)};
+    PlatformServer server = {0};
     // `static`: the pool is a couple of megabytes of slots, which is more than
     // a stack frame should hold, and a send buffer per slot doubled it.
     static TorrentNetworkCtx network_ctx;
     test_network_ctx_init(&network_ctx);
 
     assert(ErrKindInvalidData ==
-           test_server_run(&test_io, &ctx, &env, &server, &network_ctx, addr)
+           test_server_run(&test_platform, &ctx, &server, &network_ctx, addr)
                .kind);
 
     // The reset was shrugged off, so both connections still arrived and both
@@ -1385,26 +1391,26 @@ static void test_io_listen_and_serve_accept(void) {
   {
     TestServerCtx ctx = {.accept_success_max = 3,
                          .accept_ends_with = ErrKindInvalidData};
-    const Env env = test_env_server_make(&ctx);
-    TestIo test_io = {0};
-    IoServer server = {0};
+    TestPlatform test_platform = {.platform = test_env_server_make(&ctx)};
+    PlatformServer server = {0};
     // `static`: the pool is a couple of megabytes of slots, which is more than
     // a stack frame should hold, and a send buffer per slot doubled it.
     static TorrentNetworkCtx network_ctx;
     test_network_ctx_init(&network_ctx);
 
-    test_io_make(&test_io, &env, test_server_perform, &ctx);
-    test_io.submit_fails_for = IoActionKindRead;
-    test_io.submit_fails_with = ErrKindOOM;
+    test_platform_make(&test_platform, test_server_perform, &ctx);
+    test_platform.submit_fails_for = PlatformActionKindRead;
+    test_platform.submit_fails_with = ErrKindOOM;
 
     const i32 saved = test_stdout_silence();
     const Logger logger = logger_make(LogLevelAll, bytes_from_cstr("[test]"));
-    const Error err_listen =
-        io_listen_and_serve_tcp_ipv4(&test_io.io, &server, &network_ctx, addr,
-                                     &logger, torrent_peer_on_accept);
+    const Error err_listen = platform_listen_and_serve_tcp_ipv4(
+        &test_platform.platform, &server, &network_ctx, addr, &logger,
+        torrent_peer_on_accept);
     assert(ErrKindNone == err_listen.kind);
-    assert(ErrKindNone == io_run_until(&test_io.io, &server.done, 1).kind);
-    test_io_drain(&test_io);
+    assert(ErrKindNone ==
+           platform_run_until(&test_platform.platform, &server.done, 1).kind);
+    test_platform_drain(&test_platform);
     test_stdout_restore(saved);
 
     assert(ErrKindInvalidData == server.err.kind);
@@ -1425,16 +1431,15 @@ static void test_io_listen_and_serve_accept(void) {
   {
     TestServerCtx ctx = {.accept_success_max = 1,
                          .accept_ends_with = ErrKindInvalidData};
-    const Env env = test_env_server_make(&ctx);
-    TestIo test_io = {0};
-    IoServer server = {0};
+    TestPlatform test_platform = {.platform = test_env_server_make(&ctx)};
+    PlatformServer server = {0};
     // `static`: the pool is a couple of megabytes of slots, which is more than
     // a stack frame should hold, and a send buffer per slot doubled it.
     static TorrentNetworkCtx network_ctx;
     test_network_ctx_init(&network_ctx);
 
     assert(ErrKindInvalidData ==
-           test_server_run(&test_io, &ctx, &env, &server, &network_ctx, addr)
+           test_server_run(&test_platform, &ctx, &server, &network_ctx, addr)
                .kind);
 
     assert(1 == ctx.read_calls);
@@ -1449,16 +1454,15 @@ static void test_io_listen_and_serve_accept(void) {
     TestServerCtx ctx = {.accept_success_max = 1,
                          .read_fails_with = ErrKindConnReset,
                          .accept_ends_with = ErrKindInvalidData};
-    const Env env = test_env_server_make(&ctx);
-    TestIo test_io = {0};
-    IoServer server = {0};
+    TestPlatform test_platform = {.platform = test_env_server_make(&ctx)};
+    PlatformServer server = {0};
     // `static`: the pool is a couple of megabytes of slots, which is more than
     // a stack frame should hold, and a send buffer per slot doubled it.
     static TorrentNetworkCtx network_ctx;
     test_network_ctx_init(&network_ctx);
 
     assert(ErrKindInvalidData ==
-           test_server_run(&test_io, &ctx, &env, &server, &network_ctx, addr)
+           test_server_run(&test_platform, &ctx, &server, &network_ctx, addr)
                .kind);
 
     assert(1 == ctx.read_calls);
@@ -1475,21 +1479,21 @@ static void test_io_listen_and_serve_accept(void) {
 static void test_torrent_peer_pool_exhaustion(void) {
   const Ipv4Addr addr = {.ip = 0x7f000001, .port = 12345};
 
-  // The pool is a megabyte or so of slots, and the fake `IO` has room for an
-  // operation per slot: too much for the stack, either of them.
+  // The pool is a megabyte or so of slots, and the fake `Platform` has room for
+  // an operation per slot: too much for the stack, either of them.
   static TorrentNetworkCtx network_ctx;
-  static TestIo test_io;
+  static TestPlatform test_platform;
   test_network_ctx_init(&network_ctx);
 
   TestServerCtx ctx = {.accept_success_max = TORRENT_PEERS_MAX + 1,
                        .read_parks = true,
                        .accept_ends_with = ErrKindInvalidData};
-  const Env env = test_env_server_make(&ctx);
-  IoServer server = {0};
+  test_platform.platform = test_env_server_make(&ctx);
+  PlatformServer server = {0};
 
   assert(
       ErrKindInvalidData ==
-      test_server_run(&test_io, &ctx, &env, &server, &network_ctx, addr).kind);
+      test_server_run(&test_platform, &ctx, &server, &network_ctx, addr).kind);
 
   // Nothing ever finishes, so the pool fills and the last connection is
   // refused rather than overrunning the slots.
@@ -1505,8 +1509,9 @@ static void test_torrent_peer_pool_exhaustion(void) {
     assert(~(PoolSlotGroup)0 == network_ctx.pool.occupied[i]);
   }
 
-  // The refused connection was hung up on through `Env`, there being no slot
-  // to keep a completion in; the listener went through `IO` as always.
+  // The refused connection was hung up on through `close_socket`, there being
+  // no slot to keep a completion in; the listener went through `close` as
+  // always.
   assert(1 == ctx.close_socket_calls);
   assert(1 == ctx.close_calls);
 }
@@ -1943,15 +1948,16 @@ typedef struct {
   usize written_len;
   ErrorKind write_fails_with;
 
-  // `IO`'s close, the hang-up with a callback behind it.
+  // `close`, the hang-up with a callback behind it.
   usize close_calls;
-  // `Env`'s, the hang-up taken when the close could not even be submitted.
+  // `close_socket`, the hang-up taken when the close could not even be
+  // submitted.
   usize close_socket_calls;
 } TestPeerCtx;
 
 __attribute__((warn_unused_result)) static Error
-test_peer_close_socket(const Env *env, i32 fd) {
-  TestPeerCtx *const c = env->ctx;
+test_peer_close_socket(Platform *platform, i32 fd) {
+  TestPeerCtx *const c = platform->ctx;
   assert(c);
   assert(TEST_PEER_FD == fd);
 
@@ -1959,26 +1965,26 @@ test_peer_close_socket(const Env *env, i32 fd) {
   return (Error){.kind = ErrKindNone};
 }
 
-__attribute__((warn_unused_result)) static Env
+__attribute__((warn_unused_result)) static Platform
 test_env_peer_make(TestPeerCtx *ctx) {
   assert(ctx);
 
-  // A peer reaches `Env` for one thing only, the hang-up it falls back on;
-  // every other slot stays null, so reaching for one crashes rather than
-  // quietly doing something real.
-  return (Env){.close_socket = test_peer_close_socket, .ctx = ctx};
+  // A peer reaches the slots that never wait for one thing only, the hang-up it
+  // falls back on; every other slot stays null, so reaching for one crashes
+  // rather than quietly doing something real.
+  return (Platform){.close_socket = test_peer_close_socket, .ctx = ctx};
 }
 
-static TestIoPerformResult test_peer_perform(TestIo *test_io,
-                                             IoCompletion *completion, i32 fd,
-                                             Error *dst_err, usize *dst_res) {
-  TestPeerCtx *const c = test_io->script;
+static TestPlatformPerformResult
+test_peer_perform(TestPlatform *test_platform, PlatformCompletion *completion,
+                  i32 fd, Error *dst_err, usize *dst_res) {
+  TestPeerCtx *const c = test_platform->script;
   assert(c);
   assert(completion);
   assert(TEST_PEER_FD == fd);
 
   switch (completion->action.kind) {
-  case IoActionKindRead: {
+  case PlatformActionKindRead: {
     c->read_calls += 1;
 
     assert(c->said <= c->says.len);
@@ -1986,7 +1992,7 @@ static TestIoPerformResult test_peer_perform(TestIo *test_io,
     if (0 == unsaid) {
       *dst_err = (Error){.kind = c->spent_err};
       // `*dst_res` stays 0, which with no error is end of file.
-      return TestIoPerformDone;
+      return TestPlatformPerformDone;
     }
 
     const Bytes data = completion->action.v.read.data;
@@ -2003,15 +2009,15 @@ static TestIoPerformResult test_peer_perform(TestIo *test_io,
     memcpy(data.data, c->says.data + c->said, n);
     c->said += n;
     *dst_res = n;
-    return TestIoPerformDone;
+    return TestPlatformPerformDone;
   }
 
-  case IoActionKindWrite: {
+  case PlatformActionKindWrite: {
     c->write_calls += 1;
 
     if (ErrKindNone != c->write_fails_with) {
       *dst_err = (Error){.kind = c->write_fails_with};
-      return TestIoPerformDone;
+      return TestPlatformPerformDone;
     }
 
     const Bytes data = completion->action.v.write.data;
@@ -2028,25 +2034,25 @@ static TestIoPerformResult test_peer_perform(TestIo *test_io,
     c->written_len += n;
 
     *dst_res = n;
-    return TestIoPerformDone;
+    return TestPlatformPerformDone;
   }
 
-  case IoActionKindClose:
+  case PlatformActionKindClose:
     c->close_calls += 1;
-    return TestIoPerformDone;
+    return TestPlatformPerformDone;
 
-  case IoActionKindNone:
-  case IoActionKindOpen:
-  case IoActionKindAccept:
-  case IoActionKindConnect:
-  case IoActionKindSendTo:
-  case IoActionKindFileSize:
-  case IoActionKindRemoveFile:
+  case PlatformActionKindNone:
+  case PlatformActionKindOpen:
+  case PlatformActionKindAccept:
+  case PlatformActionKindConnect:
+  case PlatformActionKindSendTo:
+  case PlatformActionKindFileSize:
+  case PlatformActionKindRemoveFile:
     break;
   }
 
   assert(0 && "a peer drives none of these");
-  return TestIoPerformDone;
+  return TestPlatformPerformDone;
 }
 
 // Is the pool holding nothing at all? Every one of these tests ends there: a
@@ -2074,9 +2080,9 @@ test_peer_pool_is_empty(const TorrentNetworkCtx *network_ctx) {
 // slot is zeroed, which reads back as the initial state, so only what was seen
 // while the slot was still held counts.
 __attribute__((warn_unused_result)) static TorrentPeerState
-test_peer_run(TestIo *test_io, TestPeerCtx *ctx, const Env *env,
+test_peer_run(TestPlatform *test_platform, TestPeerCtx *ctx,
               TorrentNetworkCtx *network_ctx) {
-  assert(test_io);
+  assert(test_platform);
   assert(ctx);
   assert(network_ctx);
   // The pool starts empty, so the connection takes the first slot, and that is
@@ -2084,11 +2090,11 @@ test_peer_run(TestIo *test_io, TestPeerCtx *ctx, const Env *env,
   assert(test_peer_pool_is_empty(network_ctx));
   const TorrentPeer *const peer = &network_ctx->pool.slots[0];
 
-  test_io_make(test_io, env, test_peer_perform, ctx);
+  test_platform_make(test_platform, test_peer_perform, ctx);
 
   const i32 saved = test_stdout_silence();
 
-  torrent_peer_on_accept(&test_io->io, network_ctx,
+  torrent_peer_on_accept(&test_platform->platform, network_ctx,
                          (Ipv4Addr){.ip = 0x7f000001, .port = 6881},
                          TEST_PEER_FD);
 
@@ -2102,12 +2108,13 @@ test_peer_run(TestIo *test_io, TestPeerCtx *ctx, const Env *env,
   TorrentPeerState last = peer->state;
   bool drained = false;
   for (usize i = 0; i < turns_max; i++) {
-    if (0 == test_io->submitted_len) {
+    if (0 == test_platform->submitted_len) {
       drained = true;
       break;
     }
 
-    const Error err = test_io->io.run_for_ns(&test_io->io, 1);
+    const Error err =
+        test_platform->platform.run_for_ns(&test_platform->platform, 1);
     assert(ErrKindNone == err.kind);
 
     if (0 != (network_ctx->pool.occupied[0] & 1)) {
@@ -2129,7 +2136,7 @@ static void test_torrent_peer_state_machine(void) {
   // The pool is a couple of megabytes of slots and the fake has room for an
   // operation per slot: too much for the stack, either of them.
   static TorrentNetworkCtx network_ctx;
-  static TestIo test_io;
+  static TestPlatform test_platform;
 
   u8 peer_id_bytes[TORRENT_PEER_ID_LEN] = {'-',  'F',  'S',  '0', '0', '0', '1',
                                            0x00, 0xff, 0x2a, 1,   2,   3,   4,
@@ -2147,10 +2154,10 @@ static void test_torrent_peer_state_machine(void) {
   // fake peer has nothing else to say and the next read reaches end of file.
   {
     TestPeerCtx ctx = {.says = whole};
-    const Env env = test_env_peer_make(&ctx);
+    test_platform.platform = test_env_peer_make(&ctx);
 
     assert(TorrentPeerStateHandshaked ==
-           test_peer_run(&test_io, &ctx, &env, &network_ctx));
+           test_peer_run(&test_platform, &ctx, &network_ctx));
 
     // Theirs, then the one that finds nothing behind it.
     assert(2 == ctx.read_calls);
@@ -2168,10 +2175,10 @@ static void test_torrent_peer_state_machine(void) {
   u8 sent[TEST_HANDSHAKE_LEN] = {0};
   {
     TestPeerCtx ctx = {.says = whole};
-    const Env env = test_env_peer_make(&ctx);
+    test_platform.platform = test_env_peer_make(&ctx);
 
     assert(TorrentPeerStateHandshaked ==
-           test_peer_run(&test_io, &ctx, &env, &network_ctx));
+           test_peer_run(&test_platform, &ctx, &network_ctx));
 
     // The handshake first, and the greeting behind it.
     assert(TEST_PEER_GREETING_LEN == ctx.written_len);
@@ -2208,10 +2215,10 @@ static void test_torrent_peer_state_machine(void) {
     for (usize i = 0; i < sizeof(chunks) / sizeof(chunks[0]); i++) {
       TestPeerCtx ctx = {
           .says = unhurried, .chunk = 1, .write_chunk = chunks[i]};
-      const Env env = test_env_peer_make(&ctx);
+      test_platform.platform = test_env_peer_make(&ctx);
 
       assert(TorrentPeerStateHandshaked ==
-             test_peer_run(&test_io, &ctx, &env, &network_ctx));
+             test_peer_run(&test_platform, &ctx, &network_ctx));
 
       assert(TEST_PEER_GREETING_LEN == ctx.written_len);
       assert(0 == memcmp(ctx.written, sent, sizeof(sent)));
@@ -2235,10 +2242,10 @@ static void test_torrent_peer_state_machine(void) {
   // overwrites the byte before it, and the handshake then matches nothing.
   {
     TestPeerCtx ctx = {.says = whole, .chunk = 1};
-    const Env env = test_env_peer_make(&ctx);
+    test_platform.platform = test_env_peer_make(&ctx);
 
     assert(TorrentPeerStateHandshaked ==
-           test_peer_run(&test_io, &ctx, &env, &network_ctx));
+           test_peer_run(&test_platform, &ctx, &network_ctx));
 
     // One read per byte, plus the one that reaches end of file.
     assert(TEST_HANDSHAKE_LEN + 1 == ctx.read_calls);
@@ -2251,10 +2258,10 @@ static void test_torrent_peer_state_machine(void) {
     const usize chunks[] = {2, 3, 7, 17, 67, 68, 1024};
     for (usize i = 0; i < sizeof(chunks) / sizeof(chunks[0]); i++) {
       TestPeerCtx ctx = {.says = whole, .chunk = chunks[i]};
-      const Env env = test_env_peer_make(&ctx);
+      test_platform.platform = test_env_peer_make(&ctx);
 
       assert(TorrentPeerStateHandshaked ==
-             test_peer_run(&test_io, &ctx, &env, &network_ctx));
+             test_peer_run(&test_platform, &ctx, &network_ctx));
 
       assert(ctx.read_calls > 0);
       assert(1 == ctx.close_calls);
@@ -2268,10 +2275,10 @@ static void test_torrent_peer_state_machine(void) {
   // so here, rather than the test running until someone stops it.
   {
     TestPeerCtx ctx = {.says = bytes_take(whole, 20)};
-    const Env env = test_env_peer_make(&ctx);
+    test_platform.platform = test_env_peer_make(&ctx);
 
     assert(TorrentPeerStateSentHandshake ==
-           test_peer_run(&test_io, &ctx, &env, &network_ctx));
+           test_peer_run(&test_platform, &ctx, &network_ctx));
 
     // The 20 bytes, then the end of file.
     assert(2 == ctx.read_calls);
@@ -2283,10 +2290,10 @@ static void test_torrent_peer_state_machine(void) {
   {
     TestPeerCtx ctx = {.says = bytes_take(whole, 20),
                        .spent_err = ErrKindConnReset};
-    const Env env = test_env_peer_make(&ctx);
+    test_platform.platform = test_env_peer_make(&ctx);
 
     assert(TorrentPeerStateSentHandshake ==
-           test_peer_run(&test_io, &ctx, &env, &network_ctx));
+           test_peer_run(&test_platform, &ctx, &network_ctx));
 
     assert(2 == ctx.read_calls);
     assert(1 == ctx.close_calls);
@@ -2301,10 +2308,10 @@ static void test_torrent_peer_state_machine(void) {
     wrong[28] ^= 0x01;
 
     TestPeerCtx ctx = {.says = bytes_make(wrong, sizeof(wrong))};
-    const Env env = test_env_peer_make(&ctx);
+    test_platform.platform = test_env_peer_make(&ctx);
 
     assert(TorrentPeerStateSentHandshake ==
-           test_peer_run(&test_io, &ctx, &env, &network_ctx));
+           test_peer_run(&test_platform, &ctx, &network_ctx));
 
     assert(1 == ctx.read_calls);
     assert(1 == ctx.close_calls);
@@ -2317,9 +2324,9 @@ static void test_torrent_peer_state_machine(void) {
   // reported twice -- so it waits for the read to report and goes out then.
   {
     TestPeerCtx ctx = {.says = whole, .write_fails_with = ErrKindConnReset};
-    const Env env = test_env_peer_make(&ctx);
+    test_platform.platform = test_env_peer_make(&ctx);
 
-    (void)test_peer_run(&test_io, &ctx, &env, &network_ctx);
+    (void)test_peer_run(&test_platform, &ctx, &network_ctx);
 
     assert(1 == ctx.write_calls);
     // Exactly one hang-up, however many operations were outstanding when the
@@ -2334,17 +2341,17 @@ static void test_torrent_peer_state_machine(void) {
   // go out is still in flight, so the hang-up waits for it.
   {
     TestPeerCtx ctx = {.says = whole};
-    const Env env = test_env_peer_make(&ctx);
+    test_platform.platform = test_env_peer_make(&ctx);
 
-    test_io_make(&test_io, &env, test_peer_perform, &ctx);
-    test_io.submit_fails_for = IoActionKindRead;
-    test_io.submit_fails_with = ErrKindOOM;
+    test_platform_make(&test_platform, test_peer_perform, &ctx);
+    test_platform.submit_fails_for = PlatformActionKindRead;
+    test_platform.submit_fails_with = ErrKindOOM;
 
     const i32 saved = test_stdout_silence();
-    torrent_peer_on_accept(&test_io.io, &network_ctx,
+    torrent_peer_on_accept(&test_platform.platform, &network_ctx,
                            (Ipv4Addr){.ip = 0x7f000001, .port = 6881},
                            TEST_PEER_FD);
-    test_io_drain(&test_io);
+    test_platform_drain(&test_platform);
     test_stdout_restore(saved);
 
     assert(0 == ctx.read_calls);
@@ -2357,17 +2364,17 @@ static void test_torrent_peer_state_machine(void) {
   // the hang-up goes out immediately.
   {
     TestPeerCtx ctx = {.says = whole};
-    const Env env = test_env_peer_make(&ctx);
+    test_platform.platform = test_env_peer_make(&ctx);
 
-    test_io_make(&test_io, &env, test_peer_perform, &ctx);
-    test_io.submit_fails_for = IoActionKindWrite;
-    test_io.submit_fails_with = ErrKindOOM;
+    test_platform_make(&test_platform, test_peer_perform, &ctx);
+    test_platform.submit_fails_for = PlatformActionKindWrite;
+    test_platform.submit_fails_with = ErrKindOOM;
 
     const i32 saved = test_stdout_silence();
-    torrent_peer_on_accept(&test_io.io, &network_ctx,
+    torrent_peer_on_accept(&test_platform.platform, &network_ctx,
                            (Ipv4Addr){.ip = 0x7f000001, .port = 6881},
                            TEST_PEER_FD);
-    test_io_drain(&test_io);
+    test_platform_drain(&test_platform);
     test_stdout_restore(saved);
 
     assert(0 == ctx.write_calls);
@@ -2377,25 +2384,25 @@ static void test_torrent_peer_state_machine(void) {
   }
 
   // The hang-up that cannot be submitted either. Nothing is going to call back,
-  // so the connection goes through `Env`, which answers on the spot, and the
-  // slot is handed back there and then: one kept for a connection nobody will
-  // ever hear from again is lost for the life of the process.
+  // so the connection goes through `close_socket`, which answers on the spot,
+  // and the slot is handed back there and then: one kept for a connection
+  // nobody will ever hear from again is lost for the life of the process.
   {
     TestPeerCtx ctx = {.says = whole};
-    const Env env = test_env_peer_make(&ctx);
+    test_platform.platform = test_env_peer_make(&ctx);
 
-    test_io_make(&test_io, &env, test_peer_perform, &ctx);
-    test_io.submit_fails_for = IoActionKindClose;
-    test_io.submit_fails_with = ErrKindOOM;
+    test_platform_make(&test_platform, test_peer_perform, &ctx);
+    test_platform.submit_fails_for = PlatformActionKindClose;
+    test_platform.submit_fails_with = ErrKindOOM;
 
     const i32 saved = test_stdout_silence();
-    torrent_peer_on_accept(&test_io.io, &network_ctx,
+    torrent_peer_on_accept(&test_platform.platform, &network_ctx,
                            (Ipv4Addr){.ip = 0x7f000001, .port = 6881},
                            TEST_PEER_FD);
-    test_io_drain(&test_io);
+    test_platform_drain(&test_platform);
     test_stdout_restore(saved);
 
-    // Never submitted, so `IO` never performed it.
+    // Never submitted, so the loop never performed it.
     assert(0 == ctx.close_calls);
     assert(1 == ctx.close_socket_calls);
     assert(test_peer_pool_is_empty(&network_ctx));
@@ -2408,7 +2415,7 @@ static void test_torrent_peer_state_machine(void) {
 // nowhere.
 static void test_torrent_peer_messages(void) {
   static TorrentNetworkCtx network_ctx;
-  static TestIo test_io;
+  static TestPlatform test_platform;
 
   u8 peer_id_bytes[TORRENT_PEER_ID_LEN];
   memset(peer_id_bytes, 'P', sizeof(peer_id_bytes));
@@ -2436,10 +2443,10 @@ static void test_torrent_peer_messages(void) {
   // behind it, without another read in between.
   {
     TestPeerCtx ctx = {.says = whole};
-    const Env env = test_env_peer_make(&ctx);
+    test_platform.platform = test_env_peer_make(&ctx);
 
     assert(TorrentPeerStateHandshaked ==
-           test_peer_run(&test_io, &ctx, &env, &network_ctx));
+           test_peer_run(&test_platform, &ctx, &network_ctx));
 
     // One read for everything, then the one that reaches end of file. A parser
     // that stopped after the first message would need three more.
@@ -2455,10 +2462,10 @@ static void test_torrent_peer_messages(void) {
     const usize chunks[] = {1, 2, 3, 5, 8, 13, 67, 68, 69, 70, 91, 1024};
     for (usize i = 0; i < sizeof(chunks) / sizeof(chunks[0]); i++) {
       TestPeerCtx ctx = {.says = whole, .chunk = chunks[i]};
-      const Env env = test_env_peer_make(&ctx);
+      test_platform.platform = test_env_peer_make(&ctx);
 
       assert(TorrentPeerStateHandshaked ==
-             test_peer_run(&test_io, &ctx, &env, &network_ctx));
+             test_peer_run(&test_platform, &ctx, &network_ctx));
 
       // It got to the end of the stream and hung up there, rather than giving
       // up on a half-arrived message.
@@ -2482,10 +2489,10 @@ static void test_torrent_peer_messages(void) {
     memcpy(bad + TEST_HANDSHAKE_LEN, nonsense, sizeof(nonsense));
 
     TestPeerCtx ctx = {.says = bytes_make(bad, sizeof(bad))};
-    const Env env = test_env_peer_make(&ctx);
+    test_platform.platform = test_env_peer_make(&ctx);
 
     assert(TorrentPeerStateHandshaked ==
-           test_peer_run(&test_io, &ctx, &env, &network_ctx));
+           test_peer_run(&test_platform, &ctx, &network_ctx));
 
     // One read had all of it, and the connection ended on the message, not on
     // end of file.
@@ -2511,10 +2518,10 @@ static void test_torrent_peer_messages(void) {
            sizeof(unknown_then_unchoke));
 
     TestPeerCtx ctx = {.says = bytes_make(skipped, sizeof(skipped))};
-    const Env env = test_env_peer_make(&ctx);
+    test_platform.platform = test_env_peer_make(&ctx);
 
     assert(TorrentPeerStateHandshaked ==
-           test_peer_run(&test_io, &ctx, &env, &network_ctx));
+           test_peer_run(&test_platform, &ctx, &network_ctx));
 
     // One read for all of it and one that reaches end of file, which is the
     // good path: the unknown tag cost no extra read and ended nothing.
@@ -2540,10 +2547,10 @@ static void test_torrent_peer_messages(void) {
     const usize chunks[] = {1, 2, 3, 5, 8, 13, 67, 68, 69, 70, 1024};
     for (usize i = 0; i < sizeof(chunks) / sizeof(chunks[0]); i++) {
       TestPeerCtx ctx = {.says = skipped_says, .chunk = chunks[i]};
-      const Env env = test_env_peer_make(&ctx);
+      test_platform.platform = test_env_peer_make(&ctx);
 
       assert(TorrentPeerStateHandshaked ==
-             test_peer_run(&test_io, &ctx, &env, &network_ctx));
+             test_peer_run(&test_platform, &ctx, &network_ctx));
 
       assert(1 == ctx.close_calls);
       assert(0 == ctx.close_socket_calls);
@@ -2558,7 +2565,7 @@ static void test_torrent_peer_messages(void) {
 // front of the ones it has not, and it reads the same one for ever.
 static void test_torrent_peer_recv_buf_compacted(void) {
   static TorrentNetworkCtx network_ctx;
-  static TestIo test_io;
+  static TestPlatform test_platform;
 
   u8 peer_id_bytes[TORRENT_PEER_ID_LEN];
   memset(peer_id_bytes, 'P', sizeof(peer_id_bytes));
@@ -2575,14 +2582,14 @@ static void test_torrent_peer_recv_buf_compacted(void) {
   test_handshake_fill(handshake, network_ctx.info_hash, peer_id);
 
   TestPeerCtx ctx = {0};
-  const Env env = test_env_peer_make(&ctx);
-  test_io_make(&test_io, &env, test_peer_perform, &ctx);
+  test_platform.platform = test_env_peer_make(&ctx);
+  test_platform_make(&test_platform, test_peer_perform, &ctx);
 
   TorrentPeer *const peer = torrent_peer_ctx_pool_acquire(&network_ctx.pool);
   assert(peer);
   const Ipv4Addr peer_addr = {.ip = 0x7f000001, .port = 6881};
-  torrent_peer_init(peer, &test_io.io, &network_ctx, peer_addr, TEST_PEER_FD,
-                    peer_addr.ip);
+  torrent_peer_init(peer, &test_platform.platform, &network_ctx, peer_addr,
+                    TEST_PEER_FD, peer_addr.ip);
 
   // Our own handshake has gone out already, which is the state a connection is
   // in from its first tick onwards: the initial state is the one before
@@ -2597,7 +2604,7 @@ static void test_torrent_peer_recv_buf_compacted(void) {
   peer->recv_len = sizeof(handshake) + sizeof(trailing);
 
   const i32 saved = test_stdout_silence();
-  torrent_peer_tick(peer, &test_io.io, test_io.now_ns);
+  torrent_peer_tick(peer, &test_platform.platform, test_platform.now_ns);
   test_stdout_restore(saved);
 
   // A handshake with bytes behind it is still a handshake: what follows is not
@@ -2616,7 +2623,7 @@ static void test_torrent_peer_recv_buf_compacted(void) {
   assert(!test_peer_pool_is_empty(&network_ctx));
 
   // And the connection ends the ordinary way once the peer says nothing more.
-  test_io_drain(&test_io);
+  test_platform_drain(&test_platform);
   assert(1 == ctx.close_calls);
   assert(test_peer_pool_is_empty(&network_ctx));
 }
@@ -2874,9 +2881,9 @@ static void test_torrent_peer_run(void) {
 // which is the state every deadline below is measured from. The slot is the
 // pool's first, these starting with it empty.
 __attribute__((warn_unused_result)) static TorrentPeer *
-test_peer_handshaked(TestIo *test_io, TestPeerCtx *ctx, const Env *env,
+test_peer_handshaked(TestPlatform *test_platform, TestPeerCtx *ctx,
                      TorrentNetworkCtx *network_ctx, Bytes handshake) {
-  assert(test_io);
+  assert(test_platform);
   assert(ctx);
   assert(network_ctx);
   assert(test_peer_pool_is_empty(network_ctx));
@@ -2885,17 +2892,18 @@ test_peer_handshaked(TestIo *test_io, TestPeerCtx *ctx, const Env *env,
   // Without the cap a single read takes both, and the second turn below would
   // find end of file where a live peer's silence should be.
   *ctx = (TestPeerCtx){.says = handshake, .chunk = TEST_HANDSHAKE_LEN};
-  test_io_make(test_io, env, test_peer_perform, ctx);
-  test_io->now_ns = TEST_PEER_NOW_NS;
+  test_platform_make(test_platform, test_peer_perform, ctx);
+  test_platform->now_ns = TEST_PEER_NOW_NS;
 
   const i32 saved = test_stdout_silence();
-  torrent_peer_on_accept(&test_io->io, network_ctx,
+  torrent_peer_on_accept(&test_platform->platform, network_ctx,
                          (Ipv4Addr){.ip = 0x7f000001, .port = 6881},
                          TEST_PEER_FD);
   // One turn is the whole of it: ours goes out and theirs comes back without
   // the loop being turned in between, and what is left outstanding is the read
   // waiting for a first message that never comes.
-  const Error err = test_io->io.run_for_ns(&test_io->io, 1);
+  const Error err =
+      test_platform->platform.run_for_ns(&test_platform->platform, 1);
   assert(ErrKindNone == err.kind);
 
   TorrentPeer *const peer = &network_ctx->pool.slots[0];
@@ -2911,7 +2919,8 @@ test_peer_handshaked(TestIo *test_io, TestPeerCtx *ctx, const Env *env,
   // deadline put there. The read armed beside it runs in that turn too, which
   // is why the script has one keep-alive left to answer it with: at end of file
   // the connection would end here instead.
-  const Error err_greeting = test_io->io.run_for_ns(&test_io->io, 1);
+  const Error err_greeting =
+      test_platform->platform.run_for_ns(&test_platform->platform, 1);
   assert(ErrKindNone == err_greeting.kind);
   test_stdout_restore(saved);
 
@@ -2939,13 +2948,13 @@ test_peer_handshaked(TestIo *test_io, TestPeerCtx *ctx, const Env *env,
 // Finish whatever is outstanding and insist the slot came back. Every case below
 // ends here: a connection lets go of its slot however it ended, and one left
 // behind is a slot lost for the life of the process.
-static void test_peer_drain_empty(TestIo *test_io,
+static void test_peer_drain_empty(TestPlatform *test_platform,
                                   TorrentNetworkCtx *network_ctx) {
-  assert(test_io);
+  assert(test_platform);
   assert(network_ctx);
 
   const i32 saved = test_stdout_silence();
-  test_io_drain(test_io);
+  test_platform_drain(test_platform);
   test_stdout_restore(saved);
 
   assert(test_peer_pool_is_empty(network_ctx));
@@ -2959,7 +2968,7 @@ static void test_peer_drain_empty(TestIo *test_io,
 // keep in sync at all.
 static void test_torrent_peer_deadlines(void) {
   static TorrentNetworkCtx network_ctx;
-  static TestIo test_io;
+  static TestPlatform test_platform;
 
   u8 peer_id_bytes[TORRENT_PEER_ID_LEN];
   memset(peer_id_bytes, 'P', sizeof(peer_id_bytes));
@@ -3001,12 +3010,12 @@ static void test_torrent_peer_deadlines(void) {
   // An empty pool: nothing to walk, and nothing to wait for either.
   {
     TestPeerCtx ctx = {0};
-    const Env env = test_env_peer_make(&ctx);
-    test_io_make(&test_io, &env, test_peer_perform, &ctx);
+    test_platform.platform = test_env_peer_make(&ctx);
+    test_platform_make(&test_platform, test_peer_perform, &ctx);
 
     assert(test_peer_pool_is_empty(&network_ctx));
     assert(TORRENT_PEER_DEADLINE_NONE ==
-           torrent_peers_deadlines_run(&network_ctx, &test_io.io,
+           torrent_peers_deadlines_run(&network_ctx, &test_platform.platform,
                                        TEST_PEER_NOW_NS));
   }
 
@@ -3014,14 +3023,14 @@ static void test_torrent_peer_deadlines(void) {
   // the answer is what the loop waits on: the keep-alive, the nearer of the two.
   {
     TestPeerCtx ctx = {0};
-    const Env env = test_env_peer_make(&ctx);
+    test_platform.platform = test_env_peer_make(&ctx);
     TorrentPeer *const peer =
-        test_peer_handshaked(&test_io, &ctx, &env, &network_ctx, whole);
+        test_peer_handshaked(&test_platform, &ctx, &network_ctx, whole);
 
-    test_io.now_ns = TEST_PEER_NOW_NS + Second;
+    test_platform.now_ns = TEST_PEER_NOW_NS + Second;
     assert(peer->keep_alive_due_at ==
-           torrent_peers_deadlines_run(&network_ctx, &test_io.io,
-                                       test_io.now_ns));
+           torrent_peers_deadlines_run(&network_ctx, &test_platform.platform,
+                                       test_platform.now_ns));
 
     // Nothing went out and nothing moved.
     assert(2 == ctx.write_calls);
@@ -3030,7 +3039,7 @@ static void test_torrent_peer_deadlines(void) {
            peer->keep_alive_due_at);
     assert(!peer->closing);
 
-    test_peer_drain_empty(&test_io, &network_ctx);
+    test_peer_drain_empty(&test_platform, &network_ctx);
     assert(1 == ctx.close_calls);
   }
 
@@ -3038,17 +3047,17 @@ static void test_torrent_peer_deadlines(void) {
   // is not, and four zero bytes go out.
   {
     TestPeerCtx ctx = {0};
-    const Env env = test_env_peer_make(&ctx);
+    test_platform.platform = test_env_peer_make(&ctx);
     TorrentPeer *const peer =
-        test_peer_handshaked(&test_io, &ctx, &env, &network_ctx, whole);
+        test_peer_handshaked(&test_platform, &ctx, &network_ctx, whole);
 
-    test_io.now_ns = peer->keep_alive_due_at;
+    test_platform.now_ns = peer->keep_alive_due_at;
     const u64 earliest = torrent_peers_deadlines_run(
-        &network_ctx, &test_io.io, test_io.now_ns);
+        &network_ctx, &test_platform.platform, test_platform.now_ns);
 
     // Re-armed from now, and the peer's own silence left alone: exactly one
     // keep-alive interval is left before the close, which is what it buys.
-    assert(test_io.now_ns + TORRENT_PEER_KEEP_ALIVE_NS ==
+    assert(test_platform.now_ns + TORRENT_PEER_KEEP_ALIVE_NS ==
            peer->keep_alive_due_at);
     assert(TEST_PEER_NOW_NS + TORRENT_PEER_IDLE_NS == peer->idle_due_at);
     assert(peer->idle_due_at == earliest);
@@ -3057,7 +3066,7 @@ static void test_torrent_peer_deadlines(void) {
     assert(peer->write_in_flight);
     assert(2 == ctx.write_calls);
 
-    test_peer_drain_empty(&test_io, &network_ctx);
+    test_peer_drain_empty(&test_platform, &network_ctx);
 
     assert(3 == ctx.write_calls);
     assert(TEST_PEER_GREETING_LEN + sizeof(keep_alive) == ctx.written_len);
@@ -3069,20 +3078,20 @@ static void test_torrent_peer_deadlines(void) {
   // Four minutes of it, and the connection is not worth its slot.
   {
     TestPeerCtx ctx = {0};
-    const Env env = test_env_peer_make(&ctx);
+    test_platform.platform = test_env_peer_make(&ctx);
     TorrentPeer *const peer =
-        test_peer_handshaked(&test_io, &ctx, &env, &network_ctx, whole);
+        test_peer_handshaked(&test_platform, &ctx, &network_ctx, whole);
 
-    test_io.now_ns = peer->idle_due_at;
-    assert(test_io.now_ns > peer->keep_alive_due_at);
+    test_platform.now_ns = peer->idle_due_at;
+    assert(test_platform.now_ns > peer->keep_alive_due_at);
 
     // Nothing is left to wait for: the one peer in the pool is on its way out.
     assert(TORRENT_PEER_DEADLINE_NONE ==
-           torrent_peers_deadlines_run(&network_ctx, &test_io.io,
-                                       test_io.now_ns));
+           torrent_peers_deadlines_run(&network_ctx, &test_platform.platform,
+                                       test_platform.now_ns));
 
     // The hang-up is waiting on the read that is still with the kernel, so the
-    // slot is still held and `IO`'s close has not been asked for yet.
+    // slot is still held and `close` has not been asked for yet.
     assert(peer->closing);
     assert(0 == ctx.close_calls);
     assert(!test_peer_pool_is_empty(&network_ctx));
@@ -3091,10 +3100,10 @@ static void test_torrent_peer_deadlines(void) {
     // flight is past being told anything, and waiting on its deadline would be
     // waiting for something nothing will ever act on.
     assert(TORRENT_PEER_DEADLINE_NONE ==
-           torrent_peers_deadlines_run(&network_ctx, &test_io.io,
-                                       test_io.now_ns));
+           torrent_peers_deadlines_run(&network_ctx, &test_platform.platform,
+                                       test_platform.now_ns));
 
-    test_peer_drain_empty(&test_io, &network_ctx);
+    test_peer_drain_empty(&test_platform, &network_ctx);
 
     assert(1 == ctx.close_calls);
     // Only the greeting ever went out: no keep-alive on the way to the close.
@@ -3108,23 +3117,23 @@ static void test_torrent_peer_deadlines(void) {
   // not the peer saying something.
   {
     TestPeerCtx ctx = {0};
-    const Env env = test_env_peer_make(&ctx);
+    test_platform.platform = test_env_peer_make(&ctx);
     TorrentPeer *const peer =
-        test_peer_handshaked(&test_io, &ctx, &env, &network_ctx, whole);
+        test_peer_handshaked(&test_platform, &ctx, &network_ctx, whole);
 
-    test_io.now_ns = TEST_PEER_NOW_NS + TORRENT_PEER_KEEP_ALIVE_NS;
+    test_platform.now_ns = TEST_PEER_NOW_NS + TORRENT_PEER_KEEP_ALIVE_NS;
     assert(peer->idle_due_at ==
-           torrent_peers_deadlines_run(&network_ctx, &test_io.io,
-                                       test_io.now_ns));
+           torrent_peers_deadlines_run(&network_ctx, &test_platform.platform,
+                                       test_platform.now_ns));
     assert(TEST_PEER_NOW_NS + TORRENT_PEER_IDLE_NS == peer->idle_due_at);
 
-    test_io.now_ns = TEST_PEER_NOW_NS + TORRENT_PEER_IDLE_NS;
+    test_platform.now_ns = TEST_PEER_NOW_NS + TORRENT_PEER_IDLE_NS;
     assert(TORRENT_PEER_DEADLINE_NONE ==
-           torrent_peers_deadlines_run(&network_ctx, &test_io.io,
-                                       test_io.now_ns));
+           torrent_peers_deadlines_run(&network_ctx, &test_platform.platform,
+                                       test_platform.now_ns));
     assert(peer->closing);
 
-    test_peer_drain_empty(&test_io, &network_ctx);
+    test_peer_drain_empty(&test_platform, &network_ctx);
 
     // The one keep-alive, and nothing after it.
     assert(TEST_PEER_GREETING_LEN + sizeof(keep_alive) == ctx.written_len);
@@ -3137,8 +3146,8 @@ static void test_torrent_peer_deadlines(void) {
   // nothing untrue, and the deadline has moved on either way.
   {
     TestPeerCtx ctx = {0};
-    const Env env = test_env_peer_make(&ctx);
-    test_io_make(&test_io, &env, test_peer_perform, &ctx);
+    test_platform.platform = test_env_peer_make(&ctx);
+    test_platform_make(&test_platform, test_peer_perform, &ctx);
 
     assert(test_peer_pool_is_empty(&network_ctx));
     TorrentPeer *const peer = torrent_peer_ctx_pool_acquire(&network_ctx.pool);
@@ -3146,8 +3155,8 @@ static void test_torrent_peer_deadlines(void) {
 
     const Ipv4Addr addr = {.ip = 0x7f000001, .port = 6881};
     const i32 saved = test_stdout_silence();
-    torrent_peer_init(peer, &test_io.io, &network_ctx, addr, TEST_PEER_FD,
-                      addr.ip);
+    torrent_peer_init(peer, &test_platform.platform, &network_ctx, addr,
+                      TEST_PEER_FD, addr.ip);
     peer->state = TorrentPeerStateHandshaked;
 
     // One byte short of enough.
@@ -3178,8 +3187,8 @@ static void test_torrent_peer_deadlines(void) {
   // bytes looking like enough, and the fifth then lands past the buffer.
   {
     TestPeerCtx ctx = {0};
-    const Env env = test_env_peer_make(&ctx);
-    test_io_make(&test_io, &env, test_peer_perform, &ctx);
+    test_platform.platform = test_env_peer_make(&ctx);
+    test_platform_make(&test_platform, test_peer_perform, &ctx);
 
     assert(test_peer_pool_is_empty(&network_ctx));
     TorrentPeer *const peer = torrent_peer_ctx_pool_acquire(&network_ctx.pool);
@@ -3187,8 +3196,8 @@ static void test_torrent_peer_deadlines(void) {
 
     const Ipv4Addr addr = {.ip = 0x7f000001, .port = 6881};
     const i32 saved = test_stdout_silence();
-    torrent_peer_init(peer, &test_io.io, &network_ctx, addr, TEST_PEER_FD,
-                      addr.ip);
+    torrent_peer_init(peer, &test_platform.platform, &network_ctx, addr,
+                      TEST_PEER_FD, addr.ip);
     peer->state = TorrentPeerStateHandshaked;
 
     const TorrentMessageKind kinds[] = {
@@ -3236,9 +3245,9 @@ static void test_torrent_peer_deadlines(void) {
   // due is called, and the answer is the minimum over the rest.
   {
     TestPeerCtx ctx = {0};
-    const Env env = test_env_peer_make(&ctx);
-    test_io_make(&test_io, &env, test_peer_perform, &ctx);
-    test_io.now_ns = TEST_PEER_NOW_NS;
+    test_platform.platform = test_env_peer_make(&ctx);
+    test_platform_make(&test_platform, test_peer_perform, &ctx);
+    test_platform.now_ns = TEST_PEER_NOW_NS;
 
     assert(test_peer_pool_is_empty(&network_ctx));
 
@@ -3255,8 +3264,8 @@ static void test_torrent_peer_deadlines(void) {
           1ULL << (slot_idx % POOL_SLOTS_PER_GROUP);
 
       TorrentPeer *const peer = &network_ctx.pool.slots[slot_idx];
-      torrent_peer_init(peer, &test_io.io, &network_ctx, addr, TEST_PEER_FD,
-                        addr.ip);
+      torrent_peer_init(peer, &test_platform.platform, &network_ctx, addr,
+                        TEST_PEER_FD, addr.ip);
       peer->state = TorrentPeerStateHandshaked;
     }
 
@@ -3272,8 +3281,8 @@ static void test_torrent_peer_deadlines(void) {
     due->keep_alive_due_at = TEST_PEER_NOW_NS;
     due->deadline_at = torrent_peer_deadline_earliest(due);
 
-    const u64 earliest = torrent_peers_deadlines_run(&network_ctx, &test_io.io,
-                                                     test_io.now_ns);
+    const u64 earliest = torrent_peers_deadlines_run(
+        &network_ctx, &test_platform.platform, test_platform.now_ns);
 
     // The one that was due said something; the one that was not was never
     // called, which is what comparing before calling is there to save.
@@ -3290,25 +3299,25 @@ static void test_torrent_peer_deadlines(void) {
 
     // Both are long past by then, so both go and the pool is empty for whatever
     // runs next.
-    test_io.now_ns = TEST_PEER_NOW_NS + 20 * Minute;
+    test_platform.now_ns = TEST_PEER_NOW_NS + 20 * Minute;
     assert(TORRENT_PEER_DEADLINE_NONE ==
-           torrent_peers_deadlines_run(&network_ctx, &test_io.io,
-                                       test_io.now_ns));
+           torrent_peers_deadlines_run(&network_ctx, &test_platform.platform,
+                                       test_platform.now_ns));
     test_stdout_restore(saved);
 
-    test_peer_drain_empty(&test_io, &network_ctx);
+    test_peer_drain_empty(&test_platform, &network_ctx);
     assert(2 == ctx.close_calls);
   }
 }
 
 static void test_arena_valloc(void) {
-  const Env *const env = env_platform_make();
+  Platform *const platform = env_platform_make();
 
   // A request the kernel cannot satisfy. `mmap` reports `MAP_FAILED`, not
   // NULL, so this also pins down that conversion, and that the `ENOMEM` it
   // sets comes back as `ErrOOM` rather than a bare failure.
   Arena arena = {0};
-  assert(ErrKindOOM == arena_valloc(env, (usize)1 << 62, &arena).kind);
+  assert(ErrKindOOM == arena_valloc(platform, (usize)1 << 62, &arena).kind);
 
   // A failed call leaves the caller's arena alone.
   assert(NULL == arena.start);
@@ -5324,14 +5333,14 @@ test_http_server_arena(usize inflight_requests_max) {
 }
 
 static void test_http_server_pool(void) {
-  const Env *const env = env_platform_make();
+  Platform *const platform = env_platform_make();
 
   // A slot taken from the pool is set up for one connection.
   {
     HttpServer server = {0};
     const Arena arena = test_http_server_arena(1);
     assert(ErrKindNone ==
-           http_server_init(&server, arena, 1, LogLevelError, env).kind);
+           http_server_init(&server, arena, 1, LogLevelError, platform).kind);
 
     HttpHandler *const handler = pool_acquire(&server.handler_pool);
     assert(handler);
@@ -5361,7 +5370,7 @@ static void test_http_server_pool(void) {
     HttpServer server = {0};
     const Arena arena = test_http_server_arena(3);
     assert(ErrKindNone ==
-           http_server_init(&server, arena, 3, LogLevelError, env).kind);
+           http_server_init(&server, arena, 3, LogLevelError, platform).kind);
 
     HttpHandler *handlers[3] = {0};
     for (usize i = 0; i < 3; i++) {
@@ -5398,7 +5407,7 @@ static void test_http_server_pool(void) {
     HttpServer server = {0};
     const Arena arena = test_http_server_arena(2);
     assert(ErrKindNone ==
-           http_server_init(&server, arena, 2, LogLevelError, env).kind);
+           http_server_init(&server, arena, 2, LogLevelError, platform).kind);
 
     for (usize i = 0; i < 100; i++) {
       HttpHandler *const a = test_http_accept(&server, 1);
@@ -5426,7 +5435,7 @@ static void test_http_server_pool(void) {
   {
     HttpServer server = {0};
     assert(ErrKindOOM ==
-           http_server_init(&server, test_arena(8), 1, LogLevelError, env)
+           http_server_init(&server, test_arena(8), 1, LogLevelError, platform)
                .kind);
   }
 
@@ -5435,7 +5444,7 @@ static void test_http_server_pool(void) {
     HttpServer server = {0};
     assert(ErrKindOOM == http_server_init(&server,
                                           test_arena(sizeof(HttpHandler)), 1,
-                                          LogLevelError, env)
+                                          LogLevelError, platform)
                              .kind);
   }
 
@@ -5451,7 +5460,7 @@ static void test_http_server_pool(void) {
 
     HttpServer server = {0};
     assert(ErrKindNone ==
-           http_server_init(&server, arena, 2, LogLevelError, env).kind);
+           http_server_init(&server, arena, 2, LogLevelError, platform).kind);
     assert(server.memory_blocks_pool.buffer + 2 * HTTP_HANDLER_ARENA_SIZE ==
            arena.end);
   }
@@ -5473,22 +5482,22 @@ typedef struct {
   // Leave every read unanswered, to hold connections open.
   bool read_parks;
   // Once the first read is answered, submitting this kind fails.
-  IoActionKind then_submit_fails_for;
+  PlatformActionKind then_submit_fails_for;
 
   u8 written[256];
   usize written_len;
 
   usize read_calls;
   usize write_calls;
-  // `IO`'s close.
+  // `close`.
   usize close_calls;
-  // `Env`'s, taken when no `IO` close is coming.
+  // `close_socket`, taken when no `close` is coming.
   usize close_socket_calls;
 } TestOtelCtx;
 
 __attribute__((warn_unused_result)) static Error
-test_otel_close_socket(const Env *env, i32 fd) {
-  TestOtelCtx *const c = env->ctx;
+test_otel_close_socket(Platform *platform, i32 fd) {
+  TestOtelCtx *const c = platform->ctx;
   assert(c);
   assert(TEST_OTEL_FD == fd);
 
@@ -5496,30 +5505,30 @@ test_otel_close_socket(const Env *env, i32 fd) {
   return (Error){.kind = ErrKindNone};
 }
 
-static TestIoPerformResult test_otel_perform(TestIo *test_io,
-                                             IoCompletion *completion, i32 fd,
-                                             Error *dst_err, usize *dst_res) {
-  TestOtelCtx *const c = test_io->script;
+static TestPlatformPerformResult
+test_otel_perform(TestPlatform *test_platform, PlatformCompletion *completion,
+                  i32 fd, Error *dst_err, usize *dst_res) {
+  TestOtelCtx *const c = test_platform->script;
   assert(c);
   assert(TEST_OTEL_FD == fd);
 
   switch (completion->action.kind) {
-  case IoActionKindRead: {
+  case PlatformActionKindRead: {
     c->read_calls += 1;
     if (c->read_parks) {
-      return TestIoPerformParked;
+      return TestPlatformPerformParked;
     }
-    if (IoActionKindNone != c->then_submit_fails_for) {
-      test_io->submit_fails_for = c->then_submit_fails_for;
-      test_io->submit_fails_with = ErrKindAgain;
+    if (PlatformActionKindNone != c->then_submit_fails_for) {
+      test_platform->submit_fails_for = c->then_submit_fails_for;
+      test_platform->submit_fails_with = ErrKindAgain;
     }
     if (ErrKindNone != c->read_fails_with) {
       *dst_err = (Error){.kind = c->read_fails_with};
-      return TestIoPerformDone;
+      return TestPlatformPerformDone;
     }
     if (c->chunks_read == c->chunks_len) {
       *dst_res = 0;
-      return TestIoPerformDone;
+      return TestPlatformPerformDone;
     }
     const Bytes chunk = c->chunks[c->chunks_read];
     const Bytes dst = completion->action.v.read.data;
@@ -5527,35 +5536,35 @@ static TestIoPerformResult test_otel_perform(TestIo *test_io,
     memcpy(dst.data, chunk.data, chunk.len);
     c->chunks_read += 1;
     *dst_res = chunk.len;
-    return TestIoPerformDone;
+    return TestPlatformPerformDone;
   }
-  case IoActionKindWrite: {
+  case PlatformActionKindWrite: {
     c->write_calls += 1;
     if (ErrKindNone != c->write_fails_with) {
       *dst_err = (Error){.kind = c->write_fails_with};
-      return TestIoPerformDone;
+      return TestPlatformPerformDone;
     }
     const Bytes data = completion->action.v.write.data;
     assert(c->written_len + data.len <= sizeof(c->written));
     memcpy(c->written + c->written_len, data.data, data.len);
     c->written_len += data.len;
     *dst_res = data.len;
-    return TestIoPerformDone;
+    return TestPlatformPerformDone;
   }
-  case IoActionKindClose:
+  case PlatformActionKindClose:
     c->close_calls += 1;
-    return TestIoPerformDone;
-  case IoActionKindNone:
-  case IoActionKindOpen:
-  case IoActionKindAccept:
-  case IoActionKindConnect:
-  case IoActionKindSendTo:
-  case IoActionKindFileSize:
-  case IoActionKindRemoveFile:
+    return TestPlatformPerformDone;
+  case PlatformActionKindNone:
+  case PlatformActionKindOpen:
+  case PlatformActionKindAccept:
+  case PlatformActionKindConnect:
+  case PlatformActionKindSendTo:
+  case PlatformActionKindFileSize:
+  case PlatformActionKindRemoveFile:
   default:
     assert(0 && "unexpected operation");
   }
-  return TestIoPerformDone;
+  return TestPlatformPerformDone;
 }
 
 // How many chunks are free, by walking the free list.
@@ -5587,20 +5596,19 @@ test_pool_free_count(const Pool *pool) {
 static void test_otel_connection(TestOtelCtx *c) {
   assert(c);
 
-  Env env = {.close_socket = test_otel_close_socket, .ctx = c};
-  TestIo test_io = {0};
-  test_io_make(&test_io, &env, test_otel_perform, c);
+  TestPlatform test_platform = {
+      .platform = {.close_socket = test_otel_close_socket, .ctx = c}};
+  test_platform_make(&test_platform, test_otel_perform, c);
 
   HttpServer server = {0};
   const Arena arena = test_http_server_arena(TEST_OTEL_INFLIGHT_MAX);
-  assert(ErrKindNone ==
-         http_server_init(&server, arena, TEST_OTEL_INFLIGHT_MAX, LogLevelAll,
-                              &env)
-                 .kind);
+  assert(ErrKindNone == http_server_init(&server, arena, TEST_OTEL_INFLIGHT_MAX,
+                                         LogLevelAll, &test_platform.platform)
+                            .kind);
 
   const i32 saved = test_stdout_silence();
-  otel_on_accept(&test_io.io, &server, (Ipv4Addr){0}, TEST_OTEL_FD);
-  test_io_drain(&test_io);
+  otel_on_accept(&test_platform.platform, &server, (Ipv4Addr){0}, TEST_OTEL_FD);
+  test_platform_drain(&test_platform);
   test_stdout_restore(saved);
 
   // One way or another, the socket is closed exactly once.
@@ -5743,19 +5751,22 @@ static void test_otel(void) {
     // The first read.
     TestOtelCtx first_read = {0};
     {
-      Env env = {.close_socket = test_otel_close_socket, .ctx = &first_read};
-      TestIo test_io = {0};
-      test_io_make(&test_io, &env, test_otel_perform, &first_read);
-      test_io.submit_fails_for = IoActionKindRead;
-      test_io.submit_fails_with = ErrKindAgain;
+      TestPlatform test_platform = {
+          .platform = {.close_socket = test_otel_close_socket,
+                       .ctx = &first_read}};
+      test_platform_make(&test_platform, test_otel_perform, &first_read);
+      test_platform.submit_fails_for = PlatformActionKindRead;
+      test_platform.submit_fails_with = ErrKindAgain;
 
       HttpServer server = {0};
       const Arena arena = test_http_server_arena(1);
-      assert(ErrKindNone ==
-             http_server_init(&server, arena, 1, LogLevelAll, &env).kind);
+      assert(ErrKindNone == http_server_init(&server, arena, 1, LogLevelAll,
+                                             &test_platform.platform)
+                                .kind);
       const i32 saved = test_stdout_silence();
-      otel_on_accept(&test_io.io, &server, (Ipv4Addr){0}, TEST_OTEL_FD);
-      test_io_drain(&test_io);
+      otel_on_accept(&test_platform.platform, &server, (Ipv4Addr){0},
+                     TEST_OTEL_FD);
+      test_platform_drain(&test_platform);
       test_stdout_restore(saved);
 
       assert(0 == first_read.read_calls);
@@ -5768,7 +5779,7 @@ static void test_otel(void) {
     TestOtelCtx next_read = {
         .chunks = {bytes_from_cstr("GET / HT")},
         .chunks_len = 1,
-        .then_submit_fails_for = IoActionKindRead,
+        .then_submit_fails_for = PlatformActionKindRead,
     };
     test_otel_connection(&next_read);
     assert(1 == next_read.read_calls);
@@ -5778,14 +5789,14 @@ static void test_otel(void) {
     TestOtelCtx write = {
         .chunks = {bytes_from_cstr("GET / HTTP/1.1\r\n\r\n")},
         .chunks_len = 1,
-        .then_submit_fails_for = IoActionKindWrite,
+        .then_submit_fails_for = PlatformActionKindWrite,
     };
     test_otel_connection(&write);
     assert(0 == write.write_calls);
     assert(1 == write.close_calls);
 
     // The close: no callback is coming, so the socket is closed directly.
-    TestOtelCtx close = {.then_submit_fails_for = IoActionKindClose};
+    TestOtelCtx close = {.then_submit_fails_for = PlatformActionKindClose};
     test_otel_connection(&close);
     assert(0 == close.close_calls);
     assert(1 == close.close_socket_calls);
@@ -5794,18 +5805,21 @@ static void test_otel(void) {
   // With every slot taken, a new connection is turned away at once.
   {
     TestOtelCtx c = {.read_parks = true};
-    Env env = {.close_socket = test_otel_close_socket, .ctx = &c};
-    TestIo test_io = {0};
-    test_io_make(&test_io, &env, test_otel_perform, &c);
+    TestPlatform test_platform = {
+        .platform = {.close_socket = test_otel_close_socket, .ctx = &c}};
+    test_platform_make(&test_platform, test_otel_perform, &c);
 
     HttpServer server = {0};
     const Arena arena = test_http_server_arena(1);
-    assert(ErrKindNone ==
-           http_server_init(&server, arena, 1, LogLevelAll, &env).kind);
+    assert(ErrKindNone == http_server_init(&server, arena, 1, LogLevelAll,
+                                           &test_platform.platform)
+                              .kind);
     const i32 saved = test_stdout_silence();
-    otel_on_accept(&test_io.io, &server, (Ipv4Addr){0}, TEST_OTEL_FD);
-    otel_on_accept(&test_io.io, &server, (Ipv4Addr){0}, TEST_OTEL_FD);
-    test_io_drain(&test_io);
+    otel_on_accept(&test_platform.platform, &server, (Ipv4Addr){0},
+                   TEST_OTEL_FD);
+    otel_on_accept(&test_platform.platform, &server, (Ipv4Addr){0},
+                   TEST_OTEL_FD);
+    test_platform_drain(&test_platform);
     test_stdout_restore(saved);
 
     assert(1 == c.read_calls);
@@ -6176,10 +6190,11 @@ test_merkle_data(Arena *arena) {
 // power of two number of blocks, and block counts needing one or several
 // padding leaves.
 static void test_torrent_merkle_vectors(void) {
-  const Env *const env = env_platform_make();
+  Platform *const platform = env_platform_make();
   Arena data_arena = {0};
-  assert(ErrKindNone ==
-         arena_valloc(env, TEST_MERKLE_MAX_LEN + 4 * KiB, &data_arena).kind);
+  assert(
+      ErrKindNone ==
+      arena_valloc(platform, TEST_MERKLE_MAX_LEN + 4 * KiB, &data_arena).kind);
   assert(data_arena.start);
   const Bytes data = test_merkle_data(&data_arena);
 
@@ -6242,10 +6257,11 @@ static void test_torrent_merkle_vectors(void) {
 // info dictionary. Checked against an independently built tree rather than
 // against the implementation's own intermediate state.
 static void test_torrent_merkle_piece_layer(void) {
-  const Env *const env = env_platform_make();
+  Platform *const platform = env_platform_make();
   Arena data_arena = {0};
-  assert(ErrKindNone ==
-         arena_valloc(env, TEST_MERKLE_MAX_LEN + 4 * KiB, &data_arena).kind);
+  assert(
+      ErrKindNone ==
+      arena_valloc(platform, TEST_MERKLE_MAX_LEN + 4 * KiB, &data_arena).kind);
   assert(data_arena.start);
   const Bytes data = test_merkle_data(&data_arena);
 
@@ -6336,9 +6352,9 @@ static void test_torrent_merkle_piece_layer(void) {
 // is zeroed. Everything above it is hashed normally, so a node covering
 // nothing but padding is emphatically not zero.
 static void test_torrent_merkle_padding(void) {
-  const Env *const env = env_platform_make();
+  Platform *const platform = env_platform_make();
   Arena data_arena = {0};
-  assert(ErrKindNone == arena_valloc(env, 64 * KiB, &data_arena).kind);
+  assert(ErrKindNone == arena_valloc(platform, 64 * KiB, &data_arena).kind);
   assert(data_arena.start);
 
   // Three blocks, so the tree pads to four leaves and the last leaf covers no
@@ -6437,9 +6453,9 @@ static void test_torrent_merkle_empty(void) {
 // The one failure path: an arena too small for the tree is reported, not
 // asserted, and leaves nothing half built behind.
 static void test_torrent_merkle_oom(void) {
-  const Env *const env = env_platform_make();
+  Platform *const platform = env_platform_make();
   Arena data_arena = {0};
-  assert(ErrKindNone == arena_valloc(env, 64 * KiB, &data_arena).kind);
+  assert(ErrKindNone == arena_valloc(platform, 64 * KiB, &data_arena).kind);
   assert(data_arena.start);
 
   // Two blocks, so at one block per piece the layer needs two hashes.
@@ -8203,61 +8219,60 @@ static void test_sha256_neon_lengths(void) {
 #endif
 }
 
-// The real platform `IO`. Unlike an `Env`, it is an object and not just a
-// vtable -- it has a kqueue and a changelist -- so it is allocated, out of an
-// arena the test owns, and it holds on to the `Env` that `env_platform_make`
-// keeps for the process.
+// The real `Platform` with its loop. Unlike the one `env_platform_make` keeps
+// for the process, it is an object and not just a vtable -- it has a kqueue and
+// a changelist -- so it is allocated, out of an arena the test owns.
 //
-// `*arena` has to outlive the returned `IO`.
-__attribute__((warn_unused_result)) static IO *test_io_real(Arena *arena) {
+// `*arena` has to outlive the returned `Platform`.
+__attribute__((warn_unused_result)) static Platform *
+test_platform_real(Arena *arena) {
   assert(arena);
 
-  IO *io = NULL;
-  assert(
-      ErrKindNone ==
-      io_platform_make(arena, env_platform_make(), IoBackendDefault, &io).kind);
-  assert(io);
+  Platform *platform = NULL;
+  assert(ErrKindNone ==
+         platform_make(arena, PlatformBackendDefault, &platform).kind);
+  assert(platform);
 
-  return io;
+  return platform;
 }
 
 // Removing a scratch file the harness itself made. It goes to the real platform
 // for the same reason `test_stdout_silence` does: the file is on the real
-// filesystem whatever `io` the test under it happens to be driving.
-__attribute__((warn_unused_result)) static Error test_remove_file(IO *io,
-                                                                  Bytes path) {
-  assert(io);
+// filesystem whatever `platform` the test under it happens to be driving.
+__attribute__((warn_unused_result)) static Error
+test_remove_file(Platform *platform, Bytes path) {
+  assert(platform);
 
-  IoOnce once = {0};
-  io_once_init(&once);
+  PlatformOnce once = {0};
+  platform_once_init(&once);
 
-  const Error err =
-      io->remove_file(io, &once.completion, path, io_once_on_done);
+  const Error err = platform->remove_file(platform, &once.completion, path,
+                                          platform_once_on_done);
   if (ErrKindNone != err.kind) {
     return err;
   }
 
-  return io_once_wait(io, &once);
+  return platform_once_wait(platform, &once);
 }
 
 // One `open`, waited out, for the tests that are checking what `open` reports
 // rather than doing anything with the descriptor. The descriptor is handed back
 // through `*dst_fd` when there is one, and left alone when there is not.
 __attribute__((warn_unused_result)) static Error
-test_open(IO *io, Bytes path, FileOpenOptions opts, i32 *dst_fd) {
-  assert(io);
+test_open(Platform *platform, Bytes path, FileOpenOptions opts, i32 *dst_fd) {
+  assert(platform);
   assert(dst_fd);
 
-  IoOnce once = {0};
-  io_once_init(&once);
+  PlatformOnce once = {0};
+  platform_once_init(&once);
 
-  const Error err_submit =
-      io->open(io, &once.completion, path, opts, io_once_on_done);
+  const Error err_submit = platform->open(platform, &once.completion, path,
+                                          opts, platform_once_on_done);
   if (ErrKindNone != err_submit.kind) {
     return err_submit;
   }
 
-  const Error err = io_once_wait(io, &once);
+  const Error err = platform_once_wait(platform, &once);
   if (ErrKindNone == err.kind) {
     *dst_fd = (i32)once.res;
   }
@@ -8269,11 +8284,12 @@ test_open(IO *io, Bytes path, FileOpenOptions opts, i32 *dst_fd) {
 // collide with a stale file or with another run.
 __attribute__((warn_unused_result)) static Bytes
 test_tmp_path(char *buf, usize buf_len, const char *name) {
-  const Env *const env = env_platform_make();
+  Platform *const platform = env_platform_make();
 
   const char *const dir = getenv("TMPDIR");
-  const i32 n = snprintf(buf, buf_len, "%s/file_send_test_%zu_%s",
-                         dir ? dir : "/tmp", env->get_process_id(env), name);
+  const i32 n =
+      snprintf(buf, buf_len, "%s/file_send_test_%zu_%s", dir ? dir : "/tmp",
+               platform->get_process_id(platform), name);
   assert(n > 0);
   assert((usize)n < buf_len);
 
@@ -8282,19 +8298,21 @@ test_tmp_path(char *buf, usize buf_len, const char *name) {
 
 // The failure paths of `open`, which are the ones a caller actually has to
 // handle: they are reached through the vtable like any other caller would.
-static void test_io_open_errors(void) {
-  // Room for the platform `IO`, whose changelist is the bulk of it.
+static void test_platform_open_errors(void) {
+  // Room for the real `Platform`, whose changelist is the bulk of it.
   Arena arena = test_arena(256 * KiB);
-  IO *const io = test_io_real(&arena);
+  Platform *const platform = test_platform_real(&arena);
   i32 fd = -1;
 
   // An empty path is rejected before the syscall -- but not before the
   // operation is submitted: the check is in the syscall wrapper the loop runs,
   // so it reports through the callback like everything else.
   assert(ErrKindInvalidData ==
-         test_open(io, bytes_make(NULL, 0), FileOpenOptionsReadOnly, &fd).kind);
+         test_open(platform, bytes_make(NULL, 0), FileOpenOptionsReadOnly, &fd)
+             .kind);
   assert(ErrKindInvalidData ==
-         test_open(io, bytes_from_cstr(""), FileOpenOptionsReadOnly, &fd).kind);
+         test_open(platform, bytes_from_cstr(""), FileOpenOptionsReadOnly, &fd)
+             .kind);
 
   // So is one too long for the fixed buffer, and the limit rides along in
   // `data` rather than an `errno` that was never set.
@@ -8303,7 +8321,7 @@ static void test_io_open_errors(void) {
     memset(long_path, 'a', sizeof(long_path) - 1);
     const Bytes path = bytes_make((u8 *)long_path, sizeof(long_path) - 1);
 
-    const Error err = test_open(io, path, FileOpenOptionsReadOnly, &fd);
+    const Error err = test_open(platform, path, FileOpenOptionsReadOnly, &fd);
     assert(ErrKindRange == err.kind);
     assert(4095 == err.data);
   }
@@ -8312,9 +8330,9 @@ static void test_io_open_errors(void) {
   {
     char buf[256] = {0};
     const Bytes path = test_tmp_path(buf, sizeof(buf), "does_not_exist");
-    (void)test_remove_file(io, path);
+    (void)test_remove_file(platform, path);
 
-    const Error err = test_open(io, path, FileOpenOptionsReadOnly, &fd);
+    const Error err = test_open(platform, path, FileOpenOptionsReadOnly, &fd);
     // `ENOENT` has no kind of its own yet, so it lands in the catch-all;
     // `data` is what tells it apart.
     assert(ErrKindInvalidData == err.kind);
@@ -8325,25 +8343,27 @@ static void test_io_open_errors(void) {
 // `write_all_to_file` and `map_file` are only ever used as a pair, so they
 // are checked as one: against a real file, because a fake filesystem would
 // only be testing itself.
-static void test_io_file_round_trip(void) {
-  // Room for the platform `IO`, whose changelist is the bulk of it.
+static void test_platform_file_round_trip(void) {
+  // Room for the real `Platform`, whose changelist is the bulk of it.
   Arena arena = test_arena(256 * KiB);
-  IO *const io = test_io_real(&arena);
+  Platform *const platform = test_platform_real(&arena);
 
   char buf[256] = {0};
   const Bytes path = test_tmp_path(buf, sizeof(buf), "round_trip");
-  (void)test_remove_file(io, path);
+  (void)test_remove_file(platform, path);
 
   // Bencode is binary, so a NUL in the middle must survive.
   const u8 payload[] = {'d', '3', ':', 'a', 'b', 'c', 0x00, 'e'};
   const Bytes data = bytes_make((u8 *)payload, sizeof(payload));
 
-  assert(ErrKindNone == io_write_all_to_file_blocking(io, path, data).kind);
+  assert(ErrKindNone ==
+         platform_write_all_to_file_blocking(platform, path, data).kind);
 
   {
     Bytes got = {0};
-    assert(ErrKindNone ==
-           io_map_file_blocking(io, path, FileOpenOptionsReadOnly, &got).kind);
+    assert(ErrKindNone == platform_map_file_blocking(
+                              platform, path, FileOpenOptionsReadOnly, &got)
+                              .kind);
     assert(data.len == got.len);
     assert(0 == memcmp(data.data, got.data, data.len));
   }
@@ -8353,12 +8373,14 @@ static void test_io_file_round_trip(void) {
   {
     const u8 shorter[] = {'i', '1', 'e'};
     const Bytes data_shorter = bytes_make((u8 *)shorter, sizeof(shorter));
-    assert(ErrKindNone ==
-           io_write_all_to_file_blocking(io, path, data_shorter).kind);
+    assert(
+        ErrKindNone ==
+        platform_write_all_to_file_blocking(platform, path, data_shorter).kind);
 
     Bytes got = {0};
-    assert(ErrKindNone ==
-           io_map_file_blocking(io, path, FileOpenOptionsReadOnly, &got).kind);
+    assert(ErrKindNone == platform_map_file_blocking(
+                              platform, path, FileOpenOptionsReadOnly, &got)
+                              .kind);
     assert(sizeof(shorter) == got.len);
     assert(0 == memcmp(shorter, got.data, sizeof(shorter)));
   }
@@ -8366,23 +8388,26 @@ static void test_io_file_round_trip(void) {
   // Writing nothing is a no-op, not a truncation: the file is left as it was,
   // and nothing is ever submitted.
   {
-    assert(ErrKindNone ==
-           io_write_all_to_file_blocking(io, path, bytes_make(NULL, 0)).kind);
+    assert(ErrKindNone == platform_write_all_to_file_blocking(
+                              platform, path, bytes_make(NULL, 0))
+                              .kind);
 
     Bytes got = {0};
-    assert(ErrKindNone ==
-           io_map_file_blocking(io, path, FileOpenOptionsReadOnly, &got).kind);
+    assert(ErrKindNone == platform_map_file_blocking(
+                              platform, path, FileOpenOptionsReadOnly, &got)
+                              .kind);
     assert(3 == got.len);
   }
 
-  assert(ErrKindNone == test_remove_file(io, path).kind);
+  assert(ErrKindNone == test_remove_file(platform, path).kind);
 
   // Mapping what is no longer there fails rather than handing back an empty
   // `Bytes`.
   {
     Bytes got = {0};
-    assert(ErrKindNone !=
-           io_map_file_blocking(io, path, FileOpenOptionsReadOnly, &got).kind);
+    assert(ErrKindNone != platform_map_file_blocking(
+                              platform, path, FileOpenOptionsReadOnly, &got)
+                              .kind);
   }
 
   // An empty file has nothing to map: `mmap` rejects a zero length, and that
@@ -8391,38 +8416,42 @@ static void test_io_file_round_trip(void) {
     char empty_buf[256] = {0};
     const Bytes empty_path =
         test_tmp_path(empty_buf, sizeof(empty_buf), "empty");
-    (void)test_remove_file(io, empty_path);
+    (void)test_remove_file(platform, empty_path);
 
     i32 fd = -1;
     assert(ErrKindNone ==
-           test_open(io, empty_path,
+           test_open(platform, empty_path,
                      FileOpenOptionsWriteOnly | FileOpenOptionsCreate, &fd)
                .kind);
     assert(fd >= 0);
     {
-      IoOnce once = {0};
-      io_once_init(&once);
-      assert(ErrKindNone ==
-             io->close(io, &once.completion, fd, io_once_on_done).kind);
-      assert(ErrKindNone == io_once_wait(io, &once).kind);
+      PlatformOnce once = {0};
+      platform_once_init(&once);
+      assert(
+          ErrKindNone ==
+          platform->close(platform, &once.completion, fd, platform_once_on_done)
+              .kind);
+      assert(ErrKindNone == platform_once_wait(platform, &once).kind);
     }
 
     Bytes got = {0};
-    assert(ErrKindNone !=
-           io_map_file_blocking(io, empty_path, FileOpenOptionsReadOnly, &got)
-               .kind);
+    assert(ErrKindNone != platform_map_file_blocking(platform, empty_path,
+                                                     FileOpenOptionsReadOnly,
+                                                     &got)
+                              .kind);
     assert(bytes_is_empty(got));
 
-    assert(ErrKindNone == test_remove_file(io, empty_path).kind);
+    assert(ErrKindNone == test_remove_file(platform, empty_path).kind);
   }
 
   // A directory opens but cannot be mapped, which walks the `mmap` failure
   // path with the descriptor already in hand.
   {
     Bytes got = {0};
-    assert(ErrKindNone != io_map_file_blocking(io, bytes_from_cstr("/tmp"),
-                                               FileOpenOptionsReadOnly, &got)
-                              .kind);
+    assert(ErrKindNone !=
+           platform_map_file_blocking(platform, bytes_from_cstr("/tmp"),
+                                      FileOpenOptionsReadOnly, &got)
+               .kind);
   }
 
   // A path `open` rejects without setting `errno` still comes back as the
@@ -8433,13 +8462,14 @@ static void test_io_file_round_trip(void) {
     const Bytes too_long = bytes_make((u8 *)long_path, sizeof(long_path) - 1);
 
     Bytes got = {0};
-    assert(
-        ErrKindRange ==
-        io_map_file_blocking(io, too_long, FileOpenOptionsReadOnly, &got).kind);
+    assert(ErrKindRange == platform_map_file_blocking(platform, too_long,
+                                                      FileOpenOptionsReadOnly,
+                                                      &got)
+                               .kind);
 
     const u8 byte = 'x';
-    assert(ErrKindRange == io_write_all_to_file_blocking(
-                               io, too_long, bytes_make((u8 *)&byte, 1))
+    assert(ErrKindRange == platform_write_all_to_file_blocking(
+                               platform, too_long, bytes_make((u8 *)&byte, 1))
                                .kind);
   }
 }
@@ -8542,16 +8572,16 @@ static void test_error_kind_to_cstr(void) {
       ErrKindUnsupported,
   };
 
-  const IoBackend backends[] = {IoBackendDefault, IoBackendKqueue,
-                                IoBackendEpoll, IoBackendIoUring,
-                                IoBackendIocp};
+  const PlatformBackend backends[] = {
+      PlatformBackendDefault, PlatformBackendKqueue, PlatformBackendEpoll,
+      PlatformBackendIoUring, PlatformBackendIocp};
   for (usize i = 0; i < sizeof(backends) / sizeof(backends[0]); i++) {
-    const char *const got = io_backend_to_cstr(backends[i]);
+    const char *const got = platform_backend_to_cstr(backends[i]);
     assert(got);
     assert(strlen(got) > 0);
 
     for (usize j = 0; j < i; j++) {
-      assert(0 != strcmp(got, io_backend_to_cstr(backends[j])));
+      assert(0 != strcmp(got, platform_backend_to_cstr(backends[j])));
     }
   }
 
@@ -8561,15 +8591,15 @@ static void test_error_kind_to_cstr(void) {
   {
     Arena arena = test_arena(256 * KiB);
     usize supported = 0;
-    const IoBackend named[] = {IoBackendKqueue, IoBackendEpoll,
-                               IoBackendIoUring, IoBackendIocp};
+    const PlatformBackend named[] = {
+        PlatformBackendKqueue, PlatformBackendEpoll, PlatformBackendIoUring,
+        PlatformBackendIocp};
 
     for (usize i = 0; i < sizeof(named) / sizeof(named[0]); i++) {
-      IO *io = NULL;
-      const Error err =
-          io_platform_make(&arena, env_platform_make(), named[i], &io);
+      Platform *platform = NULL;
+      const Error err = platform_make(&arena, named[i], &platform);
       if (ErrKindNone == err.kind) {
-        assert(io);
+        assert(platform);
         supported += 1;
       } else {
         assert(ErrKindUnsupported == err.kind);
@@ -8597,22 +8627,23 @@ static void test_error_kind_to_cstr(void) {
 // The one-line failure paths of the syscall wrappers. No mock: a descriptor
 // that was never open is a cheaper way to make the OS say no than faking it,
 // and it exercises the real `errno` mapping rather than a fake's idea of it.
-static void test_io_syscall_failures(void) {
-  // Room for the platform `IO`, whose changelist is the bulk of it.
+static void test_platform_syscall_failures(void) {
+  // Room for the real `Platform`, whose changelist is the bulk of it.
   Arena arena = test_arena(256 * KiB);
-  IO *const io = test_io_real(&arena);
-  const Env *const env = env_platform_make();
+  Platform *const platform = test_platform_real(&arena);
 
   // `fstat` on a descriptor that was never open. The operation is submitted and
   // fails when the loop runs it, which is the only way a caller ever sees this.
   {
-    IoOnce once = {0};
-    io_once_init(&once);
+    PlatformOnce once = {0};
+    platform_once_init(&once);
     once.res = 0xAA;
 
-    assert(ErrKindNone ==
-           io->file_size(io, &once.completion, -1, io_once_on_done).kind);
-    const Error err = io_once_wait(io, &once);
+    assert(ErrKindNone == platform
+                              ->file_size(platform, &once.completion, -1,
+                                          platform_once_on_done)
+                              .kind);
+    const Error err = platform_once_wait(platform, &once);
     assert(ErrKindNone != err.kind);
     assert(EBADF == (i32)err.data);
     // Nothing is reported when there is nothing to report.
@@ -8621,19 +8652,21 @@ static void test_io_syscall_failures(void) {
 
   // `close` of the same.
   {
-    IoOnce once = {0};
-    io_once_init(&once);
+    PlatformOnce once = {0};
+    platform_once_init(&once);
 
-    assert(ErrKindNone ==
-           io->close(io, &once.completion, -1, io_once_on_done).kind);
-    const Error err = io_once_wait(io, &once);
+    assert(
+        ErrKindNone ==
+        platform->close(platform, &once.completion, -1, platform_once_on_done)
+            .kind);
+    const Error err = platform_once_wait(platform, &once);
     assert(ErrKindNone != err.kind);
     assert(EBADF == (i32)err.data);
   }
 
-  // `Env`'s hang-up reports the same thing, having nowhere to report it later.
+  // `close_socket` reports the same thing, having nowhere to report it later.
   {
-    const Error err = env->close_socket(env, -1);
+    const Error err = platform->close_socket(platform, -1);
     assert(ErrKindNone != err.kind);
     assert(EBADF == (i32)err.data);
   }
@@ -8641,7 +8674,7 @@ static void test_io_syscall_failures(void) {
   // `mprotect` wants a page aligned address, so an odd one is rejected
   // without having to find an unmapped page first.
   {
-    const Error err = env->vprotect_none(env, (void *)1, 4096);
+    const Error err = platform->vprotect_none(platform, (void *)1, 4096);
     assert(ErrKindNone != err.kind);
   }
 
@@ -8657,16 +8690,17 @@ static void test_io_syscall_failures(void) {
     const u8 payload[] = {'a', 'b', 'c'};
 
     assert(ErrKindNone ==
-           io_write_all_to_file_blocking(
-               io, path, bytes_make((u8 *)payload, sizeof(payload)))
+           platform_write_all_to_file_blocking(
+               platform, path, bytes_make((u8 *)payload, sizeof(payload)))
                .kind);
 
     Bytes got = {0};
-    assert(ErrKindNone ==
-           io_map_file_blocking(io, path, FileOpenOptionsWriteOnly, &got).kind);
+    assert(ErrKindNone == platform_map_file_blocking(
+                              platform, path, FileOpenOptionsWriteOnly, &got)
+                              .kind);
     assert(sizeof(payload) == got.len);
 
-    assert(ErrKindNone == test_remove_file(io, path).kind);
+    assert(ErrKindNone == test_remove_file(platform, path).kind);
   }
 }
 
@@ -8743,15 +8777,15 @@ static void test_torrent_make_dicts_oom(void) {
 
 // ---------- The file composites ----------
 
-// The real `io_map_file` and `io_write_all_to_file` run against faked
-// primitives. That is the whole reason the composites are state machines over
-// the slots -- the composites are the program's operations, the primitives
+// The real `platform_map_file` and `platform_write_all_to_file` run against
+// faked primitives. That is the whole reason the composites are state machines
+// over the slots -- the composites are the program's operations, the primitives
 // underneath them are the platform's, and only the second kind is worth faking.
 //
 // Anything not faked goes to the real syscall, so `open` still yields a
 // descriptor the rest of the code can use. A fake never invents one: it either
-// fails or hands back a genuine one. The composites reach `mmap` through
-// `io->env`, which is the real one throughout.
+// fails or hands back a genuine one. The composites reach `mmap` through the
+// same `Platform`, whose `map_fd` is the real one throughout.
 typedef struct {
   ErrorKind open_fails_with;
   ErrorKind file_size_fails_with;
@@ -8771,19 +8805,19 @@ typedef struct {
   usize file_size_calls;
 } TestFileCtx;
 
-static TestIoPerformResult test_file_perform(TestIo *test_io,
-                                             IoCompletion *completion, i32 fd,
-                                             Error *dst_err, usize *dst_res) {
-  TestFileCtx *const c = test_io->script;
+static TestPlatformPerformResult
+test_file_perform(TestPlatform *test_platform, PlatformCompletion *completion,
+                  i32 fd, Error *dst_err, usize *dst_res) {
+  TestFileCtx *const c = test_platform->script;
   assert(c);
   assert(completion);
 
   switch (completion->action.kind) {
-  case IoActionKindOpen: {
+  case PlatformActionKindOpen: {
     c->open_calls += 1;
     if (ErrKindNone != c->open_fails_with) {
       *dst_err = (Error){.kind = c->open_fails_with};
-      return TestIoPerformDone;
+      return TestPlatformPerformDone;
     }
 
     // `open` produces a descriptor rather than acting on one.
@@ -8795,37 +8829,37 @@ static TestIoPerformResult test_file_perform(TestIo *test_io,
       assert(opened >= 0);
       *dst_res = (usize)(u32)opened;
     }
-    return TestIoPerformDone;
+    return TestPlatformPerformDone;
   }
 
-  case IoActionKindClose:
+  case PlatformActionKindClose:
     c->close_calls += 1;
     *dst_err = unix_close(fd);
-    return TestIoPerformDone;
+    return TestPlatformPerformDone;
 
-  case IoActionKindFileSize:
+  case PlatformActionKindFileSize:
     c->file_size_calls += 1;
     if (ErrKindNone != c->file_size_fails_with) {
       *dst_err = (Error){.kind = c->file_size_fails_with};
-      return TestIoPerformDone;
+      return TestPlatformPerformDone;
     }
     *dst_err = unix_file_size(fd, dst_res);
-    return TestIoPerformDone;
+    return TestPlatformPerformDone;
 
-  case IoActionKindWrite: {
+  case PlatformActionKindWrite: {
     c->write_calls += 1;
 
     if (c->write_calls == c->write_interrupted_at) {
       *dst_err = (Error){.kind = ErrKindInterrupted};
-      return TestIoPerformDone;
+      return TestPlatformPerformDone;
     }
     if (ErrKindNone != c->write_fails_with) {
       *dst_err = (Error){.kind = c->write_fails_with};
-      return TestIoPerformDone;
+      return TestPlatformPerformDone;
     }
     if (c->write_calls == c->write_zero_at) {
       *dst_res = 0;
-      return TestIoPerformDone;
+      return TestPlatformPerformDone;
     }
 
     const Bytes data = completion->action.v.write.data;
@@ -8833,29 +8867,29 @@ static TestIoPerformResult test_file_perform(TestIo *test_io,
                             ? c->write_chunk
                             : data.len;
     *dst_err = unix_write(fd, bytes_take(data, chunk), dst_res);
-    return TestIoPerformDone;
+    return TestPlatformPerformDone;
   }
 
-  case IoActionKindNone:
-  case IoActionKindRead:
-  case IoActionKindAccept:
-  case IoActionKindConnect:
-  case IoActionKindSendTo:
-  case IoActionKindRemoveFile:
+  case PlatformActionKindNone:
+  case PlatformActionKindRead:
+  case PlatformActionKindAccept:
+  case PlatformActionKindConnect:
+  case PlatformActionKindSendTo:
+  case PlatformActionKindRemoveFile:
     break;
   }
 
   assert(0 && "the file composites drive none of these");
-  return TestIoPerformDone;
+  return TestPlatformPerformDone;
 }
 
 // The error paths inside the composites, which no real file can produce: an
 // `open` that fails after the path was fine, an `fstat` that fails on a
 // descriptor that just opened, a short write, an interrupted one.
-static void test_io_composites_mocked(void) {
+static void test_platform_composites_mocked(void) {
   Arena arena = test_arena(256 * KiB);
-  IO *const real = test_io_real(&arena);
-  const Env *const env = env_platform_make();
+  Platform *const real = test_platform_real(&arena);
+  Platform *const platform = env_platform_make();
 
   char buf[256] = {0};
   const Bytes path = test_tmp_path(buf, sizeof(buf), "composites");
@@ -8865,14 +8899,14 @@ static void test_io_composites_mocked(void) {
   // A failed `open` stops `map_file` before anything else is tried.
   {
     TestFileCtx ctx = {.open_fails_with = ErrKindTooManyFiles};
-    TestIo test_io = {0};
-    test_io_make(&test_io, env, test_file_perform, &ctx);
+    TestPlatform test_platform = {.platform = *platform};
+    test_platform_make(&test_platform, test_file_perform, &ctx);
     Bytes got = {0};
 
-    assert(ErrKindTooManyFiles == io_map_file_blocking(&test_io.io, path,
-                                                       FileOpenOptionsReadOnly,
-                                                       &got)
-                                      .kind);
+    assert(ErrKindTooManyFiles ==
+           platform_map_file_blocking(&test_platform.platform, path,
+                                      FileOpenOptionsReadOnly, &got)
+               .kind);
     assert(1 == ctx.open_calls);
     assert(0 == ctx.file_size_calls);
     // Nothing was opened, so nothing is closed.
@@ -8883,11 +8917,12 @@ static void test_io_composites_mocked(void) {
   // The same for `write_all_to_file`.
   {
     TestFileCtx ctx = {.open_fails_with = ErrOSKindPermission};
-    TestIo test_io = {0};
-    test_io_make(&test_io, env, test_file_perform, &ctx);
+    TestPlatform test_platform = {.platform = *platform};
+    test_platform_make(&test_platform, test_file_perform, &ctx);
 
-    assert(ErrOSKindPermission ==
-           io_write_all_to_file_blocking(&test_io.io, path, data).kind);
+    assert(ErrOSKindPermission == platform_write_all_to_file_blocking(
+                                      &test_platform.platform, path, data)
+                                      .kind);
     assert(0 == ctx.write_calls);
     assert(0 == ctx.close_calls);
   }
@@ -8895,11 +8930,12 @@ static void test_io_composites_mocked(void) {
   // Write the file for real, so there is something to map.
   {
     TestFileCtx ctx = {0};
-    TestIo test_io = {0};
-    test_io_make(&test_io, env, test_file_perform, &ctx);
+    TestPlatform test_platform = {.platform = *platform};
+    test_platform_make(&test_platform, test_file_perform, &ctx);
 
-    assert(ErrKindNone ==
-           io_write_all_to_file_blocking(&test_io.io, path, data).kind);
+    assert(ErrKindNone == platform_write_all_to_file_blocking(
+                              &test_platform.platform, path, data)
+                              .kind);
     assert(1 == ctx.write_calls);
     assert(1 == ctx.close_calls);
   }
@@ -8908,13 +8944,14 @@ static void test_io_composites_mocked(void) {
   // real file, and it is the path that has to hand the descriptor back.
   {
     TestFileCtx ctx = {.file_size_fails_with = ErrKindRange};
-    TestIo test_io = {0};
-    test_io_make(&test_io, env, test_file_perform, &ctx);
+    TestPlatform test_platform = {.platform = *platform};
+    test_platform_make(&test_platform, test_file_perform, &ctx);
     Bytes got = {0};
 
-    assert(ErrKindRange == io_map_file_blocking(&test_io.io, path,
-                                                FileOpenOptionsReadOnly, &got)
-                               .kind);
+    assert(ErrKindRange ==
+           platform_map_file_blocking(&test_platform.platform, path,
+                                      FileOpenOptionsReadOnly, &got)
+               .kind);
     assert(1 == ctx.file_size_calls);
     assert(1 == ctx.close_calls);
     assert(bytes_is_empty(got));
@@ -8924,17 +8961,18 @@ static void test_io_composites_mocked(void) {
   // everything has landed. One byte at a time is the extreme case of it.
   {
     TestFileCtx ctx = {.write_chunk = 1};
-    TestIo test_io = {0};
-    test_io_make(&test_io, env, test_file_perform, &ctx);
+    TestPlatform test_platform = {.platform = *platform};
+    test_platform_make(&test_platform, test_file_perform, &ctx);
 
-    assert(ErrKindNone ==
-           io_write_all_to_file_blocking(&test_io.io, path, data).kind);
+    assert(ErrKindNone == platform_write_all_to_file_blocking(
+                              &test_platform.platform, path, data)
+                              .kind);
     assert(sizeof(payload) == ctx.write_calls);
 
     Bytes got = {0};
-    assert(
-        ErrKindNone ==
-        io_map_file_blocking(real, path, FileOpenOptionsReadOnly, &got).kind);
+    assert(ErrKindNone ==
+           platform_map_file_blocking(real, path, FileOpenOptionsReadOnly, &got)
+               .kind);
     assert(data.len == got.len);
     assert(0 == memcmp(data.data, got.data, data.len));
   }
@@ -8943,18 +8981,19 @@ static void test_io_composites_mocked(void) {
   // again and the same bytes go out.
   {
     TestFileCtx ctx = {.write_chunk = 2, .write_interrupted_at = 2};
-    TestIo test_io = {0};
-    test_io_make(&test_io, env, test_file_perform, &ctx);
+    TestPlatform test_platform = {.platform = *platform};
+    test_platform_make(&test_platform, test_file_perform, &ctx);
 
-    assert(ErrKindNone ==
-           io_write_all_to_file_blocking(&test_io.io, path, data).kind);
+    assert(ErrKindNone == platform_write_all_to_file_blocking(
+                              &test_platform.platform, path, data)
+                              .kind);
     // Four chunks of two, plus the interrupted call that carried nothing.
     assert(5 == ctx.write_calls);
 
     Bytes got = {0};
-    assert(
-        ErrKindNone ==
-        io_map_file_blocking(real, path, FileOpenOptionsReadOnly, &got).kind);
+    assert(ErrKindNone ==
+           platform_map_file_blocking(real, path, FileOpenOptionsReadOnly, &got)
+               .kind);
     assert(data.len == got.len);
     assert(0 == memcmp(data.data, got.data, data.len));
   }
@@ -8963,11 +9002,12 @@ static void test_io_composites_mocked(void) {
   // it is treated as the peer hanging up.
   {
     TestFileCtx ctx = {.write_zero_at = 1};
-    TestIo test_io = {0};
-    test_io_make(&test_io, env, test_file_perform, &ctx);
+    TestPlatform test_platform = {.platform = *platform};
+    test_platform_make(&test_platform, test_file_perform, &ctx);
 
-    assert(ErrKindConnReset ==
-           io_write_all_to_file_blocking(&test_io.io, path, data).kind);
+    assert(ErrKindConnReset == platform_write_all_to_file_blocking(
+                                   &test_platform.platform, path, data)
+                                   .kind);
     assert(1 == ctx.write_calls);
     // The descriptor is handed back even on the way out.
     assert(1 == ctx.close_calls);
@@ -8976,11 +9016,12 @@ static void test_io_composites_mocked(void) {
   // A failed write reports, and still closes.
   {
     TestFileCtx ctx = {.write_fails_with = ErrKindConnReset};
-    TestIo test_io = {0};
-    test_io_make(&test_io, env, test_file_perform, &ctx);
+    TestPlatform test_platform = {.platform = *platform};
+    test_platform_make(&test_platform, test_file_perform, &ctx);
 
-    assert(ErrKindConnReset ==
-           io_write_all_to_file_blocking(&test_io.io, path, data).kind);
+    assert(ErrKindConnReset == platform_write_all_to_file_blocking(
+                                   &test_platform.platform, path, data)
+                                   .kind);
     assert(1 == ctx.close_calls);
   }
 
@@ -8988,15 +9029,16 @@ static void test_io_composites_mocked(void) {
   // which is the one place they have to clean up without a callback.
   {
     TestFileCtx ctx = {0};
-    TestIo test_io = {0};
-    test_io_make(&test_io, env, test_file_perform, &ctx);
-    test_io.submit_fails_for = IoActionKindFileSize;
-    test_io.submit_fails_with = ErrKindAgain;
+    TestPlatform test_platform = {.platform = *platform};
+    test_platform_make(&test_platform, test_file_perform, &ctx);
+    test_platform.submit_fails_for = PlatformActionKindFileSize;
+    test_platform.submit_fails_with = ErrKindAgain;
     Bytes got = {0};
 
-    assert(ErrKindAgain == io_map_file_blocking(&test_io.io, path,
-                                                FileOpenOptionsReadOnly, &got)
-                               .kind);
+    assert(ErrKindAgain ==
+           platform_map_file_blocking(&test_platform.platform, path,
+                                      FileOpenOptionsReadOnly, &got)
+               .kind);
     // The file was opened, so it is handed back even though nothing asked how
     // big it was.
     assert(1 == ctx.open_calls);
@@ -9967,9 +10009,10 @@ static void test(const char *filter) {
 #endif
       {"arena_valloc", test_arena_valloc},
       {"arena_valloc_mocked", test_arena_valloc_mocked},
-      {"io_listen_and_serve_setup_failures",
-       test_io_listen_and_serve_setup_failures},
-      {"io_listen_and_serve_accept", test_io_listen_and_serve_accept},
+      {"platform_listen_and_serve_setup_failures",
+       test_platform_listen_and_serve_setup_failures},
+      {"platform_listen_and_serve_accept",
+       test_platform_listen_and_serve_accept},
       {"torrent_peer_pool_exhaustion", test_torrent_peer_pool_exhaustion},
       {"torrent_peer_to_cstr", test_torrent_peer_to_cstr},
       {"torrent_peer_parse_message", test_torrent_peer_parse_message},
@@ -9978,12 +10021,12 @@ static void test(const char *filter) {
       {"torrent_peer_state_machine", test_torrent_peer_state_machine},
       {"torrent_peer_messages", test_torrent_peer_messages},
       {"torrent_peer_recv_buf_compacted", test_torrent_peer_recv_buf_compacted},
-      {"io_syscall_failures", test_io_syscall_failures},
+      {"platform_syscall_failures", test_platform_syscall_failures},
       {"torrent_make_dicts_oom", test_torrent_make_dicts_oom},
-      {"io_composites_mocked", test_io_composites_mocked},
+      {"platform_composites_mocked", test_platform_composites_mocked},
       {"error_kind_to_cstr", test_error_kind_to_cstr},
-      {"io_open_errors", test_io_open_errors},
-      {"io_file_round_trip", test_io_file_round_trip},
+      {"platform_open_errors", test_platform_open_errors},
+      {"platform_file_round_trip", test_platform_file_round_trip},
       {"torrent_gen_torrent_file_data_oom",
        test_torrent_gen_torrent_file_data_oom},
       {"bytes", test_bytes},

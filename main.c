@@ -22,30 +22,30 @@
 int main(i32 argc, char *argv[]) {
   assert(argv);
 
-  const Env *const env = env_platform_make();
+  Platform *const platform_base = env_platform_make();
   const Logger logger = logger_make(LogLevelAll, bytes_from_cstr("[main] "));
 
   const char *const cmd = argc >= 2 ? argv[1] : "";
   const usize arena_cap = 32 * MiB;
   Arena arena = {0};
-  assert(ErrKindNone == arena_valloc(env, arena_cap, &arena).kind);
+  assert(ErrKindNone == arena_valloc(platform_base, arena_cap, &arena).kind);
 
   Arena scratch = {0};
-  assert(ErrKindNone == arena_valloc(env, 1 * MiB, &scratch).kind);
+  assert(ErrKindNone == arena_valloc(platform_base, 1 * MiB, &scratch).kind);
 
   // `FILE_SEND_IO_BACKEND` names one, for comparing them on a platform that has
   // more than one; unset asks the platform for whichever it prefers, which is
   // what anything but a measurement should be doing.
-  IoBackend backend = IoBackendDefault;
+  PlatformBackend backend = PlatformBackendDefault;
   {
     const char *const requested = getenv("FILE_SEND_IO_BACKEND");
     if (requested) {
       if (0 == strcmp(requested, "kqueue")) {
-        backend = IoBackendKqueue;
+        backend = PlatformBackendKqueue;
       } else if (0 == strcmp(requested, "epoll")) {
-        backend = IoBackendEpoll;
+        backend = PlatformBackendEpoll;
       } else if (0 == strcmp(requested, "io_uring")) {
-        backend = IoBackendIoUring;
+        backend = PlatformBackendIoUring;
       } else {
         fprintf(stderr, "unknown IO backend: %s\n", requested);
         return 1;
@@ -53,10 +53,10 @@ int main(i32 argc, char *argv[]) {
     }
   }
 
-  IO *io = NULL;
-  Error err = io_platform_make(&arena, env, backend, &io);
+  Platform *platform = NULL;
+  Error err = platform_make(&arena, backend, &platform);
   if (ErrKindNone != err.kind) {
-    fprintf(stderr, "IO backend: %s\n", io_backend_to_cstr(backend));
+    fprintf(stderr, "IO backend: %s\n", platform_backend_to_cstr(backend));
     log_err(&logger, "failed to create the IO implementation for the platform",
             err);
     return 1;
@@ -76,7 +76,8 @@ int main(i32 argc, char *argv[]) {
     const Bytes file_path = bytes_from_cstr(argv[2]);
     Bytes input = {0};
 
-    err = io_map_file_blocking(io, file_path, FileOpenOptionsReadOnly, &input);
+    err = platform_map_file_blocking(platform, file_path,
+                                     FileOpenOptionsReadOnly, &input);
     if (ErrKindNone != err.kind) {
       log_err(&logger, "failed to open file", err);
       return 1;
@@ -104,8 +105,8 @@ int main(i32 argc, char *argv[]) {
       return 1;
     }
 
-    err =
-        io_write_all_to_file_blocking(io, torrent_file_path, torrent_file_data);
+    err = platform_write_all_to_file_blocking(platform, torrent_file_path,
+                                              torrent_file_data);
     if (ErrKindNone != err.kind) {
       log_err(&logger, "failed to write torrent file", err);
       return 1;
@@ -125,7 +126,8 @@ int main(i32 argc, char *argv[]) {
 
     Bytes input = {0};
 
-    err = io_map_file_blocking(io, file_path, FileOpenOptionsReadOnly, &input);
+    err = platform_map_file_blocking(platform, file_path,
+                                     FileOpenOptionsReadOnly, &input);
     if (ErrKindNone != err.kind) {
       log_err(&logger, "failed to open file", err);
       return 1;
@@ -183,7 +185,8 @@ int main(i32 argc, char *argv[]) {
 
     i32 udp_socket = 0;
     {
-      Error err_udp = env->udp_multicast_open_ipv4(env, 0, &udp_socket);
+      Error err_udp =
+          platform->udp_multicast_open_ipv4(platform, 0, &udp_socket);
       if (ErrKindNone != err_udp.kind) {
         log_err(&logger, "failed to open UDP multicast socket", err_udp);
         return 1;
@@ -211,13 +214,14 @@ int main(i32 argc, char *argv[]) {
 
     // One datagram, and nothing to get on with until it is out.
     {
-      IoOnce once = {0};
-      io_once_init(&once);
+      PlatformOnce once = {0};
+      platform_once_init(&once);
 
-      Error err_sendto = io->send_to(io, &once.completion, udp_socket, lsd_addr,
-                                     udp_msg, io_once_on_done);
+      Error err_sendto =
+          platform->send_to(platform, &once.completion, udp_socket, lsd_addr,
+                            udp_msg, platform_once_on_done);
       if (ErrKindNone == err_sendto.kind) {
-        err_sendto = io_once_wait(io, &once);
+        err_sendto = platform_once_wait(platform, &once);
       }
       if (ErrKindNone != err_sendto.kind) {
         log_err(&logger, "failed to send UDP multicast message", err_sendto);
@@ -235,9 +239,9 @@ int main(i32 argc, char *argv[]) {
         .info_hash = bytes_make(info_hash, TORRENT_INFO_HASH_LEN),
         .log_level_mask = LogLevelError | LogLevelInfo | LogLevelDebug,
     };
-    IoServer server = {0};
-    Error err_listen = io_listen_and_serve_tcp_ipv4(
-        io, &server, &ctx, listen_addr, &logger, torrent_peer_on_accept);
+    PlatformServer server = {0};
+    Error err_listen = platform_listen_and_serve_tcp_ipv4(
+        platform, &server, &ctx, listen_addr, &logger, torrent_peer_on_accept);
     if (ErrKindNone != err_listen.kind) {
       log_err(&logger, "failed to listen and serve", err_listen);
       return 1;
@@ -247,17 +251,18 @@ int main(i32 argc, char *argv[]) {
     // accepted, every byte read and every hang-up is a callback reached from
     // these few lines. It returns when the listener cannot go on.
     //
-    // Not `io_run_until`, which waits a fixed tick: a turn here is as long as
-    // the nearest peer deadline, so a keep-alive goes out when it is due and a
-    // loop with nothing to do wakes a handful of times a minute rather than ten
-    // times a second. `torrent_peers_deadlines_run` is where the deciding
-    // happens -- the loop only says when.
+    // Not `platform_run_until`, which waits a fixed tick: a turn here is as
+    // long as the nearest peer deadline, so a keep-alive goes out when it is
+    // due and a loop with nothing to do wakes a handful of times a minute
+    // rather than ten times a second. `torrent_peers_deadlines_run` is where
+    // the deciding happens -- the loop only says when.
     Error err_run = {.kind = ErrKindNone};
     while (!server.done) {
-      const u64 now_ns = io->monotonic_ns(io);
-      const u64 earliest = torrent_peers_deadlines_run(&ctx, io, now_ns);
+      const u64 now_ns = platform->monotonic_ns(platform);
+      const u64 earliest = torrent_peers_deadlines_run(&ctx, platform, now_ns);
 
-      err_run = io->run_for_ns(io, torrent_peers_wait_ns(earliest, now_ns));
+      err_run = platform->run_for_ns(platform,
+                                     torrent_peers_wait_ns(earliest, now_ns));
       if (ErrKindNone != err_run.kind) {
         break;
       }
@@ -280,7 +285,8 @@ int main(i32 argc, char *argv[]) {
 
     Bytes input = {0};
 
-    err = io_map_file_blocking(io, file_path, FileOpenOptionsReadOnly, &input);
+    err = platform_map_file_blocking(platform, file_path,
+                                     FileOpenOptionsReadOnly, &input);
     if (ErrKindNone != err.kind) {
       log_err(&logger, "failed to open file", err);
       return 1;
@@ -300,7 +306,7 @@ int main(i32 argc, char *argv[]) {
       return 1;
     }
 
-    printf("[D001] %lu\n", spans_count);
+    printf("[D001] %zu\n", spans_count);
 
     for (usize i = 0; i < spans_count; i++) {
       otel_span_log(&spans[i], &logger);
@@ -318,7 +324,7 @@ int main(i32 argc, char *argv[]) {
     const usize port = strtoull(port_s, &port_end, 10);
     const Ipv4Addr listen_addr = {.port = (u16)port};
     Arena http_arena = {0};
-    assert(ErrKindNone == arena_valloc(env, 5ULL * GiB, &http_arena).kind);
+    assert(ErrKindNone == arena_valloc(platform, 5ULL * GiB, &http_arena).kind);
 
     HttpServer ctx = {0};
     {
@@ -330,9 +336,9 @@ int main(i32 argc, char *argv[]) {
         return 1;
       }
     }
-    IoServer server = {0};
-    Error err_listen = io_listen_and_serve_tcp_ipv4(
-        io, &server, &ctx, listen_addr, &logger, otel_on_accept);
+    PlatformServer server = {0};
+    Error err_listen = platform_listen_and_serve_tcp_ipv4(
+        platform, &server, &ctx, listen_addr, &logger, otel_on_accept);
     if (ErrKindNone != err_listen.kind) {
       log_err(&logger, "failed to listen and serve", err_listen);
       return 1;
@@ -343,7 +349,7 @@ int main(i32 argc, char *argv[]) {
       // const u64 now_ns = io->monotonic_ns(io);
       // const u64 earliest = http_server_deadlines_run(&ctx, io, now_ns);
 
-      err_run = io->run_for_ns(io, 1000 * 1000 * 1000 /* FIXME */);
+      err_run = platform->run_for_ns(platform, 1000 * 1000 * 1000 /* FIXME */);
       if (ErrKindNone != err_run.kind) {
         break;
       }

@@ -10,8 +10,7 @@
 // while the callbacks are running.
 #define KQUEUE_MAX_EVENTS 1024
 
-
-// The Darwin `IO`: one kqueue, one thread, and no queue of its own.
+// The Darwin `Platform`: one kqueue, one thread, and no queue of its own.
 //
 // A submitted operation is not tried in the call that submits it -- a callback
 // would then run nested inside whatever submitted the operation, and a chain of
@@ -44,11 +43,11 @@
 // which kqueue returns untouched. Which of the two a descriptor came out of is
 // what `darwin_event_fd` answers.
 typedef struct {
-  // Must be first: an `IoDarwin *` is an `IO *`, which is what lets a slot
-  // reached through the vtable find its way back to this. `IO` has no `ctx`
-  // field for the same reason -- the implementation is the object, and a
+  // Must be first: an `PlatformDarwin *` is a `Platform *`, which is what lets
+  // a slot reached through the vtable find its way back to this. This does not
+  // use `ctx` for the same reason -- the implementation is the object, and a
   // pointer from it to itself would be one more thing to keep in step.
-  IO io;
+  Platform platform;
 
   i32 kqueue_fd;
 
@@ -64,28 +63,28 @@ typedef struct {
   // Operations the kernel is holding: submitted, not yet reported. A wait with
   // none of them can only run the timeout down, so the loop does not make one.
   usize in_flight;
-} IoDarwin;
-
+} PlatformDarwin;
 
 // Append one change. The only way anything reaches the kernel, so it is also
 // the one place the count of what is in flight goes up.
 __attribute__((warn_unused_result)) static Error
-darwin_change_push(IoDarwin *io_darwin, uintptr_t ident, i16 filter, u32 fflags,
-                   i64 data, IoCompletion *completion) {
-  assert(io_darwin);
+darwin_change_push(PlatformDarwin *platform_darwin, uintptr_t ident, i16 filter,
+                   u32 fflags, i64 data, PlatformCompletion *completion) {
+  assert(platform_darwin);
   assert(completion);
 
-  const usize cap =
-      sizeof(io_darwin->changelist) / sizeof(io_darwin->changelist[0]);
-  if (io_darwin->changelist_len >= cap) {
+  const usize cap = sizeof(platform_darwin->changelist) /
+                    sizeof(platform_darwin->changelist[0]);
+  if (platform_darwin->changelist_len >= cap) {
     // Nothing was submitted. `ErrKindAgain` and not `ErrKindOOM`: the caller is
     // not out of memory, it is early, and the same call works once the loop has
     // been turned.
     return (Error){.kind = ErrKindAgain};
   }
 
-  struct kevent *const change = &io_darwin->changelist[io_darwin->changelist_len];
-  io_darwin->changelist_len += 1;
+  struct kevent *const change =
+      &platform_darwin->changelist[platform_darwin->changelist_len];
+  platform_darwin->changelist_len += 1;
 
   *change = (struct kevent){0};
   change->ident = ident;
@@ -99,52 +98,54 @@ darwin_change_push(IoDarwin *io_darwin, uintptr_t ident, i16 filter, u32 fflags,
   change->data = data;
   change->udata = completion;
 
-  io_darwin->in_flight += 1;
+  platform_darwin->in_flight += 1;
 
   return (Error){.kind = ErrKindNone};
 }
 
 // "Try this operation on the next turn of the loop, on this descriptor." Keyed
 // on the completion, with the descriptor in `data`, for the reasons in the
-// comment on `IoDarwin`. `fd` is -1 for an operation that has none.
+// comment on `PlatformDarwin`. `fd` is -1 for an operation that has none.
 __attribute__((warn_unused_result)) static Error
-darwin_submit(IoDarwin *io_darwin, IoCompletion *completion, i32 fd) {
-  assert(io_darwin);
+darwin_submit(PlatformDarwin *platform_darwin, PlatformCompletion *completion,
+              i32 fd) {
+  assert(platform_darwin);
   assert(completion);
   assert(completion->cb);
 
-  return darwin_change_push(io_darwin, (uintptr_t)completion, EVFILT_USER,
+  return darwin_change_push(platform_darwin, (uintptr_t)completion, EVFILT_USER,
                             NOTE_TRIGGER, (i64)fd, completion);
 }
 
 // "Say when this descriptor is worth trying again."
 __attribute__((warn_unused_result)) static Error
-darwin_arm(IoDarwin *io_darwin, IoCompletion *completion, i32 fd) {
-  assert(io_darwin);
+darwin_arm(PlatformDarwin *platform_darwin, PlatformCompletion *completion,
+           i32 fd) {
+  assert(platform_darwin);
   assert(completion);
   assert(fd >= 0);
-  assert(unix_io_action_can_wait(completion->action.kind));
+  assert(unix_platform_action_can_wait(completion->action.kind));
 
   i16 filter = 0;
   switch (completion->action.kind) {
-  case IoActionKindRead:
-  case IoActionKindAccept:
+  case PlatformActionKindRead:
+  case PlatformActionKindAccept:
     filter = EVFILT_READ;
     break;
 
   // A connect that is still going finishes by making the socket writable, so
   // it waits on the same filter as a write.
-  case IoActionKindWrite:
-  case IoActionKindConnect:
-  case IoActionKindSendTo:
+  case PlatformActionKindWrite:
+  case PlatformActionKindConnect:
+  case PlatformActionKindSendTo:
     filter = EVFILT_WRITE;
     break;
 
-  case IoActionKindNone:
-  case IoActionKindOpen:
-  case IoActionKindClose:
-  case IoActionKindFileSize:
-  case IoActionKindRemoveFile:
+  case PlatformActionKindNone:
+  case PlatformActionKindOpen:
+  case PlatformActionKindClose:
+  case PlatformActionKindFileSize:
+  case PlatformActionKindRemoveFile:
     assert(0 && "unreachable");
     break;
   }
@@ -152,7 +153,7 @@ darwin_arm(IoDarwin *io_darwin, IoCompletion *completion, i32 fd) {
 
   // Keyed on the descriptor, which is what a readiness event reports back, so
   // `data` has nothing to carry here.
-  return darwin_change_push(io_darwin, (uintptr_t)(u32)fd, filter, 0, 0,
+  return darwin_change_push(platform_darwin, (uintptr_t)(u32)fd, filter, 0, 0,
                             completion);
 }
 
@@ -175,18 +176,18 @@ darwin_event_fd(const struct kevent *event) {
 // from, so "the callback runs from inside `run_for_ns`" holds for an operation
 // that was ready the moment it was submitted just as much as for one that
 // waited on a peer.
-static void darwin_advance(IoDarwin *io_darwin, IoCompletion *completion,
-                           i32 fd) {
-  assert(io_darwin);
+static void darwin_advance(PlatformDarwin *platform_darwin,
+                           PlatformCompletion *completion, i32 fd) {
+  assert(platform_darwin);
   assert(completion);
   assert(completion->cb);
 
   usize res = 0;
-  Error err = unix_io_perform(completion, fd, &res);
+  Error err = unix_platform_perform(completion, fd, &res);
 
   if (ErrKindAgain == err.kind &&
-      unix_io_action_can_wait(completion->action.kind)) {
-    const Error err_arm = darwin_arm(io_darwin, completion, fd);
+      unix_platform_action_can_wait(completion->action.kind)) {
+    const Error err_arm = darwin_arm(platform_darwin, completion, fd);
     if (ErrKindNone == err_arm.kind) {
       return;
     }
@@ -201,17 +202,17 @@ static void darwin_advance(IoDarwin *io_darwin, IoCompletion *completion,
   completion->cb(completion, err, res);
 }
 
-__attribute__((warn_unused_result)) static Error darwin_run_for_ns(IO *io,
-                                                                  usize ns) {
-  assert(io);
+__attribute__((warn_unused_result)) static Error
+darwin_run_for_ns(Platform *platform, usize ns) {
+  assert(platform);
 
-  IoDarwin *const io_darwin = (IoDarwin *)io;
+  PlatformDarwin *const platform_darwin = (PlatformDarwin *)platform;
 
   // Nothing submitted and nothing outstanding, so a wait could only run the
   // timeout down. Returning instead leaves the caller to decide what to do with
   // the time.
-  if (0 == io_darwin->in_flight) {
-    assert(0 == io_darwin->changelist_len);
+  if (0 == platform_darwin->in_flight) {
+    assert(0 == platform_darwin->changelist_len);
     return (Error){.kind = ErrKindNone};
   }
 
@@ -221,16 +222,17 @@ __attribute__((warn_unused_result)) static Error darwin_run_for_ns(IO *io,
       .tv_nsec = (long)(ns % Second),
   };
 
-  assert(io_darwin->changelist_len <= INT_MAX);
+  assert(platform_darwin->changelist_len <= INT_MAX);
   const i32 ret =
-      kevent(io_darwin->kqueue_fd, io_darwin->changelist,
-             (i32)io_darwin->changelist_len, events, KQUEUE_MAX_EVENTS, &timeout);
+      kevent(platform_darwin->kqueue_fd, platform_darwin->changelist,
+             (i32)platform_darwin->changelist_len, events, KQUEUE_MAX_EVENTS,
+             &timeout);
 
   // The changes were applied whatever the wait went on to do, and a change
   // applied twice would be a second registration for an operation that has
   // one. Cleared before the callbacks below run, so that what they submit
   // accumulates for the next turn rather than being sent again with it.
-  io_darwin->changelist_len = 0;
+  platform_darwin->changelist_len = 0;
 
   if (-1 == ret) {
     // A signal during the wait reported nothing and broke nothing: the next
@@ -247,14 +249,14 @@ __attribute__((warn_unused_result)) static Error darwin_run_for_ns(IO *io,
   for (i32 i = 0; i < ret; i++) {
     const struct kevent *const event = &events[i];
 
-    IoCompletion *const completion = event->udata;
+    PlatformCompletion *const completion = event->udata;
     assert(completion);
     assert(completion->cb);
 
     // `EV_ONESHOT`, so the registration this event came from is already gone,
     // whether or not the operation finishes here.
-    assert(io_darwin->in_flight > 0);
-    io_darwin->in_flight -= 1;
+    assert(platform_darwin->in_flight > 0);
+    platform_darwin->in_flight -= 1;
 
     // A change the kernel would not accept comes back as an event rather than
     // as a failed call, with the reason in `data`: a descriptor that was closed
@@ -266,7 +268,7 @@ __attribute__((warn_unused_result)) static Error darwin_run_for_ns(IO *io,
       continue;
     }
 
-    darwin_advance(io_darwin, completion, darwin_event_fd(event));
+    darwin_advance(platform_darwin, completion, darwin_event_fd(event));
   }
 
   return (Error){.kind = ErrKindNone};
@@ -280,50 +282,37 @@ __attribute__((warn_unused_result)) static Error darwin_run_for_ns(IO *io,
 // say reaches the callback.
 
 __attribute__((warn_unused_result)) static Error
-darwin_open(IO *io, IoCompletion *completion, Bytes path,
-            FileOpenOptions options, IoCallback cb) {
-  assert(io);
+darwin_open(Platform *platform, PlatformCompletion *completion, Bytes path,
+            FileOpenOptions options, PlatformCallback cb) {
+  assert(platform);
   assert(completion);
   assert(cb);
 
   completion->cb = cb;
-  completion->action = (IoAction){.kind = IoActionKindOpen,
-                                  .v.open = {.path = path, .options = options}};
+  completion->action =
+      (PlatformAction){.kind = PlatformActionKindOpen,
+                       .v.open = {.path = path, .options = options}};
 
-  return darwin_submit((IoDarwin *)io, completion, -1);
+  return darwin_submit((PlatformDarwin *)platform, completion, -1);
 }
 
 __attribute__((warn_unused_result)) static Error
-darwin_close(IO *io, IoCompletion *completion, i32 fd, IoCallback cb) {
-  assert(io);
+darwin_close(Platform *platform, PlatformCompletion *completion, i32 fd,
+             PlatformCallback cb) {
+  assert(platform);
   assert(completion);
   assert(cb);
 
   completion->cb = cb;
-  completion->action = (IoAction){.kind = IoActionKindClose};
+  completion->action = (PlatformAction){.kind = PlatformActionKindClose};
 
-  return darwin_submit((IoDarwin *)io, completion, fd);
+  return darwin_submit((PlatformDarwin *)platform, completion, fd);
 }
 
 __attribute__((warn_unused_result)) static Error
-darwin_read(IO *io, IoCompletion *completion, i32 fd, Bytes data,
-            IoCallback cb) {
-  assert(io);
-  assert(completion);
-  assert(cb);
-  assert(data.data);
-  assert(data.len > 0);
-
-  completion->cb = cb;
-  completion->action = (IoAction){.kind = IoActionKindRead, .v.read.data = data};
-
-  return darwin_submit((IoDarwin *)io, completion, fd);
-}
-
-__attribute__((warn_unused_result)) static Error
-darwin_write(IO *io, IoCompletion *completion, i32 fd, Bytes data,
-             IoCallback cb) {
-  assert(io);
+darwin_read(Platform *platform, PlatformCompletion *completion, i32 fd,
+            Bytes data, PlatformCallback cb) {
+  assert(platform);
   assert(completion);
   assert(cb);
   assert(data.data);
@@ -331,117 +320,133 @@ darwin_write(IO *io, IoCompletion *completion, i32 fd, Bytes data,
 
   completion->cb = cb;
   completion->action =
-      (IoAction){.kind = IoActionKindWrite, .v.write.data = data};
+      (PlatformAction){.kind = PlatformActionKindRead, .v.read.data = data};
 
-  return darwin_submit((IoDarwin *)io, completion, fd);
+  return darwin_submit((PlatformDarwin *)platform, completion, fd);
 }
 
 __attribute__((warn_unused_result)) static Error
-darwin_accept(IO *io, IoCompletion *completion, i32 listen_socket,
-              IoCallback cb) {
-  assert(io);
-  assert(completion);
-  assert(cb);
-
-  completion->cb = cb;
-  completion->action = (IoAction){.kind = IoActionKindAccept};
-
-  return darwin_submit((IoDarwin *)io, completion, listen_socket);
-}
-
-__attribute__((warn_unused_result)) static Error
-darwin_connect(IO *io, IoCompletion *completion, i32 fd, Ipv4Addr addr,
-               IoCallback cb) {
-  assert(io);
-  assert(completion);
-  assert(cb);
-
-  completion->cb = cb;
-  completion->action =
-      (IoAction){.kind = IoActionKindConnect, .v.connect.addr = addr};
-
-  return darwin_submit((IoDarwin *)io, completion, fd);
-}
-
-__attribute__((warn_unused_result)) static Error
-darwin_send_to(IO *io, IoCompletion *completion, i32 fd, Ipv4Addr addr,
-               Bytes data, IoCallback cb) {
-  assert(io);
+darwin_write(Platform *platform, PlatformCompletion *completion, i32 fd,
+             Bytes data, PlatformCallback cb) {
+  assert(platform);
   assert(completion);
   assert(cb);
   assert(data.data);
   assert(data.len > 0);
 
   completion->cb = cb;
-  completion->action = (IoAction){.kind = IoActionKindSendTo,
-                                  .v.send_to = {.addr = addr, .data = data}};
+  completion->action =
+      (PlatformAction){.kind = PlatformActionKindWrite, .v.write.data = data};
 
-  return darwin_submit((IoDarwin *)io, completion, fd);
+  return darwin_submit((PlatformDarwin *)platform, completion, fd);
 }
 
 __attribute__((warn_unused_result)) static Error
-darwin_file_size(IO *io, IoCompletion *completion, i32 fd, IoCallback cb) {
-  assert(io);
+darwin_accept(Platform *platform, PlatformCompletion *completion,
+              i32 listen_socket, PlatformCallback cb) {
+  assert(platform);
   assert(completion);
   assert(cb);
 
   completion->cb = cb;
-  completion->action = (IoAction){.kind = IoActionKindFileSize};
+  completion->action = (PlatformAction){.kind = PlatformActionKindAccept};
 
-  return darwin_submit((IoDarwin *)io, completion, fd);
+  return darwin_submit((PlatformDarwin *)platform, completion, listen_socket);
 }
 
 __attribute__((warn_unused_result)) static Error
-darwin_remove_file(IO *io, IoCompletion *completion, Bytes path,
-                   IoCallback cb) {
-  assert(io);
+darwin_connect(Platform *platform, PlatformCompletion *completion, i32 fd,
+               Ipv4Addr addr, PlatformCallback cb) {
+  assert(platform);
   assert(completion);
   assert(cb);
+
+  completion->cb = cb;
+  completion->action = (PlatformAction){.kind = PlatformActionKindConnect,
+                                        .v.connect.addr = addr};
+
+  return darwin_submit((PlatformDarwin *)platform, completion, fd);
+}
+
+__attribute__((warn_unused_result)) static Error
+darwin_send_to(Platform *platform, PlatformCompletion *completion, i32 fd,
+               Ipv4Addr addr, Bytes data, PlatformCallback cb) {
+  assert(platform);
+  assert(completion);
+  assert(cb);
+  assert(data.data);
+  assert(data.len > 0);
 
   completion->cb = cb;
   completion->action =
-      (IoAction){.kind = IoActionKindRemoveFile, .v.remove_file.path = path};
+      (PlatformAction){.kind = PlatformActionKindSendTo,
+                       .v.send_to = {.addr = addr, .data = data}};
 
-  return darwin_submit((IoDarwin *)io, completion, -1);
+  return darwin_submit((PlatformDarwin *)platform, completion, fd);
 }
 
 __attribute__((warn_unused_result)) static Error
-darwin_io_kqueue_make(Arena *arena, const Env *env, IO **dst) {
+darwin_file_size(Platform *platform, PlatformCompletion *completion, i32 fd,
+                 PlatformCallback cb) {
+  assert(platform);
+  assert(completion);
+  assert(cb);
+
+  completion->cb = cb;
+  completion->action = (PlatformAction){.kind = PlatformActionKindFileSize};
+
+  return darwin_submit((PlatformDarwin *)platform, completion, fd);
+}
+
+__attribute__((warn_unused_result)) static Error
+darwin_remove_file(Platform *platform, PlatformCompletion *completion,
+                   Bytes path, PlatformCallback cb) {
+  assert(platform);
+  assert(completion);
+  assert(cb);
+
+  completion->cb = cb;
+  completion->action = (PlatformAction){.kind = PlatformActionKindRemoveFile,
+                                        .v.remove_file.path = path};
+
+  return darwin_submit((PlatformDarwin *)platform, completion, -1);
+}
+
+__attribute__((warn_unused_result)) static Error
+darwin_platform_kqueue_make(Arena *arena, Platform **dst) {
   assert(arena);
-  assert(env);
   assert(dst);
 
-  IoDarwin *const io =
-      arena_alloc(arena, __alignof__(IoDarwin), sizeof(IoDarwin), 1);
-  if (!io) {
+  PlatformDarwin *const platform_darwin = arena_alloc(
+      arena, __alignof__(PlatformDarwin), sizeof(PlatformDarwin), 1);
+  if (!platform_darwin) {
     return (Error){.kind = ErrKindOOM};
   }
   // The arena does not zero what it hands out, and an empty changelist is a
   // length of zero.
-  memset(io, 0, sizeof(*io));
+  memset(platform_darwin, 0, sizeof(*platform_darwin));
 
   const i32 ret = kqueue();
   if (-1 == ret) {
     return unix_error_from_errno(errno);
   }
 
-  io->kqueue_fd = ret;
-  io->io = (IO){
-      .env = env,
-      .run_for_ns = darwin_run_for_ns,
-      .monotonic_ns = unix_monotonic_ns,
-      .open = darwin_open,
-      .close = darwin_close,
-      .read = darwin_read,
-      .write = darwin_write,
-      .accept = darwin_accept,
-      .connect = darwin_connect,
-      .send_to = darwin_send_to,
-      .file_size = darwin_file_size,
-      .remove_file = darwin_remove_file,
-  };
+  platform_darwin->kqueue_fd = ret;
+  // The slots that never wait are the ones `env_platform_make` fills in.
+  platform_darwin->platform = *env_platform_make();
+  platform_darwin->platform.run_for_ns = darwin_run_for_ns;
+  platform_darwin->platform.monotonic_ns = unix_monotonic_ns;
+  platform_darwin->platform.open = darwin_open;
+  platform_darwin->platform.close = darwin_close;
+  platform_darwin->platform.read = darwin_read;
+  platform_darwin->platform.write = darwin_write;
+  platform_darwin->platform.accept = darwin_accept;
+  platform_darwin->platform.connect = darwin_connect;
+  platform_darwin->platform.send_to = darwin_send_to;
+  platform_darwin->platform.file_size = darwin_file_size;
+  platform_darwin->platform.remove_file = darwin_remove_file;
 
-  *dst = &io->io;
+  *dst = &platform_darwin->platform;
 
   return (Error){.kind = ErrKindNone};
 }
@@ -450,19 +455,18 @@ darwin_io_kqueue_make(Arena *arena, const Env *env, IO **dst) {
 // for it by name. A Linux backend named here would be a lie, and a caller that
 // asked for one gets told so rather than silently getting kqueue.
 __attribute__((warn_unused_result)) static Error
-io_platform_make(Arena *arena, const Env *env, IoBackend backend, IO **dst) {
+platform_make(Arena *arena, PlatformBackend backend, Platform **dst) {
   assert(arena);
-  assert(env);
   assert(dst);
 
   switch (backend) {
-  case IoBackendDefault:
-  case IoBackendKqueue:
-    return darwin_io_kqueue_make(arena, env, dst);
+  case PlatformBackendDefault:
+  case PlatformBackendKqueue:
+    return darwin_platform_kqueue_make(arena, dst);
 
-  case IoBackendEpoll:
-  case IoBackendIoUring:
-  case IoBackendIocp:
+  case PlatformBackendEpoll:
+  case PlatformBackendIoUring:
+  case PlatformBackendIocp:
     return (Error){.kind = ErrKindUnsupported};
   }
 

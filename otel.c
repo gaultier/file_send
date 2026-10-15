@@ -58,7 +58,7 @@ otel_parse_protobuf_traces_data(Bytes input, OtelSpan *spans,
 
 static void otel_span_log(const OtelSpan *span, const Logger *logger);
 
-static void http_handler_on_close(IoCompletion *completion, Error err,
+static void http_handler_on_close(PlatformCompletion *completion, Error err,
                                   usize res) {
   assert(completion);
   (void)err;
@@ -78,11 +78,11 @@ static void http_handler_on_close(IoCompletion *completion, Error err,
 // Ends the connection. `handler` is not to be used after.
 static void otel_handler_close(HttpHandler *handler) {
   assert(handler);
-  IO *const io = handler->io;
-  assert(io);
+  Platform *const platform = handler->platform;
+  assert(platform);
 
-  const Error err = io->close(io, &handler->completion, handler->socket,
-                              http_handler_on_close);
+  const Error err = platform->close(platform, &handler->completion,
+                                    handler->socket, http_handler_on_close);
   if (ErrKindNone == err.kind) {
     return;
   }
@@ -90,11 +90,11 @@ static void otel_handler_close(HttpHandler *handler) {
   // The only release outside `http_handler_on_close`: no callback is coming,
   // so clean up now.
   log_err(&handler->logger, "failed to submit close", err);
-  (void)io->env->close_socket(io->env, handler->socket);
+  (void)platform->close_socket(platform, handler->socket);
   http_handler_release(handler);
 }
 
-static void otel_on_write(IoCompletion *completion, Error write_err,
+static void otel_on_write(PlatformCompletion *completion, Error write_err,
                           usize write_count) {
   assert(completion);
   assert(completion->ctx);
@@ -109,14 +109,14 @@ static void otel_on_write(IoCompletion *completion, Error write_err,
   otel_handler_close(handler);
 }
 
-static void otel_on_read(IoCompletion *completion, Error read_err,
+static void otel_on_read(PlatformCompletion *completion, Error read_err,
                          usize read_count) {
   assert(completion);
   assert(completion->ctx);
 
   HttpHandler *const handler = completion->ctx;
-  IO *const io = handler->io;
-  assert(io);
+  Platform *const platform = handler->platform;
+  assert(platform);
 
   if (ErrKindNone != read_err.kind) {
     log(&handler->logger, LogLevelError, "read error: %s",
@@ -151,8 +151,8 @@ static void otel_on_read(IoCompletion *completion, Error read_err,
       return;
     }
 
-    err = io->read(io, &handler->completion, handler->socket,
-                   bytes_buffer_space_bytes(handler->recv), otel_on_read);
+    err = platform->read(platform, &handler->completion, handler->socket,
+                         bytes_buffer_space_bytes(handler->recv), otel_on_read);
     if (ErrKindNone != err.kind) {
       log_err(&handler->logger, "failed to read", err);
       otel_handler_close(handler);
@@ -207,8 +207,8 @@ static void otel_on_read(IoCompletion *completion, Error read_err,
       &handler->resp,
       bytes_from_cstr("HTTP/1.1 200\r\nConnection:Close\r\n\r\nHello")));
 
-  err = io->write(io, &handler->completion, handler->socket,
-                  bytes_buffer_to_bytes(handler->resp), otel_on_write);
+  err = platform->write(platform, &handler->completion, handler->socket,
+                        bytes_buffer_to_bytes(handler->resp), otel_on_write);
   if (ErrKindNone != err.kind) {
     log_err(&handler->logger, "failed to write", err);
     otel_handler_close(handler);
@@ -216,9 +216,9 @@ static void otel_on_read(IoCompletion *completion, Error read_err,
   }
 }
 
-static void otel_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
+static void otel_on_accept(Platform *platform, void *vctx, Ipv4Addr accept_addr,
                            i32 accept_socket) {
-  assert(io);
+  assert(platform);
   assert(vctx);
   HttpServer *const server = vctx;
 
@@ -226,17 +226,17 @@ static void otel_on_accept(IO *io, void *vctx, Ipv4Addr accept_addr,
   if (!handler) {
     log(&server->logger, LogLevelError,
         "backpressure: no available pool slot for request");
-    (void)io->env->close_socket(io->env, accept_socket);
+    (void)platform->close_socket(platform, accept_socket);
     return;
   }
 
-  http_handler_init(handler, server, io, accept_addr, accept_socket);
+  http_handler_init(handler, server, platform, accept_addr, accept_socket);
 
   log(&handler->logger, LogLevelInfo, "accepted");
 
   const Error err =
-      io->read(io, &handler->completion, accept_socket,
-               bytes_buffer_space_bytes(handler->recv), otel_on_read);
+      platform->read(platform, &handler->completion, accept_socket,
+                     bytes_buffer_space_bytes(handler->recv), otel_on_read);
   if (ErrKindNone != err.kind) {
     log_err(&handler->logger, "failed to read", err);
     otel_handler_close(handler);

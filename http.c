@@ -195,9 +195,9 @@ typedef struct {
   Logger logger;
   i32 socket;
   Arena arena;
-  IO *io;
+  Platform *platform;
   HttpServer *server;
-  IoCompletion completion;
+  PlatformCompletion completion;
   BytesBuffer recv;
 
   HttpHeader *headers;
@@ -209,7 +209,7 @@ typedef struct {
 
 struct HttpServer {
   Logger logger;
-  const Env *env;
+  Platform *platform;
 
   Pool handler_pool;
   Pool memory_blocks_pool;
@@ -219,13 +219,13 @@ struct HttpServer {
 
 __attribute__((warn_unused_result)) static Error
 http_server_init(HttpServer *server, Arena arena, usize inflight_requests_max,
-                 u32 log_level_mask, const Env *env) {
+                 u32 log_level_mask, Platform *platform) {
   assert(server);
   assert(inflight_requests_max > 0);
 
   *server = (HttpServer){
       .logger = logger_make(log_level_mask, (Bytes){0}),
-      .env = env,
+      .platform = platform,
   };
 
   Error err = pool_make(&server->handler_pool, &arena, sizeof(HttpHandler),
@@ -243,8 +243,8 @@ http_server_init(HttpServer *server, Arena arena, usize inflight_requests_max,
   return (Error){.kind = ErrKindNone};
 }
 
-static void http_handler_init(HttpHandler *handler, HttpServer *server, IO *io,
-                              Ipv4Addr addr, i32 socket) {
+static void http_handler_init(HttpHandler *handler, HttpServer *server,
+                              Platform *platform, Ipv4Addr addr, i32 socket) {
   assert(handler);
 
   char log_prefix[32] = {0};
@@ -258,7 +258,7 @@ static void http_handler_init(HttpHandler *handler, HttpServer *server, IO *io,
       logger_make(server->logger.level_mask, bytes_from_cstr(log_prefix));
   handler->socket = socket;
   handler->server = server;
-  handler->io = io;
+  handler->platform = platform;
   handler->completion.ctx = handler;
   u8 *const handler_memory = pool_acquire(&server->memory_blocks_pool);
   assert(handler_memory);
@@ -470,7 +470,7 @@ http_parse_resp_status_line(Bytes src, HttpResponseStatusLine *res,
   return (Error){0};
 }
 
-__attribute__((warn_unused_result)) static Error
+__attribute__((unused, warn_unused_result)) static Error
 http_parse_resp(Bytes src, HttpResponseStatusLine *dst_status_line,
                 HttpHeader *dst_headers, usize *dst_headers_len,
                 usize headers_cap, usize *dst_advanced) {

@@ -95,8 +95,8 @@ __attribute__((warn_unused_result)) static Error unix_error_from_errno(i32 e) {
 // On success `*res` is the mapping; on failure it is left alone and the
 // `errno` `mmap` set is mapped onto an `Error`.
 __attribute__((warn_unused_result)) static Error
-unix_valloc(const Env *env, usize bytes_count, u8 **res) {
-  (void)env;
+unix_valloc(Platform *platform, usize bytes_count, u8 **res) {
+  (void)platform;
 
   assert(bytes_count > 0);
   assert(res);
@@ -113,8 +113,8 @@ unix_valloc(const Env *env, usize bytes_count, u8 **res) {
 }
 
 __attribute__((warn_unused_result)) static usize
-unix_get_page_size(const Env *env) {
-  (void)env;
+unix_get_page_size(Platform *platform) {
+  (void)platform;
 
   const i64 res = sysconf(_SC_PAGE_SIZE);
   assert(-1 != res && "unreachable");
@@ -123,8 +123,8 @@ unix_get_page_size(const Env *env) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_vprotect_none(const Env *env, void *ptr, usize size) {
-  (void)env;
+unix_vprotect_none(Platform *platform, void *ptr, usize size) {
+  (void)platform;
 
   if (-1 == mprotect(ptr, size, PROT_NONE)) {
     return unix_error_from_errno(errno);
@@ -133,8 +133,8 @@ unix_vprotect_none(const Env *env, void *ptr, usize size) {
   return (Error){.kind = ErrKindNone};
 }
 
-// Every descriptor that reaches `IO` is non-blocking. That is not a tuning
-// choice: `IO` waits for readiness and then retries the syscall, which only
+// Every descriptor that reaches the loop is non-blocking. That is not a tuning
+// choice: the loop waits for readiness and then retries the syscall, which only
 // works if the retry can answer `EAGAIN`. One blocking descriptor would park
 // the single thread that runs the loop on the first peer to go quiet, and with
 // it every other connection.
@@ -152,8 +152,8 @@ __attribute__((warn_unused_result)) static Error unix_set_nonblocking(i32 fd) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_socket(const Env *env, SocketDomain domain, SocketType type, i32 *fd) {
-  (void)env;
+unix_socket(Platform *platform, SocketDomain domain, SocketType type, i32 *fd) {
+  (void)platform;
 
   assert(fd);
 
@@ -198,8 +198,8 @@ unix_socket(const Env *env, SocketDomain domain, SocketType type, i32 *fd) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_listen(const Env *env, i32 fd, i32 backlog) {
-  (void)env;
+unix_listen(Platform *platform, i32 fd, i32 backlog) {
+  (void)platform;
 
   const i32 ret = listen(fd, backlog);
 
@@ -261,9 +261,9 @@ unix_open(Bytes path, FileOpenOptions options, i32 *fd) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_tcp_bind_ipv4(const Env *env, i32 listen_socket, Ipv4Addr *addr) {
+unix_tcp_bind_ipv4(Platform *platform, i32 listen_socket, Ipv4Addr *addr) {
 
-  (void)env;
+  (void)platform;
   assert(addr);
 
   const Ipv4Addr requested = *addr;
@@ -338,8 +338,8 @@ unix_accept(i32 listen_socket, i32 *dst_accept_socket,
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_thread_create(const Env *env, ThreadCallback cb, void *data) {
-  (void)env;
+unix_thread_create(Platform *platform, ThreadCallback cb, void *data) {
+  (void)platform;
 
   assert(cb);
 
@@ -378,8 +378,8 @@ __attribute__((warn_unused_result)) static Error unix_close(i32 fd) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_close_socket(const Env *env, i32 fd) {
-  (void)env;
+unix_close_socket(Platform *platform, i32 fd) {
+  (void)platform;
 
   if (-1 == close(fd)) {
     return unix_error_from_errno(errno);
@@ -389,8 +389,8 @@ unix_close_socket(const Env *env, i32 fd) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_enable_socket_reuse(const Env *env, i32 fd) {
-  (void)env;
+unix_enable_socket_reuse(Platform *platform, i32 fd) {
+  (void)platform;
 
   int val = 1;
   const int ret = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val));
@@ -440,8 +440,8 @@ unix_write(i32 fd, Bytes data, usize *dst_written) {
   return (Error){.kind = ErrKindNone};
 }
 __attribute__((warn_unused_result)) static Error
-unix_udp_multicast_open_ipv4(const Env *env, u32 ipv4, i32 *dst_fd) {
-  (void)env;
+unix_udp_multicast_open_ipv4(Platform *platform, u32 ipv4, i32 *dst_fd) {
+  (void)platform;
 
   assert(dst_fd);
 
@@ -581,8 +581,8 @@ __attribute__((warn_unused_result)) static Error unix_remove_file(Bytes path) {
 }
 
 __attribute__((warn_unused_result)) static usize
-unix_get_process_id(const Env *env) {
-  (void)env;
+unix_get_process_id(Platform *platform) {
+  (void)platform;
 
   // `getpid` cannot fail, and a pid is never negative.
   const i64 res = (i64)getpid();
@@ -592,8 +592,8 @@ unix_get_process_id(const Env *env) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_stdout_silence(const Env *env, i32 *dst_saved) {
-  (void)env;
+unix_stdout_silence(Platform *platform, i32 *dst_saved) {
+  (void)platform;
   assert(dst_saved);
 
   // Anything already buffered belongs on the real stdout, so it has to go out
@@ -628,8 +628,8 @@ unix_stdout_silence(const Env *env, i32 *dst_saved) {
 }
 
 __attribute__((warn_unused_result)) static Error
-unix_stdout_restore(const Env *env, i32 saved) {
-  (void)env;
+unix_stdout_restore(Platform *platform, i32 saved) {
+  (void)platform;
 
   // Whatever the silenced stretch wrote went to `/dev/null` and is of no
   // interest, but the stream still has to be emptied against the descriptor
@@ -649,14 +649,14 @@ unix_stdout_restore(const Env *env, i32 saved) {
   return (Error){.kind = ErrKindNone};
 }
 
-// The mapping half of `io_map_file`. What is left of `unix_map_file`: opening
-// the file and asking how big it is are operations the loop submits now, and
-// this is the part it has no business in, because `mmap` only records what a
-// later page fault will do. Nothing waits, so it belongs to `Env`.
+// The mapping half of `platform_map_file`. What is left of `unix_map_file`:
+// opening the file and asking how big it is are operations the loop submits
+// now, and this is the part it has no business in, because `mmap` only records
+// what a later page fault will do. Nothing waits, so it is not submitted.
 __attribute__((warn_unused_result)) static Error
-unix_map_fd(const Env *env, i32 fd, usize size, FileOpenOptions opts,
+unix_map_fd(Platform *platform, i32 fd, usize size, FileOpenOptions opts,
             Bytes *dst) {
-  (void)env;
+  (void)platform;
   assert(dst);
 
   i32 unix_opts = 0;
@@ -683,27 +683,27 @@ unix_map_fd(const Env *env, i32 fd, usize size, FileOpenOptions opts,
 // what stays in the platform file.
 //
 // A future io_uring backend uses neither of these: there the kernel makes the
-// syscall, so it builds a submission entry out of the same `IoAction` rather
-// than coming through here.
+// syscall, so it builds a submission entry out of the same `PlatformAction`
+// rather than coming through here.
 
 // Can this operation answer `ErrKindAgain`, and so be worth waiting on? An
 // operation on a file answers or fails, and no multiplexer has anything to say
 // about it.
 __attribute__((warn_unused_result)) static bool
-unix_io_action_can_wait(IoActionKind kind) {
+unix_platform_action_can_wait(PlatformActionKind kind) {
   switch (kind) {
-  case IoActionKindRead:
-  case IoActionKindWrite:
-  case IoActionKindAccept:
-  case IoActionKindConnect:
-  case IoActionKindSendTo:
+  case PlatformActionKindRead:
+  case PlatformActionKindWrite:
+  case PlatformActionKindAccept:
+  case PlatformActionKindConnect:
+  case PlatformActionKindSendTo:
     return true;
 
-  case IoActionKindNone:
-  case IoActionKindOpen:
-  case IoActionKindClose:
-  case IoActionKindFileSize:
-  case IoActionKindRemoveFile:
+  case PlatformActionKindNone:
+  case PlatformActionKindOpen:
+  case PlatformActionKindClose:
+  case PlatformActionKindFileSize:
+  case PlatformActionKindRemoveFile:
     return false;
   }
 
@@ -714,7 +714,7 @@ unix_io_action_can_wait(IoActionKind kind) {
 // Try the operation once. Whatever it answers is the answer, `ErrKindAgain`
 // included: it is the backend above that turns that one into a wait.
 __attribute__((warn_unused_result)) static Error
-unix_io_perform(IoCompletion *completion, i32 fd, usize *dst_res) {
+unix_platform_perform(PlatformCompletion *completion, i32 fd, usize *dst_res) {
   assert(completion);
   assert(dst_res);
 
@@ -724,7 +724,7 @@ unix_io_perform(IoCompletion *completion, i32 fd, usize *dst_res) {
   switch (completion->action.kind) {
   // The one operation with no descriptor to act on: it produces one, which is
   // what it reports.
-  case IoActionKindOpen: {
+  case PlatformActionKindOpen: {
     assert(-1 == fd);
     i32 opened = -1;
     err = unix_open(completion->action.v.open.path,
@@ -735,20 +735,20 @@ unix_io_perform(IoCompletion *completion, i32 fd, usize *dst_res) {
     }
   } break;
 
-  case IoActionKindClose:
+  case PlatformActionKindClose:
     err = unix_close(fd);
     break;
 
-  case IoActionKindRead:
+  case PlatformActionKindRead:
     err = unix_read(fd, completion->action.v.read.data, &res);
     break;
 
-  case IoActionKindWrite:
+  case PlatformActionKindWrite:
     err = unix_write(fd, completion->action.v.write.data, &res);
     break;
 
   // `fd` is the listener; what it reports is the connection.
-  case IoActionKindAccept: {
+  case PlatformActionKindAccept: {
     i32 accepted = -1;
     err = unix_accept(fd, &accepted, &completion->action.v.accept.addr);
     if (ErrKindNone == err.kind) {
@@ -757,28 +757,28 @@ unix_io_perform(IoCompletion *completion, i32 fd, usize *dst_res) {
     }
   } break;
 
-  case IoActionKindConnect:
+  case PlatformActionKindConnect:
     err = unix_connect(fd, completion->action.v.connect.addr);
     break;
 
-  case IoActionKindSendTo:
+  case PlatformActionKindSendTo:
     err = unix_udp_send_to_ipv4(fd, completion->action.v.send_to.addr,
                                 completion->action.v.send_to.data, &res);
     break;
 
-  case IoActionKindFileSize:
+  case PlatformActionKindFileSize:
     err = unix_file_size(fd, &res);
     break;
 
   // Works on a name, so it has no descriptor either.
-  case IoActionKindRemoveFile:
+  case PlatformActionKindRemoveFile:
     assert(-1 == fd);
     err = unix_remove_file(completion->action.v.remove_file.path);
     break;
 
   // A completion reported without an action is this code having got a slot
   // wrong, not anything the operating system could have said.
-  case IoActionKindNone:
+  case PlatformActionKindNone:
     assert(0 && "unreachable");
     break;
   }
@@ -795,8 +795,9 @@ unix_io_perform(IoCompletion *completion, i32 fd, usize *dst_res) {
 // clock being set, and a realtime clock stepping back an hour would hold every
 // connection open for an hour. Darwin's is `mach_absolute_time` with the
 // timebase already applied, so there is no `mach_timebase_info` to do by hand.
-__attribute__((warn_unused_result)) static u64 unix_monotonic_ns(IO *io) {
-  (void)io;
+__attribute__((warn_unused_result)) static u64
+unix_monotonic_ns(Platform *platform) {
+  (void)platform;
 
   struct timespec ts = {0};
   // Nothing to report: the clock exists and the pointer is this stack frame's,
@@ -806,12 +807,12 @@ __attribute__((warn_unused_result)) static u64 unix_monotonic_ns(IO *io) {
   return (u64)ts.tv_sec * Second + (u64)ts.tv_nsec;
 }
 
-__attribute__((warn_unused_result)) static const Env *env_platform_make(void) {
-  // A `static` rather than a value handed back: an `IO` holds on to the `Env`
-  // it was made with, and there is one per process to hold on to. The Unix
+__attribute__((warn_unused_result)) static Platform *env_platform_make(void) {
+  // A `static` rather than a value handed back: there is one per process, and
+  // `platform_make` copies it rather than holding on to it. The Unix
   // implementation is stateless, so `ctx` stays null; a test's fake is what it
   // is for.
-  static const Env env = {
+  static Platform platform = {
       .get_page_size = unix_get_page_size,
       .valloc = unix_valloc,
       .vprotect_none = unix_vprotect_none,
@@ -831,5 +832,5 @@ __attribute__((warn_unused_result)) static const Env *env_platform_make(void) {
       .stdout_restore = unix_stdout_restore,
   };
 
-  return &env;
+  return &platform;
 }
