@@ -7,6 +7,7 @@
 #include <netinet/in.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <sys/_endian.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -836,19 +837,30 @@ unix_dns_resolve(Platform *platform, Bytes hostname, u16 port,
   assert(dst_addrs_len);
   assert(dst_addrs_cap > 0);
 
+  const usize max_hostname_len = 4096;
+  if (hostname.len > max_hostname_len) {
+    return (Error){.kind = ErrKindInvalidData};
+  }
+
+  *dst_addrs_len = 0;
+
   struct addrinfo hints = {0};
   hints.ai_socktype = SOCK_STREAM;
   hints.ai_protocol = IPPROTO_TCP;
+  hints.ai_family = AF_INET; // FIXME: Only support IPV4 for now.
 
   struct addrinfo *addr_info = NULL;
-  int res_getaddrinfo = 0;
+
   char hostname_cstr[4096] = {0};
+  assert(sizeof(hostname_cstr) == max_hostname_len);
+
   memcpy(hostname_cstr, hostname.data,
          min(hostname.len, sizeof(hostname_cstr) - 1));
 
   char port_cstr[6] = {0};
   snprintf(port_cstr, sizeof(port_cstr), "%hu", port);
 
+  i32 res_getaddrinfo = 0;
   do {
     res_getaddrinfo = getaddrinfo(hostname_cstr, port_cstr, &hints, &addr_info);
   } while (-1 == res_getaddrinfo && EINTR == errno);
@@ -857,38 +869,48 @@ unix_dns_resolve(Platform *platform, Bytes hostname, u16 port,
     return unix_error_from_errno(errno);
   }
 
-  struct addrinfo *rp = NULL;
-  for (rp = addr_info; rp != NULL; rp = rp->ai_next) {
-    assert(*dst_addrs_len < dst_addrs_cap);
+  Error err = {0};
 
-    if (rp->ai_family != AF_INET) {
-      continue;
+  struct addrinfo *it = addr_info;
+  for (usize _i = 0; _i < 256; _i++) {
+    assert(*dst_addrs_len <= dst_addrs_cap);
+
+    if (NULL == it) {
+      goto end;
     }
 
-    // TODO: Check UDP/TCP?
+    assert(it->ai_family == AF_INET);
 
     // Too many?
     if (*dst_addrs_len == dst_addrs_cap) {
-      return (Error){0};
+      goto end;
     }
 
-    const struct sockaddr_in *const sockaddr =
-        (struct sockaddr_in *)rp->ai_addr;
+    if (NULL == it->ai_addr) {
+      err = (Error){.kind = ErrKindInvalidData};
+      goto end;
+    }
+
+    struct sockaddr_in sockaddr = {0};
+    assert(sizeof(sockaddr) >= it->ai_addrlen);
+    memcpy(&sockaddr, it->ai_addr, it->ai_addrlen);
 
     dst_addrs[*dst_addrs_len] = (Ipv4Addr){
-        .ip = sockaddr->sin_addr.s_addr,
-        .port = sockaddr->sin_port,
+        .ip = ntohl(sockaddr.sin_addr.s_addr),
+        .port = ntohs(sockaddr.sin_port),
     };
     *dst_addrs_len += 1;
+
+    it = it->ai_next;
   };
-  return (Error){.kind = ErrKindNone};
+
+end:
+  freeaddrinfo(addr_info);
+
+  return err;
 }
 
 __attribute__((warn_unused_result)) static Platform *env_platform_make(void) {
-  // A `static` rather than a value handed back: there is one per process, and
-  // `platform_make` copies it rather than holding on to it. The Unix
-  // implementation is stateless, so `ctx` stays null; a test's fake is what
-  // it is for.
   static Platform platform = {
       .get_page_size = unix_get_page_size,
       .valloc = unix_valloc,

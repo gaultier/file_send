@@ -172,8 +172,8 @@ static void test_u8_write_u32_be(void) {
 
   // The ends of the range, and nothing written past the four bytes.
   {
-    const u32 values[] = {0,          1,          0xff,       0x100,
-                          0xffff,     0x10000,    0x00ff00ff, 0xffffff00,
+    const u32 values[] = {0,          1,         0xff,       0x100,
+                          0xffff,     0x10000,   0x00ff00ff, 0xffffff00,
                           0xfffffffe, 0xffffffff};
 
     for (usize i = 0; i < sizeof(values) / sizeof(values[0]); i++) {
@@ -955,10 +955,9 @@ _Static_assert(TEST_HANDSHAKE_LEN == TORRENT_PEER_HANDSHAKE_LEN,
 // because the bug this guards against was a length prefix written with
 // `memset`, which put four zero bytes there and turned the tag that followed
 // into the top byte of the next message's length.
-static const u8 test_peer_greeting[] = {0x00, 0x00, 0x00, 0x01,
-                                        TorrentMessageKindInterested,
-                                        0x00, 0x00, 0x00, 0x01,
-                                        TorrentMessageKindUnchoke};
+static const u8 test_peer_greeting[] = {
+    0x00, 0x00, 0x00, 0x01, TorrentMessageKindInterested,
+    0x00, 0x00, 0x00, 0x01, TorrentMessageKindUnchoke};
 #define TEST_PEER_GREETING_LEN (TEST_HANDSHAKE_LEN + 10)
 _Static_assert(TEST_PEER_GREETING_LEN ==
                    TEST_HANDSHAKE_LEN + sizeof(test_peer_greeting),
@@ -1568,8 +1567,9 @@ static void test_torrent_peer_to_cstr(void) {
   assert(0 == strcmp("keep-alive", torrent_message_kind_to_cstr(
                                        TorrentMessageKindKeepAlive)));
 
-  // And the actor's two, for the same reason: an event or a command with no name
-  // of its own makes a peer's log line unreadable exactly where it matters.
+  // And the actor's two, for the same reason: an event or a command with no
+  // name of its own makes a peer's log line unreadable exactly where it
+  // matters.
   const TorrentEventKind events[] = {
       TorrentEventKindNone,      TorrentEventKindAccepted,
       TorrentEventKindConnected, TorrentEventKindHangup,
@@ -1905,8 +1905,7 @@ static void test_torrent_peer_parse_message(void) {
     u8 head2[4] = {(u8)(too_big >> 24), (u8)(too_big >> 16), (u8)(too_big >> 8),
                    (u8)too_big};
     Bytes data2 = bytes_make(head2, sizeof(head2));
-    assert(ErrKindInvalidData ==
-           torrent_peer_parse_message(&data2, &msg).kind);
+    assert(ErrKindInvalidData == torrent_peer_parse_message(&data2, &msg).kind);
   }
 
   // Nothing at all is "not yet", not an error: an empty buffer is where every
@@ -2537,8 +2536,8 @@ static void test_torrent_peer_messages(void) {
   // The same stream cut every possible way, so the skip is not something that
   // only works when the whole message lands in one read.
   {
-    const u8 unknown_then_unchoke[] = {
-        0x00, 0x00, 0x00, 0x03, 0x63, 0xaa, 0xbb, 0x00, 0x00, 0x00, 0x01, 0x01};
+    const u8 unknown_then_unchoke[] = {0x00, 0x00, 0x00, 0x03, 0x63, 0xaa,
+                                       0xbb, 0x00, 0x00, 0x00, 0x01, 0x01};
 
     u8 skipped[TEST_HANDSHAKE_LEN + sizeof(unknown_then_unchoke)] = {0};
     test_handshake_fill(skipped, network_ctx.info_hash,
@@ -2631,7 +2630,6 @@ static void test_torrent_peer_recv_buf_compacted(void) {
   assert(test_peer_pool_is_empty(&network_ctx));
 }
 
-
 // ---------- The peer as an actor ----------
 
 // A peer holding only the fields `torrent_peer_run` reads. It touches no io, no
@@ -2691,8 +2689,8 @@ static void test_torrent_peer_run(void) {
   // be due, and far enough in that a case can look backwards from it.
   const u64 now = 1000 * Second;
 
-  // The earliest of nothing is nothing, which is what a peer with no deadline at
-  // all answers and what the loop reads as "wait for the ceiling".
+  // The earliest of nothing is nothing, which is what a peer with no deadline
+  // at all answers and what the loop reads as "wait for the ceiling".
   {
     const TorrentPeer peer = test_peer_actor_make(TorrentPeerStateInitial);
     assert(TORRENT_PEER_DEADLINE_NONE == torrent_peer_deadline_earliest(&peer));
@@ -2769,8 +2767,8 @@ static void test_torrent_peer_run(void) {
     assert(later + TORRENT_PEER_IDLE_NS == peer.idle_due_at);
     assert(later + TORRENT_PEER_KEEP_ALIVE_NS == peer.keep_alive_due_at);
     // Keep-alive is the nearer of the two, which is the whole point of idle
-    // being twice it: there is room for one to go out and be answered before the
-    // close, and one lost keep-alive is survivable.
+    // being twice it: there is room for one to go out and be answered before
+    // the close, and one lost keep-alive is survivable.
     assert(peer.keep_alive_due_at == peer.deadline_at);
   }
 
@@ -2808,15 +2806,15 @@ static void test_torrent_peer_run(void) {
 
     assert(later + TORRENT_PEER_IDLE_NS == peer.idle_due_at);
     // Our own silence is unchanged: what the peer said is not us saying
-    // anything, and resetting this on what arrives would mean a peer that floods
-    // us never hears from us and closes us.
+    // anything, and resetting this on what arrives would mean a peer that
+    // floods us never hears from us and closes us.
     assert(now + TORRENT_PEER_KEEP_ALIVE_NS == peer.keep_alive_due_at);
     assert(peer.keep_alive_due_at == peer.deadline_at);
   }
 
-  // Nothing heard in four minutes, so the connection is not worth its slot. Both
-  // deadlines are past by then and only one answer comes back: bytes sent to a
-  // peer that is about to be hung up on are bytes for nothing.
+  // Nothing heard in four minutes, so the connection is not worth its slot.
+  // Both deadlines are past by then and only one answer comes back: bytes sent
+  // to a peer that is about to be hung up on are bytes for nothing.
   {
     TorrentPeer peer = test_peer_actor_handshaked(now);
     const u64 later = peer.idle_due_at;
@@ -2858,9 +2856,9 @@ static void test_torrent_peer_run(void) {
     assert(now + TORRENT_PEER_KEEP_ALIVE_NS == peer.keep_alive_due_at);
   }
 
-  // The transport going, and the peer talking nonsense: two different facts with
-  // the one answer, and both of them a command rather than an error, which is
-  // what lets this return a count and never an `Error`.
+  // The transport going, and the peer talking nonsense: two different facts
+  // with the one answer, and both of them a command rather than an error, which
+  // is what lets this return a count and never an `Error`.
   {
     const TorrentEventKind overs[] = {TorrentEventKindHangup,
                                       TorrentEventKindMalformed};
@@ -2948,9 +2946,9 @@ test_peer_handshaked(TestPlatform *test_platform, TestPeerCtx *ctx,
   return peer;
 }
 
-// Finish whatever is outstanding and insist the slot came back. Every case below
-// ends here: a connection lets go of its slot however it ended, and one left
-// behind is a slot lost for the life of the process.
+// Finish whatever is outstanding and insist the slot came back. Every case
+// below ends here: a connection lets go of its slot however it ended, and one
+// left behind is a slot lost for the life of the process.
 static void test_peer_drain_empty(TestPlatform *test_platform,
                                   TorrentNetworkCtx *network_ctx) {
   assert(test_platform);
@@ -2978,8 +2976,9 @@ static void test_torrent_peer_deadlines(void) {
 
   test_network_ctx_init(&network_ctx);
 
-  // The four zero bytes a keep-alive is: a length prefix of nothing, with no tag
-  // behind it. Spelled out rather than taken from the code that writes them.
+  // The four zero bytes a keep-alive is: a length prefix of nothing, with no
+  // tag behind it. Spelled out rather than taken from the code that writes
+  // them.
   const u8 keep_alive[] = {0x00, 0x00, 0x00, 0x00};
 
   // Their handshake and one keep-alive behind it, then nothing: what a peer
@@ -2994,8 +2993,8 @@ static void test_torrent_peer_deadlines(void) {
 
   // The wait, on its own: the nearest deadline when it is nearer than the
   // ceiling, the ceiling when it is not, and the ceiling again when there is no
-  // deadline at all. Zero is what must never come back, a loop that waits for no
-  // time being a loop that spins.
+  // deadline at all. Zero is what must never come back, a loop that waits for
+  // no time being a loop that spins.
   {
     const u64 now = TEST_PEER_NOW_NS;
 
@@ -3022,8 +3021,9 @@ static void test_torrent_peer_deadlines(void) {
                                        TEST_PEER_NOW_NS));
   }
 
-  // A second after the handshake nothing is due, so nothing is called at all and
-  // the answer is what the loop waits on: the keep-alive, the nearer of the two.
+  // A second after the handshake nothing is due, so nothing is called at all
+  // and the answer is what the loop waits on: the keep-alive, the nearer of the
+  // two.
   {
     TestPeerCtx ctx = {0};
     test_platform.platform = test_env_peer_make(&ctx);
@@ -3115,9 +3115,9 @@ static void test_torrent_peer_deadlines(void) {
   }
 
   // The whole life of a silent peer: one keep-alive at two minutes, a close at
-  // four. The keep-alive going out must not push the close back -- `idle_due_at`
-  // measures what the peer has not said, and this process saying something is
-  // not the peer saying something.
+  // four. The keep-alive going out must not push the close back --
+  // `idle_due_at` measures what the peer has not said, and this process saying
+  // something is not the peer saying something.
   {
     TestPeerCtx ctx = {0};
     test_platform.platform = test_env_peer_make(&ctx);
@@ -3145,8 +3145,8 @@ static void test_torrent_peer_deadlines(void) {
 
   // A keep-alive with no room for it, and one with just enough. A send buffer
   // this full means there are already bytes waiting to go out, which is the
-  // opposite of the silence a keep-alive is there to break: not sending one says
-  // nothing untrue, and the deadline has moved on either way.
+  // opposite of the silence a keep-alive is there to break: not sending one
+  // says nothing untrue, and the deadline has moved on either way.
   {
     TestPeerCtx ctx = {0};
     test_platform.platform = test_env_peer_make(&ctx);
@@ -3212,8 +3212,7 @@ static void test_torrent_peer_deadlines(void) {
     for (usize i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
       torrent_peer_queue_msg_empty(peer, kinds[i]);
 
-      const u8 *const written =
-          peer->send_buf + i * TORRENT_PEER_MSG_EMPTY_LEN;
+      const u8 *const written = peer->send_buf + i * TORRENT_PEER_MSG_EMPTY_LEN;
       // Three zero bytes and a one: the length, counting the tag behind it.
       assert(0x00 == written[0]);
       assert(0x00 == written[1]);
@@ -3255,8 +3254,9 @@ static void test_torrent_peer_deadlines(void) {
     assert(test_peer_pool_is_empty(&network_ctx));
 
     // Placed by hand rather than taken from the pool in order: one in the first
-    // group of the bitset and one three groups along, so a walk that only looked
-    // where it started would pass the first check below and fail the second.
+    // group of the bitset and one three groups along, so a walk that only
+    // looked where it started would pass the first check below and fail the
+    // second.
     const usize slot_idxs[] = {1, 3 * POOL_SLOTS_PER_GROUP + 5};
     const Ipv4Addr addr = {.ip = 0x7f000001, .port = 6881};
 
@@ -4788,20 +4788,16 @@ static void test_http_parse_req_status_line(void) {
       u8 major;
       u8 minor;
     } cases[] = {
-        {"GET / HTTP/1.0\r\n", 1, 0},
-        {"GET / HTTP/1.1\r\n", 1, 1},
-        {"GET / HTTP/1.2\r\n", 1, 2},
-        {"GET / HTTP/2.0\r\n", 2, 0},
-        {"GET / HTTP/0.9\r\n", 0, 9},
-        {"GET / HTTP/9.9\r\n", 9, 9},
+        {"GET / HTTP/1.0\r\n", 1, 0}, {"GET / HTTP/1.1\r\n", 1, 1},
+        {"GET / HTTP/1.2\r\n", 1, 2}, {"GET / HTTP/2.0\r\n", 2, 0},
+        {"GET / HTTP/0.9\r\n", 0, 9}, {"GET / HTTP/9.9\r\n", 9, 9},
     };
     for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
       HttpRequestStatusLine sl = {.version_major = 42, .version_minor = 42};
       usize advanced = 0;
-      assert(ErrKindNone ==
-             http_parse_req_status_line(bytes_from_cstr(cases[i].line), &sl,
-                                        &advanced)
-                 .kind);
+      assert(ErrKindNone == http_parse_req_status_line(
+                                bytes_from_cstr(cases[i].line), &sl, &advanced)
+                                .kind);
       assert(cases[i].major == sl.version_major);
       assert(cases[i].minor == sl.version_minor);
     }
@@ -4853,10 +4849,10 @@ static void test_http_parse_req_status_line(void) {
     for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
       HttpRequestStatusLine sl = {0};
       usize advanced = 0;
-      assert(ErrKindInvalidData ==
-             http_parse_req_status_line(bytes_from_cstr(cases[i]), &sl,
-                                        &advanced)
-                 .kind);
+      assert(
+          ErrKindInvalidData ==
+          http_parse_req_status_line(bytes_from_cstr(cases[i]), &sl, &advanced)
+              .kind);
       assert(0 == advanced);
     }
   }
@@ -4970,10 +4966,10 @@ static void test_http_parse_resp_status_line(void) {
     for (usize i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
       HttpResponseStatusLine sl = {0};
       usize advanced = 0;
-      assert(ErrKindInvalidData ==
-             http_parse_resp_status_line(bytes_from_cstr(cases[i]), &sl,
-                                         &advanced)
-                 .kind);
+      assert(
+          ErrKindInvalidData ==
+          http_parse_resp_status_line(bytes_from_cstr(cases[i]), &sl, &advanced)
+              .kind);
       assert(0 == advanced);
     }
   }
@@ -5186,8 +5182,7 @@ static void test_http_parse_req(void) {
       {"BREW / HTTP/1.1\r\n\r\n", ErrKindInvalidData, HTTP_METHOD_GET, 0, 0},
       {"GET / HTTP/1.10\r\n\r\n", ErrKindInvalidData, HTTP_METHOD_GET, 0, 0},
       // The status line does not reach past the blank line.
-      {"GET /\r\n\r\n HTTP/1.1\r\n", ErrKindInvalidData, HTTP_METHOD_GET, 0,
-       0},
+      {"GET /\r\n\r\n HTTP/1.1\r\n", ErrKindInvalidData, HTTP_METHOD_GET, 0, 0},
       // Bad header.
       {"GET / HTTP/1.1\r\nA b\r\n\r\n", ErrKindInvalidData, HTTP_METHOD_GET, 0,
        0},
@@ -5231,9 +5226,8 @@ static void test_http_parse_resp(void) {
                                       "A: b\r\n"
                                       "\r\n"
                                       "body");
-    assert(ErrKindNone == http_parse_resp(src, &sl, headers, &headers_len,
-                                          4, &advanced)
-                              .kind);
+    assert(ErrKindNone ==
+           http_parse_resp(src, &sl, headers, &headers_len, 4, &advanced).kind);
     assert(1 == sl.version_major);
     assert(1 == sl.version_minor);
     assert(200 == sl.status_code);
@@ -5294,9 +5288,8 @@ static void test_http_parse_resp(void) {
     usize headers_len = 0;
     usize advanced = 42;
     const Bytes src = bytes_from_cstr(cases[i].src);
-    assert(cases[i].err == http_parse_resp(src, &sl, headers, &headers_len, 2,
-                                           &advanced)
-                               .kind);
+    assert(cases[i].err ==
+           http_parse_resp(src, &sl, headers, &headers_len, 2, &advanced).kind);
     if (ErrKindNone == cases[i].err) {
       assert(cases[i].status_code == sl.status_code);
       assert(cases[i].headers_len == headers_len);
@@ -5308,7 +5301,6 @@ static void test_http_parse_resp(void) {
     }
   }
 }
-
 
 // What `otel_on_accept` does with a fresh connection.
 __attribute__((warn_unused_result)) static HttpHandler *
@@ -5419,8 +5411,7 @@ static void test_http_server_pool(void) {
       assert(b);
       assert(NULL == pool_acquire(&server.handler_pool));
       // Some use of the arena, like `otel_on_read` building the response.
-      assert(ErrKindNone ==
-             bytes_buffer_make(128, &a->arena, &a->resp).kind);
+      assert(ErrKindNone == bytes_buffer_make(128, &a->arena, &a->resp).kind);
       test_http_close(b);
       test_http_close(a);
     }
@@ -5728,8 +5719,7 @@ static void test_otel(void) {
   {
     static u8 big[8192];
     memset(big, 'a', sizeof(big));
-    TestOtelCtx c = {.chunks = {bytes_make(big, sizeof(big))},
-                     .chunks_len = 1};
+    TestOtelCtx c = {.chunks = {bytes_make(big, sizeof(big))}, .chunks_len = 1};
     test_otel_connection(&c);
     assert(1 == c.read_calls);
     assert(0 == c.write_calls);
@@ -8233,7 +8223,7 @@ test_platform_real(Arena *arena) {
 
   Platform *platform = NULL;
   assert(ErrKindNone ==
-         platform_make(arena, PlatformBackendDefault, &platform).kind);
+         platform_init(arena, PlatformBackendDefault, &platform).kind);
   assert(platform);
 
   return platform;
@@ -8693,7 +8683,7 @@ static void test_error_kind_to_cstr(void) {
 
     for (usize i = 0; i < sizeof(named) / sizeof(named[0]); i++) {
       Platform *platform = NULL;
-      const Error err = platform_make(&arena, named[i], &platform);
+      const Error err = platform_init(&arena, named[i], &platform);
       if (ErrKindNone == err.kind) {
         assert(platform);
         supported += 1;
@@ -9205,9 +9195,9 @@ static void test_varint_read(void) {
       memcpy(in, cases[i].in, sizeof(in));
       u64 value = 0;
       usize advanced = 0;
-      assert(ErrKindNone ==
-             varint_read(bytes_make(in, cases[i].in_len), &value, &advanced)
-                 .kind);
+      assert(
+          ErrKindNone ==
+          varint_read(bytes_make(in, cases[i].in_len), &value, &advanced).kind);
       assert(cases[i].value == value);
       assert(cases[i].advanced == advanced);
     }
@@ -9239,9 +9229,9 @@ static void test_varint_read(void) {
       memcpy(in, cases[i].in, sizeof(in));
       u64 value = 42;
       usize advanced = 7;
-      assert(ErrKindInvalidData ==
-             varint_read(bytes_make(in, cases[i].in_len), &value, &advanced)
-                 .kind);
+      assert(
+          ErrKindInvalidData ==
+          varint_read(bytes_make(in, cases[i].in_len), &value, &advanced).kind);
       assert(42 == value);
       assert(7 == advanced);
     }
@@ -9793,14 +9783,12 @@ static void test_otel_parse_protobuf_fields(void) {
     // Malformed records.
     {
       u8 truncated[] = {0x0a, 0x05, 0x00};
-      assert(ErrKindInvalidData ==
-             cases[i]
-                 .fn(bytes_make(truncated, sizeof(truncated)), &logger)
-                 .kind);
+      assert(
+          ErrKindInvalidData ==
+          cases[i].fn(bytes_make(truncated, sizeof(truncated)), &logger).kind);
       u8 group[] = {0x0b};
       assert(ErrKindUnsupported ==
-             cases[i].fn(bytes_make(group, sizeof(group)), &logger)
-                 .kind);
+             cases[i].fn(bytes_make(group, sizeof(group)), &logger).kind);
     }
   }
 
@@ -9813,7 +9801,7 @@ static void test_otel_parse_protobuf_fields(void) {
     } id_cases[] = {
         {1, 0, ErrKindInvalidData}, {1, 8, ErrKindInvalidData},
         {2, 0, ErrKindInvalidData}, {2, 16, ErrKindInvalidData},
-        {4, 0, ErrKindNone}, {4, 16, ErrKindInvalidData},
+        {4, 0, ErrKindNone},        {4, 16, ErrKindInvalidData},
     };
     for (usize i = 0; i < sizeof(id_cases) / sizeof(id_cases[0]); i++) {
       TestPb pb = {0};
@@ -9865,10 +9853,9 @@ static void test_otel_parse_protobuf_depth(void) {
                               .kind);
 
     test_otel_any_value_nested(&pb, OTEL_PROTOBUF_DEPTH_MAX, kvlist);
-    assert(ErrKindInvalidData ==
-           otel_parse_protobuf_any_value(bytes_make(pb.data, pb.len), &logger,
-                                         0)
-               .kind);
+    assert(ErrKindInvalidData == otel_parse_protobuf_any_value(
+                                     bytes_make(pb.data, pb.len), &logger, 0)
+                                     .kind);
 
     // Through the whole message too.
     TestPb kv = {0};
@@ -10023,11 +10010,10 @@ static void test_otel_parse_protobuf_traces_data(void) {
 
   OtelSpan spans[TEST_OTEL_SPANS_CAP] = {0};
   usize spans_count = 0;
-  assert(ErrKindNone ==
-         otel_parse_protobuf_traces_data(bytes_make(traces.data, traces.len),
-                                         spans, &spans_count,
-                                         TEST_OTEL_SPANS_CAP, &logger)
-             .kind);
+  assert(ErrKindNone == otel_parse_protobuf_traces_data(
+                            bytes_make(traces.data, traces.len), spans,
+                            &spans_count, TEST_OTEL_SPANS_CAP, &logger)
+                            .kind);
   // Two `ResourceSpans` of two spans each.
   assert(4 == spans_count);
   for (usize i = 0; i < spans_count; i++) {
@@ -10051,11 +10037,10 @@ static void test_otel_parse_protobuf_traces_data(void) {
   assert(3 == spans_count);
 
   // Empty input is an empty `TracesData`.
-  assert(ErrKindNone ==
-         otel_parse_protobuf_traces_data(bytes_make(traces.data, 0), spans,
-                                         &spans_count, TEST_OTEL_SPANS_CAP,
-                                         &logger)
-             .kind);
+  assert(ErrKindNone == otel_parse_protobuf_traces_data(
+                            bytes_make(traces.data, 0), spans, &spans_count,
+                            TEST_OTEL_SPANS_CAP, &logger)
+                            .kind);
   assert(0 == spans_count);
 
   // With a single top level record, every strict prefix is cut inside it, so
@@ -10066,8 +10051,7 @@ static void test_otel_parse_protobuf_traces_data(void) {
     test_pb_msg(&single, 1, &resource_spans);
     for (usize len = 1; len < single.len; len++) {
       assert(ErrKindInvalidData ==
-             test_otel_parse_traces_data(bytes_make(single.data, len),
-                                         &quiet)
+             test_otel_parse_traces_data(bytes_make(single.data, len), &quiet)
                  .kind);
     }
   }
@@ -10085,8 +10069,7 @@ static void test_otel_parse_protobuf_traces_data(void) {
     TestPb bad = {0};
     test_pb_msg(&bad, 1, &bad_resource_spans);
     assert(ErrKindInvalidData ==
-           test_otel_parse_traces_data(bytes_make(bad.data, bad.len),
-                                       &logger)
+           test_otel_parse_traces_data(bytes_make(bad.data, bad.len), &logger)
                .kind);
   }
 }

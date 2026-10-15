@@ -18,7 +18,7 @@
 // can check, and one that rots the moment nothing checks it; `matrix.sh` checks
 // it on two Windows targets. The implementations come after.
 //
-// `platform_make` still answers `ErrKindUnsupported` rather than handing
+// `platform_init` still answers `ErrKindUnsupported` rather than handing
 // back a vtable of nulls. Not because anything reaches it first -- nothing does
 // -- but because a function that can report has no business faulting instead.
 
@@ -127,7 +127,7 @@ win32_remove_file(Platform *platform, Bytes path) {
 // `CreateFileMapping` plus `MapViewOfFile` for `map_fd`.
 __attribute__((warn_unused_result)) static Platform *env_platform_make(void) {
   // A `static` for the same reason as on Unix: there is one per process, and
-  // `platform_make` copies it rather than holding on to it.
+  // `platform_init` copies it rather than holding on to it.
   static Platform platform = {
       .open = win32_open,
       .close = win32_close,
