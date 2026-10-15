@@ -151,6 +151,7 @@ __attribute__((warn_unused_result)) static Platform *env_platform_make(void) {
       .send_to = win32_send_to,
       .file_size = win32_file_size,
       .remove_file = win32_remove_file,
+      .dns_resolve = win32_dns_resolve,
   };
 
   return &platform;
