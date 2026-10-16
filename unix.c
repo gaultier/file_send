@@ -114,6 +114,25 @@ unix_valloc(Platform *platform, usize bytes_count, u8 **res) {
   return (Error){.kind = ErrKindNone};
 }
 
+// Same contract as `unix_valloc`.
+__attribute__((warn_unused_result)) static Error
+unix_vreserve(Platform *platform, usize bytes_count, u8 **res) {
+  (void)platform;
+
+  assert(bytes_count > 0);
+  assert(res);
+
+  void *const alloc =
+      mmap(NULL, bytes_count, PROT_NONE, MAP_ANON | MAP_PRIVATE, -1, 0);
+
+  if ((void *)-1 == alloc) {
+    return unix_error_from_errno(errno);
+  }
+
+  *res = alloc;
+  return (Error){.kind = ErrKindNone};
+}
+
 __attribute__((warn_unused_result)) static usize
 unix_get_page_size(Platform *platform) {
   (void)platform;
@@ -922,6 +941,7 @@ __attribute__((warn_unused_result)) static Platform *env_platform_make(void) {
   static Platform platform = {
       .get_page_size = unix_get_page_size,
       .valloc = unix_valloc,
+      .vreserve = unix_vreserve,
       .vprotect_none = unix_vprotect_none,
       .vprotect_rw = unix_vprotect_rw,
       .get_process_id = unix_get_process_id,

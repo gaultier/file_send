@@ -4,6 +4,9 @@
 
 #ifdef PLATFORM_UNIX
 #include "unix.c"
+
+#include <fcntl.h>
+#include <sys/wait.h>
 #endif
 
 #ifdef PLATFORM_WIN32
@@ -656,6 +659,116 @@ static void test_arena_valloc_mocked(void) {
     assert(NULL == arena.start);
   }
 }
+
+#if defined(PLATFORM_UNIX)
+// Whether writing one byte at `ptr` faults. Checked in a child process, since a
+// fault cannot be recovered from.
+__attribute__((warn_unused_result)) static bool
+test_write_faults(volatile u8 *ptr) {
+  const pid_t pid = fork();
+  assert(-1 != pid);
+
+  if (0 == pid) {
+    // Silence the sanitizer report on the expected fault.
+    const i32 dev_null = open("/dev/null", O_WRONLY);
+    assert(-1 != dev_null);
+    assert(-1 != dup2(dev_null, STDERR_FILENO));
+
+    *ptr = 1;
+    _exit(0);
+  }
+
+  i32 status = 0;
+  assert(pid == waitpid(pid, &status, 0));
+  return !(WIFEXITED(status) && 0 == WEXITSTATUS(status));
+}
+
+static void test_arena_sandwiched(void) {
+  Platform *const platform = env_platform_make();
+  const usize page_size = platform->get_page_size(platform);
+
+  // Each allocation is right-aligned against the guard page after it, which
+  // faults, and so does the page before the first allocation.
+  {
+    Arena arena = {0};
+    assert(ErrKindNone ==
+           arena_init_valloc(platform, 4 * page_size,
+                             ARENA_OPTS_ALLOC_SANDWICHED_BY_GUARD_PAGES, &arena)
+               .kind);
+
+    const usize sizes[] = {1, 7, page_size, page_size + 1};
+    u8 *prev = NULL;
+    for (usize i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+      const usize size = sizes[i];
+      u8 *const ptr = arena_alloc(&arena, 1, 1, size);
+      assert(ptr);
+      assert(0 == ((usize)ptr + size) % page_size);
+      memset(ptr, 0xAA, size);
+      assert(!test_write_faults(ptr + size - 1));
+      assert(test_write_faults(ptr + size));
+      if (0 == i) {
+        assert(test_write_faults(ptr - page_size));
+      }
+      if (prev) {
+        assert(ptr > prev);
+      }
+      prev = ptr;
+    }
+  }
+
+  // With an alignment, at most `align - 1` bytes separate the end of the
+  // allocation from the guard page.
+  {
+    Arena arena = {0};
+    assert(ErrKindNone ==
+           arena_init_valloc(platform, page_size,
+                             ARENA_OPTS_ALLOC_SANDWICHED_BY_GUARD_PAGES, &arena)
+               .kind);
+
+    u8 *const ptr = arena_alloc(&arena, 8, 1, 3);
+    assert(ptr);
+    assert(0 == (usize)ptr % 8);
+    const usize guard = usize_next_multiple_of((usize)ptr + 3, page_size);
+    assert(guard - ((usize)ptr + 3) < 8);
+    assert(test_write_faults((u8 *)guard));
+  }
+
+  // OOM happens once the bytes asked for at creation are used up, not when the
+  // much larger reservation is, and leaves the arena untouched.
+  {
+    Arena arena = {0};
+    assert(ErrKindNone ==
+           arena_init_valloc(platform, 100,
+                             ARENA_OPTS_ALLOC_SANDWICHED_BY_GUARD_PAGES, &arena)
+               .kind);
+
+    assert(arena_alloc(&arena, 1, 1, 60));
+    const Arena before = arena;
+    assert(NULL == arena_alloc(&arena, 1, 1, 41));
+    assert(before.start == arena.start);
+    assert(before.bytes_left == arena.bytes_left);
+    assert(arena_alloc(&arena, 1, 1, 40));
+    assert(NULL == arena_alloc(&arena, 1, 1, 1));
+  }
+
+  // A discarded copy of the arena leaves pages open behind it. The next
+  // allocation in the original still gets a guard page.
+  {
+    Arena arena = {0};
+    assert(ErrKindNone ==
+           arena_init_valloc(platform, 4 * page_size,
+                             ARENA_OPTS_ALLOC_SANDWICHED_BY_GUARD_PAGES, &arena)
+               .kind);
+
+    Arena copy = arena;
+    assert(arena_alloc(&copy, 1, 1, 2 * page_size));
+
+    u8 *const ptr = arena_alloc(&arena, 1, 1, 1);
+    assert(ptr);
+    assert(test_write_faults(ptr + 1));
+  }
+}
+#endif
 
 // The server narrates to stdout. That is the point in production and noise in
 // a test, more so at a thousand connections, so it is swallowed for the
@@ -10576,6 +10689,9 @@ static void test(const char *filter) {
 #endif
       {"arena_init_valloc", test_arena_valloc},
       {"arena_valloc_mocked", test_arena_valloc_mocked},
+#if defined(PLATFORM_UNIX)
+      {"arena_sandwiched", test_arena_sandwiched},
+#endif
       {"platform_listen_and_serve_setup_failures",
        test_platform_listen_and_serve_setup_failures},
       {"platform_listen_and_serve_accept",

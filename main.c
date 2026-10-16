@@ -30,13 +30,13 @@ int main(i32 argc, char *argv[]) {
   Arena arena = {0};
   assert(ErrKindNone ==
          arena_init_valloc(platform_base, arena_cap,
-                           ARENA_OPTS_NONE, &arena)
+                           ARENA_OPTS_ALLOC_SANDWICHED_BY_GUARD_PAGES, &arena)
              .kind);
 
   Arena scratch = {0};
   assert(ErrKindNone ==
          arena_init_valloc(platform_base, 1 * MiB,
-                           ARENA_OPTS_NONE, &scratch)
+                           ARENA_OPTS_ALLOC_SANDWICHED_BY_GUARD_PAGES, &scratch)
              .kind);
 
   // `FILE_SEND_IO_BACKEND` names one, for comparing them on a platform that has
@@ -345,7 +345,7 @@ int main(i32 argc, char *argv[]) {
     Arena http_arena = {0};
     assert(ErrKindNone ==
            arena_init_valloc(platform, 5ULL * GiB,
-                             ARENA_OPTS_NONE,
+                             ARENA_OPTS_ALLOC_SANDWICHED_BY_GUARD_PAGES,
                              &http_arena)
                .kind);
 

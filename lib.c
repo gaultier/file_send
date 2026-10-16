@@ -193,22 +193,18 @@ typedef struct {
   // Null for an arena made with `arena_from_mem`.
   Platform *platform;
   usize page_size;
+
+  // With `ARENA_OPTS_ALLOC_SANDWICHED_BY_GUARD_PAGES`, `start` and `end` span
+  // the whole reservation, which is far larger than what was asked for. This
+  // is what was asked for, so that OOM happens at the same point as without the
+  // option.
+  usize bytes_left;
 } Arena;
 
+// Defined after `Platform`, which it calls into.
 __attribute__((warn_unused_result)) static void *
 arena_alloc_sandwiched_with_guard_pages(Arena *arena, usize align,
-                                        usize elem_size, usize elem_count) {
-  assert(arena != NULL);
-  assert(arena->start != NULL);
-  assert(arena->end != NULL);
-  assert(arena->start <= arena->end);
-  assert(arena->opts & ARENA_OPTS_ALLOC_SANDWICHED_BY_GUARD_PAGES);
-  assert((align == 1) || (align == 2) || (align == 4) || (align == 8));
-  assert(elem_size > 0);
-  assert(elem_count > 0);
-
-  assert(0 && "todo");
-}
+                                        usize elem_size, usize elem_count);
 
 __attribute__((warn_unused_result)) static void *
 arena_alloc_default(Arena *arena, usize align, usize elem_size,
@@ -703,6 +699,9 @@ struct PlatformCompletion {
 struct Platform {
   usize (*get_page_size)(Platform *platform);
   Error (*valloc)(Platform *platform, usize bytes_count, u8 **res);
+  // Reserves address space that cannot be accessed until made so with
+  // `vprotect_rw`. It costs no physical memory.
+  Error (*vreserve)(Platform *platform, usize bytes_count, u8 **res);
   Error (*vprotect_none)(Platform *platform, void *ptr, usize size);
   Error (*vprotect_rw)(Platform *platform, void *ptr, usize size);
   usize (*get_process_id)(Platform *platform);
@@ -1552,6 +1551,106 @@ __attribute__((warn_unused_result)) static usize ceil_usize(usize numerator,
   return numerator / denominator + (numerator % denominator != 0);
 }
 
+// Each allocation needs at least one page plus one guard page, and how many
+// allocations will happen is not known upfront, so a lot of address space is
+// reserved. At 16 KiB pages this fits about 128M allocations, and still lets
+// dozens of such arenas coexist in a 47 bit address space.
+static const usize ARENA_SANDWICHED_RESERVE_SIZE = (usize)1 << 42;
+
+// The whole reservation starts inaccessible. Allocations open pages one by one
+// and leave the page after each one closed, as its guard.
+__attribute__((warn_unused_result)) static Error
+arena_init_sandwiched(Platform *platform, usize page_size, usize bytes_count,
+                      ArenaOptions opts, Arena *res) {
+  assert(platform);
+  assert(is_power_of_two(page_size));
+  assert(opts & ARENA_OPTS_ALLOC_SANDWICHED_BY_GUARD_PAGES);
+  assert(res);
+  assert(bytes_count > 0);
+  assert(bytes_count < ARENA_SANDWICHED_RESERVE_SIZE);
+  assert(0 == ARENA_SANDWICHED_RESERVE_SIZE % page_size);
+
+  u8 *reserved = NULL;
+  {
+    const Error err = platform->vreserve(
+        platform, ARENA_SANDWICHED_RESERVE_SIZE, &reserved);
+    if (ErrKindNone != err.kind) {
+      return err;
+    }
+  }
+  assert(reserved);
+  assert(0 == (usize)reserved % page_size);
+
+  // The first page stays closed, as the guard before the first allocation.
+  *res = arena_from_mem(reserved + page_size,
+                        ARENA_SANDWICHED_RESERVE_SIZE - page_size);
+  res->opts = opts;
+  res->platform = platform;
+  res->page_size = page_size;
+  res->bytes_left = bytes_count;
+
+  return (Error){.kind = ErrKindNone};
+}
+
+// The allocation is right-aligned against a guard page, because going past the
+// end is a much more common bug than going before the start. Up to `align - 1`
+// bytes of padding remain between the two, where an overflow does not fault.
+__attribute__((warn_unused_result)) static void *
+arena_alloc_sandwiched_with_guard_pages(Arena *arena, usize align,
+                                        usize elem_size, usize elem_count) {
+  assert(arena != NULL);
+  assert(arena->start != NULL);
+  assert(arena->end != NULL);
+  assert(arena->start <= arena->end);
+  assert(arena->opts & ARENA_OPTS_ALLOC_SANDWICHED_BY_GUARD_PAGES);
+  assert(arena->platform);
+  assert(is_power_of_two(arena->page_size));
+  assert(0 == (usize)arena->start % arena->page_size);
+  assert((align == 1) || (align == 2) || (align == 4) || (align == 8));
+  assert(elem_size > 0);
+  assert(elem_count > 0);
+
+  usize alloc_size = 0;
+  assert(!__builtin_mul_overflow(elem_size, elem_count, &alloc_size));
+
+  // OOM? The arena is left untouched in that case.
+  if (alloc_size > arena->bytes_left) {
+    return NULL;
+  }
+
+  const usize data_size = usize_next_multiple_of(alloc_size, arena->page_size);
+  usize used = 0;
+  assert(!__builtin_add_overflow(data_size, arena->page_size, &used));
+  assert(used <= (usize)(arena->end - arena->start) &&
+         "sandwiched arena reservation exhausted");
+
+  u8 *const data = arena->start;
+  u8 *const guard = data + data_size;
+
+  // On Linux, each allocation splits the mapping in two more pieces, so this
+  // fails after about `vm.max_map_count / 2` allocations.
+  assert(ErrKindNone ==
+         arena->platform->vprotect_rw(arena->platform, data, data_size).kind);
+  // The guard page may be open: a copy of this arena may have allocated there
+  // already, before being discarded.
+  assert(ErrKindNone == arena->platform
+                            ->vprotect_none(arena->platform, guard,
+                                            arena->page_size)
+                            .kind);
+
+  usize res = (usize)guard - alloc_size;
+  res -= res % align;
+  assert(res >= (usize)data);
+  assert(res + alloc_size <= (usize)guard);
+  assert((usize)guard - (res + alloc_size) < align);
+
+  arena->start = guard + arena->page_size;
+  arena->bytes_left -= alloc_size;
+  assert(arena->start <= arena->end);
+
+  return (u8 *)res;
+}
+
 __attribute__((warn_unused_result)) static Error
 arena_init_valloc(Platform *platform, usize bytes_count, ArenaOptions opts,
                   Arena *res) {
@@ -1561,6 +1660,10 @@ arena_init_valloc(Platform *platform, usize bytes_count, ArenaOptions opts,
   const usize page_size = platform->get_page_size(platform);
   assert(page_size > 0);
   assert(is_power_of_two(page_size));
+
+  if (opts & ARENA_OPTS_ALLOC_SANDWICHED_BY_GUARD_PAGES) {
+    return arena_init_sandwiched(platform, page_size, bytes_count, opts, res);
+  }
 
   const usize usable_bytes = usize_next_multiple_of(bytes_count, page_size);
   usize os_alloc_size = 0;
