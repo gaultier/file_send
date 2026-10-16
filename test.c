@@ -8901,6 +8901,23 @@ static void test_platform_syscall_failures(void) {
     const Error err = platform->vprotect_none(platform, (void *)1, 4096);
     assert(ErrKindNone != err.kind);
   }
+  {
+    const Error err = platform->vprotect_rw(platform, (void *)1, 4096);
+    assert(ErrKindNone != err.kind);
+  }
+
+  // A page made inaccessible can be made writable again.
+  {
+    const usize page_size = platform->get_page_size(platform);
+    u8 *page = NULL;
+    assert(ErrKindNone == platform->valloc(platform, page_size, &page).kind);
+    assert(ErrKindNone ==
+           platform->vprotect_none(platform, page, page_size).kind);
+    assert(ErrKindNone == platform->vprotect_rw(platform, page, page_size).kind);
+    page[0] = 1;
+    page[page_size - 1] = 2;
+    assert(1 == page[0]);
+  }
 
   // An empty `Bytes` contains nothing, without reading through a null pointer.
   assert(!bytes_contains_byte(bytes_make(NULL, 0), 'x'));

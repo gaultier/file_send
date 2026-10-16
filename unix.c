@@ -135,6 +135,17 @@ unix_vprotect_none(Platform *platform, void *ptr, usize size) {
   return (Error){.kind = ErrKindNone};
 }
 
+__attribute__((warn_unused_result)) static Error
+unix_vprotect_rw(Platform *platform, void *ptr, usize size) {
+  (void)platform;
+
+  if (-1 == mprotect(ptr, size, PROT_READ | PROT_WRITE)) {
+    return unix_error_from_errno(errno);
+  }
+
+  return (Error){.kind = ErrKindNone};
+}
+
 // Every descriptor that reaches the loop is non-blocking. That is not a tuning
 // choice: the loop waits for readiness and then retries the syscall, which only
 // works if the retry can answer `EAGAIN`. One blocking descriptor would park
@@ -912,6 +923,7 @@ __attribute__((warn_unused_result)) static Platform *env_platform_make(void) {
       .get_page_size = unix_get_page_size,
       .valloc = unix_valloc,
       .vprotect_none = unix_vprotect_none,
+      .vprotect_rw = unix_vprotect_rw,
       .get_process_id = unix_get_process_id,
 
       .socket = unix_socket,

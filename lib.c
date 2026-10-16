@@ -172,6 +172,8 @@ static const u8 PATH_SEPARATOR_UNIX = '/';
 
 // ---------- Arena ----------
 
+typedef struct Platform Platform;
+
 typedef enum {
   ARENA_OPTS_NONE = 0,
   ARENA_OPTS_ALLOC_SANDWICHED_BY_GUARD_PAGES = 1,
@@ -186,6 +188,11 @@ typedef struct {
   u8 *end;
 
   ArenaOptions opts;
+
+  // Only set by `arena_init_valloc`, for options that change page protections.
+  // Null for an arena made with `arena_from_mem`.
+  Platform *platform;
+  usize page_size;
 } Arena;
 
 __attribute__((warn_unused_result)) static void *
@@ -634,8 +641,6 @@ typedef struct {
 
 typedef void *(*ThreadCallback)(void *data);
 
-typedef struct Platform Platform;
-
 __attribute__((warn_unused_result)) static Platform *env_platform_make(void);
 
 typedef enum {
@@ -699,6 +704,7 @@ struct Platform {
   usize (*get_page_size)(Platform *platform);
   Error (*valloc)(Platform *platform, usize bytes_count, u8 **res);
   Error (*vprotect_none)(Platform *platform, void *ptr, usize size);
+  Error (*vprotect_rw)(Platform *platform, void *ptr, usize size);
   usize (*get_process_id)(Platform *platform);
 
   Error (*socket)(Platform *platform, SocketDomain domain, SocketType type,
@@ -1592,6 +1598,8 @@ arena_init_valloc(Platform *platform, usize bytes_count, ArenaOptions opts,
 
   *res = arena_from_mem((u8 *)start, (usize)end_guard - start);
   res->opts = opts;
+  res->platform = platform;
+  res->page_size = page_size;
 
   return (Error){.kind = ErrKindNone};
 }
