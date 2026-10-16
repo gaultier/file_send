@@ -172,6 +172,11 @@ static const u8 PATH_SEPARATOR_UNIX = '/';
 
 // ---------- Arena ----------
 
+typedef enum {
+  ARENA_OPTS_NONE = 0,
+  ARENA_OPTS_ALLOC_SANDWICHED_BY_GUARD_PAGES = 1,
+} ArenaOptions;
+
 typedef struct {
   // Start of the arena allocation.
   // Increases with each allocation.
@@ -179,10 +184,28 @@ typedef struct {
   // Size of the full arena.
   // Only used to detect the OOM case.
   u8 *end;
+
+  ArenaOptions opts;
 } Arena;
 
 __attribute__((warn_unused_result)) static void *
-arena_alloc(Arena *arena, usize align, usize elem_size, usize elem_count) {
+arena_alloc_sandwiched_with_guard_pages(Arena *arena, usize align,
+                                        usize elem_size, usize elem_count) {
+  assert(arena != NULL);
+  assert(arena->start != NULL);
+  assert(arena->end != NULL);
+  assert(arena->start <= arena->end);
+  assert(arena->opts & ARENA_OPTS_ALLOC_SANDWICHED_BY_GUARD_PAGES);
+  assert((align == 1) || (align == 2) || (align == 4) || (align == 8));
+  assert(elem_size > 0);
+  assert(elem_count > 0);
+
+  assert(0 && "todo");
+}
+
+__attribute__((warn_unused_result)) static void *
+arena_alloc_default(Arena *arena, usize align, usize elem_size,
+                    usize elem_count) {
   assert(arena != NULL);
   assert(arena->start != NULL);
   assert(arena->end != NULL);
@@ -213,6 +236,24 @@ arena_alloc(Arena *arena, usize align, usize elem_size, usize elem_count) {
   assert((start % align) == 0);
 
   return (u8 *)start;
+}
+
+__attribute__((warn_unused_result)) static void *
+arena_alloc(Arena *arena, usize align, usize elem_size, usize elem_count) {
+  assert(arena != NULL);
+  assert(arena->start != NULL);
+  assert(arena->end != NULL);
+  assert(arena->start <= arena->end);
+  assert((align == 1) || (align == 2) || (align == 4) || (align == 8));
+  assert(elem_size > 0);
+  assert(elem_count > 0);
+
+  if (arena->opts & ARENA_OPTS_ALLOC_SANDWICHED_BY_GUARD_PAGES) {
+    return arena_alloc_sandwiched_with_guard_pages(arena, align, elem_size,
+                                                   elem_count);
+  } else {
+    return arena_alloc_default(arena, align, elem_size, elem_count);
+  }
 }
 
 __attribute__((warn_unused_result)) static Arena
@@ -1464,7 +1505,7 @@ __attribute__((warn_unused_result)) static bool is_power_of_two(usize value) {
 }
 
 __attribute__((warn_unused_result)) static usize
-usize_round_up_multiple_of(usize n, usize multiple) {
+usize_next_multiple_of(usize n, usize multiple) {
   assert(multiple != 0);
   assert(is_power_of_two(multiple));
 
@@ -1506,17 +1547,19 @@ __attribute__((warn_unused_result)) static usize ceil_usize(usize numerator,
 }
 
 __attribute__((warn_unused_result)) static Error
-arena_valloc(Platform *platform, usize bytes_count, Arena *res) {
+arena_init_valloc(Platform *platform, usize bytes_count, ArenaOptions opts,
+                  Arena *res) {
   assert(platform);
   assert(res);
 
   const usize page_size = platform->get_page_size(platform);
   assert(page_size > 0);
+  assert(is_power_of_two(page_size));
 
-  const usize usable_bytes = usize_round_up_multiple_of(bytes_count, page_size);
+  const usize usable_bytes = usize_next_multiple_of(bytes_count, page_size);
   usize os_alloc_size = 0;
-  // Guard page.
-  assert(!__builtin_add_overflow(usable_bytes, page_size, &os_alloc_size));
+  // Always add a guard page before and after the arena, regardless of options.
+  assert(!__builtin_add_overflow(usable_bytes, 2 * page_size, &os_alloc_size));
 
   u8 *arena_memory = NULL;
   {
@@ -1527,10 +1570,16 @@ arena_valloc(Platform *platform, usize bytes_count, Arena *res) {
   }
   assert(arena_memory);
 
-  assert(
-      ErrKindNone ==
-      platform->vprotect_none(platform, arena_memory + usable_bytes, page_size)
-          .kind);
+  // Start guard page.
+  assert(ErrKindNone ==
+         platform->vprotect_none(platform, arena_memory, page_size).kind);
+
+  // End guard page.
+  assert(ErrKindNone ==
+         platform
+             ->vprotect_none(platform, arena_memory + os_alloc_size - page_size,
+                             page_size)
+             .kind);
 
   // Right-align the arena against the guard page so that *any* write past
   // `arena.end` faults immediately, then round the start down to the
@@ -1544,6 +1593,8 @@ arena_valloc(Platform *platform, usize bytes_count, Arena *res) {
 
   *res =
       arena_from_mem((u8 *)start, (usize)arena_memory + usable_bytes - start);
+  res->opts = opts;
+
   return (Error){.kind = ErrKindNone};
 }
 
@@ -1921,7 +1972,7 @@ pool_make(Pool *pool, Arena *arena, usize chunk_size, usize elems_count) {
   assert(chunk_size);
   assert(elems_count);
 
-  const usize real_chunk_size = usize_round_up_multiple_of(
+  const usize real_chunk_size = usize_next_multiple_of(
       chunk_size < sizeof(PoolNode) ? sizeof(PoolNode) : chunk_size,
       POOL_ALIGN);
   assert(real_chunk_size >= chunk_size);

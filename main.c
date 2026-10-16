@@ -28,10 +28,16 @@ int main(i32 argc, char *argv[]) {
   const char *const cmd = argc >= 2 ? argv[1] : "";
   const usize arena_cap = 32 * MiB;
   Arena arena = {0};
-  assert(ErrKindNone == arena_valloc(platform_base, arena_cap, &arena).kind);
+  assert(ErrKindNone ==
+         arena_init_valloc(platform_base, arena_cap,
+                           ARENA_OPTS_ALLOC_SANDWICHED_BY_GUARD_PAGES, &arena)
+             .kind);
 
   Arena scratch = {0};
-  assert(ErrKindNone == arena_valloc(platform_base, 1 * MiB, &scratch).kind);
+  assert(ErrKindNone ==
+         arena_init_valloc(platform_base, 1 * MiB,
+                           ARENA_OPTS_ALLOC_SANDWICHED_BY_GUARD_PAGES, &scratch)
+             .kind);
 
   // `FILE_SEND_IO_BACKEND` names one, for comparing them on a platform that has
   // more than one; unset asks the platform for whichever it prefers, which is
@@ -62,8 +68,6 @@ int main(i32 argc, char *argv[]) {
     return 1;
   }
 
-  {
-  }
   Ipv4Addr addrs[16] = {0};
   usize addrs_len = 0;
   err = platform->dns_resolve(platform, bytes_from_cstr("google.com"), 80,
@@ -339,7 +343,11 @@ int main(i32 argc, char *argv[]) {
     const usize port = strtoull(port_s, &port_end, 10);
     const Ipv4Addr listen_addr = {.port = (u16)port};
     Arena http_arena = {0};
-    assert(ErrKindNone == arena_valloc(platform, 5ULL * GiB, &http_arena).kind);
+    assert(ErrKindNone ==
+           arena_init_valloc(platform, 5ULL * GiB,
+                             ARENA_OPTS_ALLOC_SANDWICHED_BY_GUARD_PAGES,
+                             &http_arena)
+               .kind);
 
     HttpServer ctx = {0};
     {

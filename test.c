@@ -21,7 +21,9 @@
 __attribute__((warn_unused_result)) static Arena test_arena(usize bytes_count) {
   Platform *const platform = env_platform_make();
   Arena arena = {0};
-  assert(ErrKindNone == arena_valloc(platform, bytes_count, &arena).kind);
+  assert(
+      ErrKindNone ==
+      arena_init_valloc(platform, bytes_count, ARENA_OPTS_NONE, &arena).kind);
   assert(arena.start);
   assert(arena.end);
   assert((usize)arena.end - (usize)arena.start >= bytes_count);
@@ -485,8 +487,8 @@ static void test_unix_error_from_errno(void) {
 // delegated to `real` rather than reimplemented, so the code under test still
 // gets memory it can write to and descriptors it can use.
 
-// A fake `Platform` for the arena. It records what `arena_valloc` asked the OS
-// for, answers with a page size the host does not have, and can make the
+// A fake `Platform` for the arena. It records what `arena_init_valloc` asked
+// the OS for, answers with a page size the host does not have, and can make the
 // mapping fail on demand: the real `mmap` only fails for sizes so large that
 // the request says nothing about *which* error comes back.
 typedef struct {
@@ -539,8 +541,8 @@ test_alloc_vprotect_none(Platform *platform, void *ptr, usize size) {
   return c->real->vprotect_none(c->real, ptr, size);
 }
 
-// Only the slots `arena_valloc` reaches for; the rest stay null so that a call
-// to any of them crashes rather than silently doing something real.
+// Only the slots `arena_init_valloc` reaches for; the rest stay null so that a
+// call to any of them crashes rather than silently doing something real.
 __attribute__((warn_unused_result)) static Platform
 test_env_alloc_make(TestAllocCtx *ctx) {
   assert(ctx);
@@ -567,7 +569,8 @@ static void test_arena_valloc_mocked(void) {
     Platform platform = test_env_alloc_make(&ctx);
     Arena arena = {0};
 
-    assert(ErrKindNone == arena_valloc(&platform, 1, &arena).kind);
+    assert(ErrKindNone ==
+           arena_init_valloc(&platform, 1, ARENA_OPTS_NONE, &arena).kind);
 
     assert(1 == ctx.alloc_calls);
     assert(2 * page_size == ctx.alloc_bytes_count);
@@ -589,7 +592,9 @@ static void test_arena_valloc_mocked(void) {
     Platform platform = test_env_alloc_make(&ctx);
     Arena arena = {0};
 
-    assert(ErrKindNone == arena_valloc(&platform, page_size + 1, &arena).kind);
+    assert(ErrKindNone ==
+           arena_init_valloc(&platform, page_size + 1, ARENA_OPTS_NONE, &arena)
+               .kind);
     assert(3 * page_size == ctx.alloc_bytes_count);
     assert((void *)arena.end == ctx.protect_ptr);
   }
@@ -600,7 +605,9 @@ static void test_arena_valloc_mocked(void) {
     Platform platform = test_env_alloc_make(&ctx);
     Arena arena = {0};
 
-    assert(ErrKindNone == arena_valloc(&platform, 2 * page_size, &arena).kind);
+    assert(ErrKindNone ==
+           arena_init_valloc(&platform, 2 * page_size, ARENA_OPTS_NONE, &arena)
+               .kind);
     assert(3 * page_size == ctx.alloc_bytes_count);
   }
 
@@ -611,7 +618,8 @@ static void test_arena_valloc_mocked(void) {
     Platform platform = test_env_alloc_make(&ctx);
     Arena arena = {.start = (u8 *)0xAA, .end = (u8 *)0xBB};
 
-    assert(ErrKindOOM == arena_valloc(&platform, 1, &arena).kind);
+    assert(ErrKindOOM ==
+           arena_init_valloc(&platform, 1, ARENA_OPTS_NONE, &arena).kind);
     assert(1 == ctx.alloc_calls);
     assert(0 == ctx.protect_calls);
     assert((u8 *)0xAA == arena.start);
@@ -627,7 +635,8 @@ static void test_arena_valloc_mocked(void) {
     Platform platform = test_env_alloc_make(&ctx);
     Arena arena = {0};
 
-    assert(ErrOSKindPermission == arena_valloc(&platform, 1, &arena).kind);
+    assert(ErrOSKindPermission ==
+           arena_init_valloc(&platform, 1, ARENA_OPTS_NONE, &arena).kind);
     assert(NULL == arena.start);
   }
 }
@@ -3320,7 +3329,9 @@ static void test_arena_valloc(void) {
   // NULL, so this also pins down that conversion, and that the `ENOMEM` it
   // sets comes back as `ErrOOM` rather than a bare failure.
   Arena arena = {0};
-  assert(ErrKindOOM == arena_valloc(platform, (usize)1 << 62, &arena).kind);
+  assert(ErrKindOOM ==
+         arena_init_valloc(platform, (usize)1 << 62, ARENA_OPTS_NONE, &arena)
+             .kind);
 
   // A failed call leaves the caller's arena alone.
   assert(NULL == arena.start);
@@ -6290,9 +6301,10 @@ test_merkle_data(Arena *arena) {
 static void test_torrent_merkle_vectors(void) {
   Platform *const platform = env_platform_make();
   Arena data_arena = {0};
-  assert(
-      ErrKindNone ==
-      arena_valloc(platform, TEST_MERKLE_MAX_LEN + 4 * KiB, &data_arena).kind);
+  assert(ErrKindNone == arena_init_valloc(platform,
+                                          TEST_MERKLE_MAX_LEN + 4 * KiB,
+                                          ARENA_OPTS_NONE, &data_arena)
+                            .kind);
   assert(data_arena.start);
   const Bytes data = test_merkle_data(&data_arena);
 
@@ -6357,9 +6369,10 @@ static void test_torrent_merkle_vectors(void) {
 static void test_torrent_merkle_piece_layer(void) {
   Platform *const platform = env_platform_make();
   Arena data_arena = {0};
-  assert(
-      ErrKindNone ==
-      arena_valloc(platform, TEST_MERKLE_MAX_LEN + 4 * KiB, &data_arena).kind);
+  assert(ErrKindNone == arena_init_valloc(platform,
+                                          TEST_MERKLE_MAX_LEN + 4 * KiB,
+                                          ARENA_OPTS_NONE, &data_arena)
+                            .kind);
   assert(data_arena.start);
   const Bytes data = test_merkle_data(&data_arena);
 
@@ -6452,7 +6465,9 @@ static void test_torrent_merkle_piece_layer(void) {
 static void test_torrent_merkle_padding(void) {
   Platform *const platform = env_platform_make();
   Arena data_arena = {0};
-  assert(ErrKindNone == arena_valloc(platform, 64 * KiB, &data_arena).kind);
+  assert(
+      ErrKindNone ==
+      arena_init_valloc(platform, 64 * KiB, ARENA_OPTS_NONE, &data_arena).kind);
   assert(data_arena.start);
 
   // Three blocks, so the tree pads to four leaves and the last leaf covers no
@@ -6553,7 +6568,9 @@ static void test_torrent_merkle_empty(void) {
 static void test_torrent_merkle_oom(void) {
   Platform *const platform = env_platform_make();
   Arena data_arena = {0};
-  assert(ErrKindNone == arena_valloc(platform, 64 * KiB, &data_arena).kind);
+  assert(
+      ErrKindNone ==
+      arena_init_valloc(platform, 64 * KiB, ARENA_OPTS_NONE, &data_arena).kind);
   assert(data_arena.start);
 
   // Two blocks, so at one block per piece the layer needs two hashes.
@@ -9177,8 +9194,8 @@ test_write_perform(TestPlatform *test_platform, PlatformCompletion *completion,
   assert(PlatformActionKindWrite == completion->action.kind);
 
   TestWriteCtx *const ctx = test_platform->script;
-  *dst_err = test_write_answer(ctx, fd, completion->action.v.write.data,
-                               dst_res);
+  *dst_err =
+      test_write_answer(ctx, fd, completion->action.v.write.data, dst_res);
   if (ctx->calls == ctx->submit_fails_after) {
     test_platform->submit_fails_for = PlatformActionKindWrite;
     test_platform->submit_fails_with = ErrKindOOM;
@@ -10524,7 +10541,7 @@ static void test(const char *filter) {
 #if defined(PLATFORM_UNIX)
       {"unix_error_from_errno", test_unix_error_from_errno},
 #endif
-      {"arena_valloc", test_arena_valloc},
+      {"arena_init_valloc", test_arena_valloc},
       {"arena_valloc_mocked", test_arena_valloc_mocked},
       {"platform_listen_and_serve_setup_failures",
        test_platform_listen_and_serve_setup_failures},
