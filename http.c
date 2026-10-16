@@ -501,30 +501,29 @@ http_parse_resp(Bytes src, HttpResponseStatusLine *dst_status_line,
   return (Error){0};
 }
 
+// The bytes of a request with no body, in `arena`: they live as long as it
+// does, which lets them outlive a `write_async`.
 __attribute__((unused, warn_unused_result)) static Error
-http_req_write(Platform *platform, i32 fd, HttpMethod method, Bytes url,
-               HttpHeader *headers, usize headers_len, Arena scratch,
-               usize offset, usize *dst_written) {
-  assert(platform);
+http_req_build(HttpMethod method, Bytes url, const HttpHeader *headers,
+               usize headers_len, Arena *arena, Bytes *dst) {
+  assert(arena);
+  assert(dst);
   if (0 != headers_len) {
     assert(headers);
   }
-  assert(dst_written);
 
-  *dst_written = 0;
-
-  BytesBuffer sb = {0};
+  // The longest method, the spaces, the version and the blank line fit in 32.
   usize sb_size = url.len + 32;
   for (usize i = 0; i < headers_len; i++) {
-    HttpHeader h = headers[i];
+    const HttpHeader h = headers[i];
     assert(!__builtin_add_overflow(sb_size, h.key.len, &sb_size));
     assert(!__builtin_add_overflow(sb_size, 2 + 2, &sb_size));
     assert(!__builtin_add_overflow(sb_size, h.value.len, &sb_size));
   }
   assert(!__builtin_add_overflow(sb_size, 4, &sb_size));
-  assert(offset <= sb_size);
 
-  Error err = bytes_buffer_make(sb_size, &scratch, &sb);
+  BytesBuffer sb = {0};
+  const Error err = bytes_buffer_make(sb_size, arena, &sb);
   if (ErrKindNone != err.kind) {
     return err;
   }
@@ -573,29 +572,7 @@ http_req_write(Platform *platform, i32 fd, HttpMethod method, Bytes url,
 
   assert(bytes_buffer_extend_within_cap(&sb, bytes_from_cstr("\r\n")));
 
-  Bytes remaining = bytes_buffer_to_bytes(sb);
-  bytes_advance(&remaining, offset);
-  const usize total_to_write = remaining.len;
-  for (usize _i = 0; _i < total_to_write; _i++) {
-    if (0 == remaining.len) {
-      break;
-    }
+  *dst = bytes_buffer_to_bytes(sb);
 
-    usize written = 0;
-    err = platform->write(platform, fd, remaining, &written);
-    if (ErrKindNone != err.kind) {
-      *dst_written = total_to_write - remaining.len;
-      return err;
-    }
-    assert(written <= remaining.len);
-    bytes_advance(&remaining, written);
-  }
-  assert(total_to_write >= remaining.len);
-  *dst_written = total_to_write - remaining.len;
-
-  if (remaining.len > 0) {
-    return (Error){.kind = ErrKindAgain};
-  }
-
-  return (Error){0};
+  return (Error){.kind = ErrKindNone};
 }

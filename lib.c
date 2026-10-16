@@ -922,6 +922,124 @@ platform_map_file(Platform *platform, PlatformMapFile *ctx, Bytes path,
                               platform_map_file_on_open);
 }
 
+// ---------- Platform: writing a whole buffer ----------
+
+// Write `*remaining` to `fd` with the sync `write`, advancing it past what went
+// out. On `ErrKindAgain` it holds the rest, so calling again resumes.
+__attribute__((unused, warn_unused_result)) static Error
+platform_write_all(Platform *platform, i32 fd, Bytes *remaining) {
+  assert(platform);
+  assert(remaining);
+
+  // Each turn writes at least one byte or returns.
+  const usize turns_max = remaining->len;
+  for (usize i = 0; i < turns_max; i++) {
+    if (0 == remaining->len) {
+      break;
+    }
+
+    usize written = 0;
+    const Error err = platform->write(platform, fd, *remaining, &written);
+    if (ErrKindNone != err.kind) {
+      return err;
+    }
+
+    // A write of nothing would go round for ever.
+    if (0 == written) {
+      return (Error){.kind = ErrKindConnReset};
+    }
+
+    assert(written <= remaining->len);
+    bytes_advance(remaining, written);
+  }
+  assert(0 == remaining->len);
+
+  return (Error){.kind = ErrKindNone};
+}
+
+typedef struct {
+  Platform *platform;
+  PlatformCompletion completion;
+  Bytes remaining;
+  i32 fd;
+  Error err;
+  bool done;
+} PlatformWriteAll;
+
+static void platform_write_all_on_write(PlatformCompletion *completion,
+                                        Error err, usize res);
+
+static void platform_write_all_step(PlatformWriteAll *ctx) {
+  assert(ctx);
+  assert(ctx->platform);
+
+  if (0 == ctx->remaining.len) {
+    ctx->done = true;
+    return;
+  }
+
+  const Error err =
+      ctx->platform->write_async(ctx->platform, &ctx->completion, ctx->fd,
+                                 ctx->remaining, platform_write_all_on_write);
+  if (ErrKindNone != err.kind) {
+    ctx->err = err;
+    ctx->done = true;
+  }
+}
+
+static void platform_write_all_on_write(PlatformCompletion *completion,
+                                        Error err, usize res) {
+  assert(completion);
+
+  PlatformWriteAll *const ctx = completion->ctx;
+  assert(ctx);
+
+  // A signal before any progress is not a failure: reissue the same slice.
+  if (ErrKindInterrupted == err.kind) {
+    platform_write_all_step(ctx);
+    return;
+  }
+
+  if (ErrKindNone != err.kind) {
+    ctx->err = err;
+    ctx->done = true;
+    return;
+  }
+
+  // A write of nothing would go round for ever.
+  if (0 == res) {
+    ctx->err = (Error){.kind = ErrKindConnReset};
+    ctx->done = true;
+    return;
+  }
+
+  assert(res <= ctx->remaining.len);
+  bytes_advance(&ctx->remaining, res);
+
+  platform_write_all_step(ctx);
+}
+
+// Write all of `data` to `fd` with `write_async`. `*ctx` and `data` have to
+// outlive the operation, and `ctx->err` is the answer once `ctx->done`. The
+// descriptor stays open.
+__attribute__((unused, warn_unused_result)) static Error
+platform_write_all_async(Platform *platform, PlatformWriteAll *ctx, i32 fd,
+                         Bytes data) {
+  assert(platform);
+  assert(ctx);
+
+  *ctx = (PlatformWriteAll){.platform = platform, .remaining = data, .fd = fd};
+  ctx->completion.ctx = ctx;
+
+  if (0 == data.len) {
+    ctx->done = true;
+    return (Error){.kind = ErrKindNone};
+  }
+
+  return platform->write_async(platform, &ctx->completion, fd, data,
+                               platform_write_all_on_write);
+}
+
 // ---------- Platform: writing a whole file ----------
 
 typedef struct {
