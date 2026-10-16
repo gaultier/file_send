@@ -70,4 +70,6 @@ esac
 set -x
 
 time "$CC" $CFLAGS $MODE_CFLAGS -o "$BIN" main.c
-time "./$BIN" "$@"
+if ! test -z "$CMD"; then
+    time "./$BIN" "$@"
+fi
