@@ -292,6 +292,8 @@ static void sha256_update(Sha256Ctx *ctx, const u8 *data, usize len) {
   assert(ctx);
   if (0 != len) {
     assert(data);
+  }else {
+	  return;
   }
   assert(ctx->partial_len < SHA256_CBLOCK);
 
@@ -304,6 +306,7 @@ static void sha256_update(Sha256Ctx *ctx, const u8 *data, usize len) {
     const usize wanted = SHA256_CBLOCK - ctx->partial_len;
     const usize taken = len < wanted ? len : wanted;
 
+    assert(remaining);
     memcpy(ctx->partial + ctx->partial_len, remaining, taken);
     ctx->partial_len += (u32)taken;
     remaining += taken;
