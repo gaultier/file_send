@@ -102,45 +102,45 @@ static void test_isize_from_usize(void) {
   assert(ErrKindNone != isize_from_usize(SIZE_MAX, true, &res).kind);
 }
 
-static void test_usize_round_up_multiple_of(void) {
+static void test_usize_next_multiple_of(void) {
   // A multiple of 1 rounds nothing.
-  assert(0 == usize_round_up_multiple_of(0, 1));
-  assert(1 == usize_round_up_multiple_of(1, 1));
-  assert(SIZE_MAX == usize_round_up_multiple_of(SIZE_MAX, 1));
+  assert(0 == usize_next_multiple_of(0, 1));
+  assert(1 == usize_next_multiple_of(1, 1));
+  assert(SIZE_MAX == usize_next_multiple_of(SIZE_MAX, 1));
 
   // Zero is already a multiple of everything.
-  assert(0 == usize_round_up_multiple_of(0, 8));
-  assert(0 == usize_round_up_multiple_of(0, 16384));
+  assert(0 == usize_next_multiple_of(0, 8));
+  assert(0 == usize_next_multiple_of(0, 16384));
 
   // Exact multiples are left alone.
-  assert(8 == usize_round_up_multiple_of(8, 8));
-  assert(16 == usize_round_up_multiple_of(16, 8));
-  assert(16384 == usize_round_up_multiple_of(16384, 16384));
-  assert(32768 == usize_round_up_multiple_of(32768, 16384));
+  assert(8 == usize_next_multiple_of(8, 8));
+  assert(16 == usize_next_multiple_of(16, 8));
+  assert(16384 == usize_next_multiple_of(16384, 16384));
+  assert(32768 == usize_next_multiple_of(32768, 16384));
 
   // Everything else goes up to the next one.
-  assert(8 == usize_round_up_multiple_of(1, 8));
-  assert(8 == usize_round_up_multiple_of(7, 8));
-  assert(16 == usize_round_up_multiple_of(9, 8));
-  assert(16384 == usize_round_up_multiple_of(1, 16384));
-  assert(16384 == usize_round_up_multiple_of(1 * KiB, 16384));
-  assert(16384 == usize_round_up_multiple_of(16383, 16384));
-  assert(32768 == usize_round_up_multiple_of(16385, 16384));
+  assert(8 == usize_next_multiple_of(1, 8));
+  assert(8 == usize_next_multiple_of(7, 8));
+  assert(16 == usize_next_multiple_of(9, 8));
+  assert(16384 == usize_next_multiple_of(1, 16384));
+  assert(16384 == usize_next_multiple_of(1 * KiB, 16384));
+  assert(16384 == usize_next_multiple_of(16383, 16384));
+  assert(32768 == usize_next_multiple_of(16385, 16384));
 
   // The largest input that does not overflow `n + multiple - 1`, which is
   // itself an exact multiple.
-  assert(SIZE_MAX - 8191 == usize_round_up_multiple_of(SIZE_MAX - 8191, 8192));
+  assert(SIZE_MAX - 8191 == usize_next_multiple_of(SIZE_MAX - 8191, 8192));
 
   // The postcondition holds for every power of two, and rounding an already
   // rounded value changes nothing.
   for (usize multiple = 1; multiple <= ((usize)1 << 20); multiple *= 2) {
     for (usize n = 0; n < 4 * multiple; n += (multiple / 4) + 1) {
-      const usize res = usize_round_up_multiple_of(n, multiple);
+      const usize res = usize_next_multiple_of(n, multiple);
 
       assert(res >= n);
       assert(res - n < multiple);
       assert(0 == (res & (multiple - 1)));
-      assert(res == usize_round_up_multiple_of(res, multiple));
+      assert(res == usize_next_multiple_of(res, multiple));
     }
   }
 }
@@ -500,8 +500,10 @@ typedef struct {
 
   // What the arena actually asked for.
   usize alloc_calls;
+  u8 *alloc_ptr;
   usize alloc_bytes_count;
   usize protect_calls;
+  void *protect_first_ptr;
   void *protect_ptr;
   usize protect_size;
 } TestAllocCtx;
@@ -526,7 +528,9 @@ test_alloc_valloc(Platform *platform, usize bytes_count, u8 **res) {
     return (Error){.kind = c->alloc_fails_with};
   }
 
-  return c->real->valloc(c->real, bytes_count, res);
+  const Error err = c->real->valloc(c->real, bytes_count, res);
+  c->alloc_ptr = *res;
+  return err;
 }
 
 __attribute__((warn_unused_result)) static Error
@@ -535,6 +539,9 @@ test_alloc_vprotect_none(Platform *platform, void *ptr, usize size) {
   assert(c);
 
   c->protect_calls += 1;
+  if (1 == c->protect_calls) {
+    c->protect_first_ptr = ptr;
+  }
   c->protect_ptr = ptr;
   c->protect_size = size;
 
@@ -563,7 +570,7 @@ test_env_alloc_make(TestAllocCtx *ctx) {
 static void test_arena_valloc_mocked(void) {
   const usize page_size = 64 * KiB;
 
-  // A single byte still costs a whole page, plus a whole page of guard.
+  // A single byte still costs a whole page, plus a guard page on each side.
   {
     TestAllocCtx ctx = {.page_size = page_size};
     Platform platform = test_env_alloc_make(&ctx);
@@ -573,20 +580,25 @@ static void test_arena_valloc_mocked(void) {
            arena_init_valloc(&platform, 1, ARENA_OPTS_NONE, &arena).kind);
 
     assert(1 == ctx.alloc_calls);
-    assert(2 * page_size == ctx.alloc_bytes_count);
+    assert(3 * page_size == ctx.alloc_bytes_count);
 
-    // The guard is exactly one page, and it begins where the arena ends:
+    // The start guard is the first page of the mapping.
+    assert(2 == ctx.protect_calls);
+    assert((void *)ctx.alloc_ptr == ctx.protect_first_ptr);
+
+    // The end guard is exactly one page, and it begins where the arena ends:
     // that adjacency is the whole point of right-aligning the arena.
-    assert(1 == ctx.protect_calls);
     assert(page_size == ctx.protect_size);
     assert((void *)arena.end == ctx.protect_ptr);
+    assert(ctx.alloc_ptr + 2 * page_size == arena.end);
 
-    // The usable bytes are the mapping minus the guard.
+    // The usable bytes are the mapping minus the guards.
+    assert(arena.start >= ctx.alloc_ptr + page_size);
     assert((usize)(arena.end - arena.start) >= 1);
     assert((usize)(arena.end - arena.start) <= page_size);
   }
 
-  // One byte past a page rounds up to two, so three pages are mapped.
+  // One byte past a page rounds up to two, so four pages are mapped.
   {
     TestAllocCtx ctx = {.page_size = page_size};
     Platform platform = test_env_alloc_make(&ctx);
@@ -595,7 +607,7 @@ static void test_arena_valloc_mocked(void) {
     assert(ErrKindNone ==
            arena_init_valloc(&platform, page_size + 1, ARENA_OPTS_NONE, &arena)
                .kind);
-    assert(3 * page_size == ctx.alloc_bytes_count);
+    assert(4 * page_size == ctx.alloc_bytes_count);
     assert((void *)arena.end == ctx.protect_ptr);
   }
 
@@ -608,7 +620,11 @@ static void test_arena_valloc_mocked(void) {
     assert(ErrKindNone ==
            arena_init_valloc(&platform, 2 * page_size, ARENA_OPTS_NONE, &arena)
                .kind);
-    assert(3 * page_size == ctx.alloc_bytes_count);
+    assert(4 * page_size == ctx.alloc_bytes_count);
+
+    // The arena fills the space between the guards exactly.
+    assert(ctx.alloc_ptr + page_size == arena.start);
+    assert((void *)arena.end == ctx.protect_ptr);
   }
 
   // A failed mapping is reported, not asserted, and leaves the caller's arena
@@ -5438,7 +5454,7 @@ static void test_http_close(HttpHandler *handler) {
 __attribute__((warn_unused_result)) static Arena
 test_http_server_arena(usize inflight_requests_max) {
   const usize handler_chunk =
-      usize_round_up_multiple_of(sizeof(HttpHandler), POOL_ALIGN);
+      usize_next_multiple_of(sizeof(HttpHandler), POOL_ALIGN);
   return test_arena(inflight_requests_max *
                     (handler_chunk + HTTP_HANDLER_ARENA_SIZE));
 }
@@ -5561,7 +5577,7 @@ static void test_http_server_pool(void) {
   // Exactly enough room for both pools.
   {
     const usize handler_chunk =
-        usize_round_up_multiple_of(sizeof(HttpHandler), POOL_ALIGN);
+        usize_next_multiple_of(sizeof(HttpHandler), POOL_ALIGN);
     const usize needed = 2 * handler_chunk + 2 * HTTP_HANDLER_ARENA_SIZE;
     Arena arena = test_arena(needed);
     // Make it exact: `test_arena` may hand out a few bytes more.
@@ -10533,7 +10549,7 @@ static void test(const char *filter) {
   } tests[] = {
       {"char_is_digit_ascii", test_char_is_digit_ascii},
       {"isize_from_usize", test_isize_from_usize},
-      {"usize_round_up_multiple_of", test_usize_round_up_multiple_of},
+      {"usize_next_multiple_of", test_usize_next_multiple_of},
       {"next_power_of_two", test_next_power_of_two},
       {"u8_write_u32_be", test_u8_write_u32_be},
       {"arena_alloc", test_arena_alloc},

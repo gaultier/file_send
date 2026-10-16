@@ -1570,29 +1570,27 @@ arena_init_valloc(Platform *platform, usize bytes_count, ArenaOptions opts,
   }
   assert(arena_memory);
 
-  // Start guard page.
+  // Layout: [start guard page][usable bytes][end guard page].
+  u8 *const usable_memory = arena_memory + page_size;
+  u8 *const end_guard = usable_memory + usable_bytes;
+  assert(end_guard + page_size == arena_memory + os_alloc_size);
+
   assert(ErrKindNone ==
          platform->vprotect_none(platform, arena_memory, page_size).kind);
-
-  // End guard page.
   assert(ErrKindNone ==
-         platform
-             ->vprotect_none(platform, arena_memory + os_alloc_size - page_size,
-                             page_size)
-             .kind);
+         platform->vprotect_none(platform, end_guard, page_size).kind);
 
-  // Right-align the arena against the guard page so that *any* write past
+  // Right-align the arena against the end guard page so that *any* write past
   // `arena.end` faults immediately, then round the start down to the
   // strictest alignment `arena_alloc` hands out. Rounding down can only make
   // the arena slightly larger than requested, never smaller.
   const usize max_align = 8;
-  usize start = (usize)arena_memory + usable_bytes - bytes_count;
+  usize start = (usize)end_guard - bytes_count;
   start -= start % max_align;
-  assert(start >= (usize)arena_memory);
+  assert(start >= (usize)usable_memory);
   assert(0 == start % max_align);
 
-  *res =
-      arena_from_mem((u8 *)start, (usize)arena_memory + usable_bytes - start);
+  *res = arena_from_mem((u8 *)start, (usize)end_guard - start);
   res->opts = opts;
 
   return (Error){.kind = ErrKindNone};
